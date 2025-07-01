@@ -126,6 +126,7 @@ protected:
 				output.okay = true;
 			}
 		}
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 	typedef NoData _CleanupRevenueDonation_input;
@@ -139,6 +140,7 @@ protected:
 
 	PRIVATE_PROCEDURE_WITH_LOCALS(_CleanupRevenueDonation)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		// Make sure we have at most one entry with non-future firstEpoch per destinationPublicKey.
 		// Use that entries are grouped by ID and sorted by firstEpoch.
 		for (locals.idx = 1; locals.idx < state.revenueDonation.capacity(); ++locals.idx)
@@ -165,6 +167,7 @@ protected:
 				}
 			}
 		}
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 public:
@@ -185,6 +188,7 @@ public:
 
 	PUBLIC_PROCEDURE_WITH_LOCALS(SetProposal)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		// TODO: Fee? Burn fee?
 
 		// Set default return values to error
@@ -227,6 +231,7 @@ public:
 		// Try to set proposal (checks originators rights and general validity of input proposal)
 		output.proposalIndex = qpi(state.proposals).setProposal(qpi.originator(), input);
 		output.okay = (output.proposalIndex != INVALID_PROPOSAL_INDEX);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -243,6 +248,7 @@ public:
 
 	PUBLIC_FUNCTION(GetProposalIndices)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		if (input.activeProposals)
 		{
 			// Return proposals that are open for voting in current epoch
@@ -269,6 +275,7 @@ public:
 					break;
 			}
 		}
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -286,8 +293,10 @@ public:
 
 	PUBLIC_FUNCTION(GetProposal)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		output.proposerPubicKey = qpi(state.proposals).proposerId(input.proposalIndex);
 		output.okay = qpi(state.proposals).getProposal(input.proposalIndex, output.proposal);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -297,7 +306,9 @@ public:
 	PUBLIC_PROCEDURE(Vote)
 	{
 		// TODO: Fee? Burn fee?
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		output.okay = qpi(state.proposals).vote(qpi.originator(), input);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -314,10 +325,12 @@ public:
 
 	PUBLIC_FUNCTION(GetVote)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		output.okay = qpi(state.proposals).getVote(
 			input.proposalIndex,
 			qpi(state.proposals).voterIndex(input.voter),
 			output.vote);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -333,8 +346,10 @@ public:
 
 	PUBLIC_FUNCTION(GetVotingResults)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		output.okay = qpi(state.proposals).getVotingSummary(
 			input.proposalIndex, output.results);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -343,7 +358,9 @@ public:
 
 	PUBLIC_FUNCTION(GetRevenueDonation)
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		output = state.revenueDonation;
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -378,6 +395,7 @@ public:
 
 	BEGIN_EPOCH_WITH_LOCALS()
 	{
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 		// Analyze transfer proposal results
 
 		// Iterate all proposals that were open for voting in previous epoch ...
@@ -435,9 +453,11 @@ public:
 				}
 			}
 		}
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 
 		// Cleanup revenue donation table (remove outdated entires)
 		CALL(_CleanupRevenueDonation, locals.cleanupInput, locals.cleanupOutput);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 
 
@@ -456,5 +476,6 @@ public:
 		locals.revenueDonationEntry.millionthAmount = 150 * 1000;
 		locals.revenueDonationEntry.firstEpoch = 123;
 		CALL(_SetRevenueDonationEntry, locals.revenueDonationEntry, locals.success);
+		ASSERT(!isZero(state.revenueDonation.get(0).destinationPublicKey));
 	}
 };
