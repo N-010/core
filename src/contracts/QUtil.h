@@ -1173,6 +1173,7 @@ public:
     struct BEGIN_TICK_locals
     {
         m256i dfPubkey, dfNonce;
+        QUtilLogger logger;
     };
     /*
     * A deterministic delay function
@@ -1182,6 +1183,12 @@ public:
         locals.dfPubkey = qpi.getPrevSpectrumDigest();
         locals.dfNonce = qpi.getPrevComputerDigest();
         state.dfCurrentState = qpi.computeMiningFunction(state.dfMiningSeed, locals.dfPubkey, locals.dfNonce);
+
+        {
+            // TODO: remove this on mainnet - only for debug purposes
+            locals.logger = QUtilLogger{ 0, 0, state.dfCurrentState, NULL_ID, 0, 99};
+            LOG_INFO(locals.logger);
+        }
     }
 
     /*
