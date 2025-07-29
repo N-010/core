@@ -270,6 +270,9 @@
       <Filter>platform</Filter>
     </ClInclude>
     <ClInclude Include="revenue.h" />
+    <ClInclude Include="ticking\txs_pool.h">
+      <Filter>ticking</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="platform">
