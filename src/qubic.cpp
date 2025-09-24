@@ -695,7 +695,15 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                 if (isSolutionGood)
                                 {
                                     // Check the computor idx of this solution.
-                                    unsigned short computorID = (solution->nonce >> 32ULL) % 676ULL;
+                                    unsigned short computorID = 0;
+                                    if (solution->reserve0 == 0)
+                                    {
+                                        computorID = (solution->nonce >> 32ULL) % 676ULL;
+                                    }
+                                    else
+                                    {
+                                        computorID = solution->reserve1 % 676ULL;
+                                    }
 
                                     ACQUIRE(gCustomMiningSharesCountLock);
                                     gCustomMiningSharesCount[computorID]++;
@@ -1239,15 +1247,15 @@ static void processRequestTickTransactions(Peer* peer, RequestResponseHeader* he
 
     if (tickEpoch != 0)
     {
-        unsigned short tickTransactionIndices[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned short numberOfTickTransactions;
+        unsigned int tickTransactionIndices[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int numberOfTickTransactions;
         for (numberOfTickTransactions = 0; numberOfTickTransactions < NUMBER_OF_TRANSACTIONS_PER_TICK; numberOfTickTransactions++)
         {
             tickTransactionIndices[numberOfTickTransactions] = numberOfTickTransactions;
         }
         while (numberOfTickTransactions)
         {
-            const unsigned short index = random(numberOfTickTransactions);
+            const unsigned int index = random(numberOfTickTransactions);
 
             if (!(request->transactionFlags[tickTransactionIndices[index] >> 3] & (1 << (tickTransactionIndices[index] & 7))))
             {
@@ -1376,7 +1384,7 @@ static void processRequestContractIPO(Peer* peer, RequestResponseHeader* header)
     respondContractIPO.contractIndex = request->contractIndex;
     respondContractIPO.tick = system.tick;
     if (request->contractIndex >= contractCount
-        || system.epoch >= contractDescriptions[request->contractIndex].constructionEpoch)
+        || system.epoch != (contractDescriptions[request->contractIndex].constructionEpoch - 1))
     {
         setMem(respondContractIPO.publicKeys, sizeof(respondContractIPO.publicKeys), 0);
         setMem(respondContractIPO.prices, sizeof(respondContractIPO.prices), 0);
@@ -1815,13 +1823,27 @@ static void setNewMiningSeed()
     score->initMiningData(spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1]);
 }
 
-WeekDay gFullExternalStartTime;
-WeekDay gFullExternalEndTime;
+// Total number of external mining event.
+// Can set to zero to disable event 
+static constexpr int gNumberOfFullExternalMiningEvents = sizeof(gFullExternalComputationTimes) > 0 ? sizeof(gFullExternalComputationTimes) / sizeof(gFullExternalComputationTimes[0]) : 0;
+struct FullExternallEvent
+{
+    WeekDay startTime;
+    WeekDay endTime;
+};
+FullExternallEvent* gFullExternalEventTime = NULL;
 static bool gSpecialEventFullExternalComputationPeriod = false; // a flag indicates a special event (period) that the network running 100% external computation
+static WeekDay currentEventEndTime;
 
 
 static bool isFullExternalComputationTime(TimeDate tickDate)
 {
+    // No event
+    if (gNumberOfFullExternalMiningEvents <= 0)
+    {
+        return false;
+    }
+
     // Get current day of the week
     WeekDay tickWeekDay;
     tickWeekDay.hour = tickDate.hour;
@@ -1830,12 +1852,16 @@ static bool isFullExternalComputationTime(TimeDate tickDate)
     tickWeekDay.millisecond = tickDate.millisecond;
     tickWeekDay.dayOfWeek = getDayOfWeek(tickDate.day, tickDate.month, 2000 + tickDate.year);
 
-
-    // Check if the day is in range.
-    if (isWeekDayInRange(tickWeekDay, gFullExternalStartTime, gFullExternalEndTime))
+    // Check if the day is in range. Expect the time is not overlap.
+    for (int i = 0; i < gNumberOfFullExternalMiningEvents; ++i)
     {
-        gSpecialEventFullExternalComputationPeriod = true;
-        return true;
+        if (isWeekDayInRange(tickWeekDay, gFullExternalEventTime[i].startTime, gFullExternalEventTime[i].endTime))
+        {
+            gSpecialEventFullExternalComputationPeriod = true;
+
+            currentEventEndTime = gFullExternalEventTime[i].endTime;
+            return true;
+        }
     }
 
     // When not in range, and the time pass the gFullExternalEndTime. We need to make sure the ending happen
@@ -1844,9 +1870,9 @@ static bool isFullExternalComputationTime(TimeDate tickDate)
     {
         // Check time pass the end time
         TimeDate endTimeDate = tickDate;
-        endTimeDate.hour = gFullExternalEndTime.hour;
-        endTimeDate.minute = gFullExternalEndTime.minute;
-        endTimeDate.second = gFullExternalEndTime.second;
+        endTimeDate.hour = currentEventEndTime.hour;
+        endTimeDate.minute = currentEventEndTime.minute;
+        endTimeDate.second = currentEventEndTime.second;
 
         if (compareTimeDate(tickDate, endTimeDate) == 1)
         {
@@ -1859,61 +1885,9 @@ static bool isFullExternalComputationTime(TimeDate tickDate)
         }
     }
     
-    // The event only happen once
+    // Event is marked as end
     gSpecialEventFullExternalComputationPeriod = false;
     return false;
-}
-
-static void checkAndSwitchMiningPhase(short tickEpoch, TimeDate tickDate)
-{
-    // Check if current time is for full custom mining period
-    static bool fullExternalTimeBegin = false;
-    bool restartTheMiningPhase = false;
-
-    // Make sure the tick is valid
-    if (tickEpoch == system.epoch)
-    {
-        if (isFullExternalComputationTime(tickDate))
-        {
-            // Trigger time
-            if (!fullExternalTimeBegin)
-            {
-                fullExternalTimeBegin = true;
-
-                // Turn off the qubic mining phase
-                score->initMiningData(m256i::zero());
-            }
-        }
-        else // Not in the full external time, just behavior like normal.
-        {
-            // Switch back to qubic mining phase if neccessary
-            if (fullExternalTimeBegin)
-            {
-                if (getTickInMiningPhaseCycle() <= INTERNAL_COMPUTATIONS_INTERVAL)
-                {
-                    setNewMiningSeed();
-                }
-            }
-            fullExternalTimeBegin = false;
-        }
-    }
-    
-    // Incase of the full custom mining is just end. The setNewMiningSeed() will wait for next period of qubic mining phase
-    if (!fullExternalTimeBegin)
-    {
-        const unsigned int r = getTickInMiningPhaseCycle();
-        if (!r)
-        {
-            setNewMiningSeed();
-        }
-        else
-        {
-            if (r == INTERNAL_COMPUTATIONS_INTERVAL + 3) // 3 is added because of 3-tick shift for transaction confirmation
-            {
-                score->initMiningData(m256i::zero());
-            }
-        }
-    }
 }
 
 // Clean up before custom mining phase. Thread-safe function
@@ -1929,47 +1903,88 @@ static void beginCustomMiningPhase()
     gCustomMiningStats.phaseResetAndEpochAccumulate();
 }
 
-static void checkAndSwitchCustomMiningPhase(short tickEpoch, TimeDate tickDate)
+// resetPhase: If true, allows reinitializing mining seed and the custom mining phase flag
+// even when already inside the current phase. These values are normally set only once
+// at the beginning of a phase.
+static void checkAndSwitchMiningPhase(short tickEpoch, TimeDate tickDate, bool resetPhase)
 {
     bool isBeginOfCustomMiningPhase = false;
     char isInCustomMiningPhase = 0;
 
-    // Check if current time is for full custom mining period
-    static bool fullExternalTimeBegin = false;
-
-    // Make sure the tick is valid
-    if (tickEpoch == system.epoch)
-    {
-        if (isFullExternalComputationTime(tickDate))
-        {
-            // Trigger time
-            if (!fullExternalTimeBegin)
-            {
-                fullExternalTimeBegin = true;
-                isBeginOfCustomMiningPhase = true;
-            }
-            isInCustomMiningPhase = 1;
-        }
-        else // Not in the full external time, just behavior like normal.
-        {
-            fullExternalTimeBegin = false;
-        }
-    }
-
-    if (!fullExternalTimeBegin)
+    // When resetting the phase:
+    // - If in the internal mining phase => reset the mining seed for the new epoch
+    // - If in the external (custom) mining phase => reset mining data (counters, etc.)
+    if (resetPhase)
     {
         const unsigned int r = getTickInMiningPhaseCycle();
-        if (r >= INTERNAL_COMPUTATIONS_INTERVAL)
+        if (r < INTERNAL_COMPUTATIONS_INTERVAL)
         {
-            isInCustomMiningPhase = 1;
-            if (r == INTERNAL_COMPUTATIONS_INTERVAL)
-            {
-                isBeginOfCustomMiningPhase = true;
-            }
+            setNewMiningSeed();
         }
         else
         {
-            isInCustomMiningPhase = 0;
+            score->initMiningData(m256i::zero());
+            isBeginOfCustomMiningPhase = true;
+            isInCustomMiningPhase = 1;
+        }
+    }
+    else
+    {
+        // Track whether we’re currently in a full external computation window
+        static bool isInFullExternalTime = false;
+
+        // Make sure the tick is valid and not in the reset phase state
+        if (tickEpoch == system.epoch)
+        {
+            if (isFullExternalComputationTime(tickDate))
+            {
+                // Trigger time
+                if (!isInFullExternalTime)
+                {
+                    isInFullExternalTime = true;
+
+                    // Turn off the qubic mining phase
+                    score->initMiningData(m256i::zero());
+
+                    // Start the custom mining phase
+                    isBeginOfCustomMiningPhase = true;
+                }
+                isInCustomMiningPhase = 1;
+            }
+            else
+            {
+                // Not in the full external phase anymore
+                isInFullExternalTime = false;
+            }
+        }
+
+        // Incase of the full custom mining is just end. The setNewMiningSeed() will wait for next period of qubic mining phase
+        if (!isInFullExternalTime)
+        {
+            const unsigned int r = getTickInMiningPhaseCycle();
+            if (!r)
+            {
+                setNewMiningSeed();
+            }
+            else
+            {
+                if (r == INTERNAL_COMPUTATIONS_INTERVAL + 3) // 3 is added because of 3-tick shift for transaction confirmation
+                {
+                    score->initMiningData(m256i::zero());
+                }
+
+                // Setting for custom mining phase
+                isInCustomMiningPhase = 0;
+                if (r >= INTERNAL_COMPUTATIONS_INTERVAL)
+                {
+                    isInCustomMiningPhase = 1;
+                    // Begin of custom mining phase. Turn the flag on so we can reset some state variables
+                    if (r == INTERNAL_COMPUTATIONS_INTERVAL)
+                    {
+                        isBeginOfCustomMiningPhase = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1983,29 +1998,6 @@ static void checkAndSwitchCustomMiningPhase(short tickEpoch, TimeDate tickDate)
     ACQUIRE(gIsInCustomMiningStateLock);
     gIsInCustomMiningState = isInCustomMiningPhase;
     RELEASE(gIsInCustomMiningStateLock);
-
-}
-
-// a function to check and switch mining phase especially for begin/end epoch event
-// if we are in internal mining phase (no matter beginning or in the middle) => reset mining seed to new spectrum of the new epoch
-// same for external mining phase => reset all counters are needed
-// this function should be called after beginEpoch procedure
-// TODO: merge checkMiningPhaseBeginAndEndEpoch + checkAndSwitchCustomMiningPhase + checkAndSwitchMiningPhase
-static void checkMiningPhaseBeginAndEndEpoch()
-{
-    const unsigned int r = getTickInMiningPhaseCycle();
-    if (r < INTERNAL_COMPUTATIONS_INTERVAL)
-    {
-        setNewMiningSeed();
-    }
-    else
-    {
-        score->initMiningData(m256i::zero());
-        beginCustomMiningPhase();
-        ACQUIRE(gIsInCustomMiningStateLock);
-        gIsInCustomMiningState = 1;
-        RELEASE(gIsInCustomMiningStateLock);
-    }
 }
 
 // Updates the global numberTickTransactions based on the tick data in the tick storage.
@@ -2510,7 +2502,7 @@ static void processTickTransactionContractIPO(const Transaction* transaction, co
     ASSERT(!transaction->amount && transaction->inputSize == sizeof(ContractIPOBid));
     ASSERT(spectrumIndex >= 0);
     ASSERT(contractIndex < contractCount);
-    ASSERT(system.epoch < contractDescriptions[contractIndex].constructionEpoch);
+    ASSERT(system.epoch == (contractDescriptions[contractIndex].constructionEpoch - 1));
 
     ContractIPOBid* contractIPOBid = (ContractIPOBid*)transaction->inputPtr();
     bidInContractIPO(contractIPOBid->price, contractIPOBid->quantity, transaction->sourcePublicKey, spectrumIndex, contractIndex);
@@ -2917,7 +2909,7 @@ static void processTickTransaction(const Transaction* transaction, const m256i& 
                     && contractIndex < contractCount)
                 {
                     // Contract transactions
-                    if (system.epoch < contractDescriptions[contractIndex].constructionEpoch)
+                    if (system.epoch == (contractDescriptions[contractIndex].constructionEpoch - 1))
                     {
                         // IPO
                         if (!transaction->amount
@@ -2926,7 +2918,8 @@ static void processTickTransaction(const Transaction* transaction, const m256i& 
                             processTickTransactionContractIPO(transaction, spectrumIndex, contractIndex);
                         }
                     }
-                    else if (system.epoch < contractDescriptions[contractIndex].destructionEpoch)
+                    else if (system.epoch >= contractDescriptions[contractIndex].constructionEpoch 
+                        && system.epoch < contractDescriptions[contractIndex].destructionEpoch)
                     {
                         // Regular contract procedure invocation
                         moneyFlew = processTickTransactionContractProcedure(transaction, spectrumIndex, contractIndex);
@@ -3063,7 +3056,12 @@ static void processTick(unsigned long long processorNumber)
         // it should never go here
     }
 
-    if (system.tick == system.initialTick)
+    // Ensure to only call INITIALIZE and BEGIN_EPOCH once per epoch:
+    // system.initialTick usually is the first tick of the epoch, except when the network is restarted
+    // from scratch with a new TICK (which shall be indicated by TICK_IS_FIRST_TICK_OF_EPOCH == 0).
+    // However, after seamless epoch transition (system.epoch > EPOCH), system.initialTick is the first
+    // tick of the epoch in any case.
+    if (system.tick == system.initialTick && (TICK_IS_FIRST_TICK_OF_EPOCH || system.epoch > EPOCH))
     {
         PROFILE_NAMED_SCOPE_BEGIN("processTick(): INITIALIZE");
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
@@ -3640,6 +3638,7 @@ static void beginEpoch()
 #endif
 
     logger.reset(system.initialTick);
+
 }
 
 
@@ -5206,24 +5205,7 @@ static void tickProcessor(void*)
 
                                 updateNumberOfTickTransactions();
 
-                                short tickEpoch = 0;
-                                TimeDate currentTickDate;
-                                ts.tickData.acquireLock();
-                                const TickData& td = ts.tickData[currentTickIndex];
-                                currentTickDate.millisecond = td.millisecond;
-                                currentTickDate.second = td.second;
-                                currentTickDate.minute = td.minute;
-                                currentTickDate.hour = td.hour;
-                                currentTickDate.day = td.day;
-                                currentTickDate.month = td.month;
-                                currentTickDate.year = td.year;
-                                tickEpoch = td.epoch == system.epoch ? system.epoch : 0;
-                                ts.tickData.releaseLock();
-
-                                checkAndSwitchMiningPhase(tickEpoch, currentTickDate);
-
-                                checkAndSwitchCustomMiningPhase(tickEpoch, currentTickDate);
-
+                                bool isBeginEpoch = false;
                                 if (epochTransitionState == 1)
                                 {
 
@@ -5242,7 +5224,7 @@ static void tickProcessor(void*)
                                     epochTransitionState = 2;
 
                                     beginEpoch();
-                                    checkMiningPhaseBeginAndEndEpoch();
+                                    isBeginEpoch = true;
 
                                     // Some debug checks that we are ready for the next epoch
                                     ASSERT(system.numberOfSolutions == 0);
@@ -5273,6 +5255,22 @@ static void tickProcessor(void*)
                                     epochTransitionState = 0;
                                 }
                                 ASSERT(epochTransitionWaitingRequestProcessors >= 0 && epochTransitionWaitingRequestProcessors <= nRequestProcessorIDs);
+
+                                short tickEpoch = 0;
+                                TimeDate currentTickDate;
+                                ts.tickData.acquireLock();
+                                const TickData& td = ts.tickData[currentTickIndex];
+                                currentTickDate.millisecond = td.millisecond;
+                                currentTickDate.second = td.second;
+                                currentTickDate.minute = td.minute;
+                                currentTickDate.hour = td.hour;
+                                currentTickDate.day = td.day;
+                                currentTickDate.month = td.month;
+                                currentTickDate.year = td.year;
+                                tickEpoch = td.epoch == system.epoch ? system.epoch : 0;
+                                ts.tickData.releaseLock();
+
+                                checkAndSwitchMiningPhase(tickEpoch, currentTickDate, isBeginEpoch);
 
                                 gTickNumberOfComputors = 0;
                                 gTickTotalNumberOfComputors = 0;
@@ -5691,7 +5689,10 @@ static bool initialize()
     }
     else
     {
-        checkMiningPhaseBeginAndEndEpoch();
+        short tickEpoch = -1; 
+        TimeDate tickDate;
+        setMem((void*)&tickDate, sizeof(TimeDate), 0);
+        checkAndSwitchMiningPhase(tickEpoch, tickDate, true);
     }    
     score->loadScoreCache(system.epoch);
 
@@ -5793,8 +5794,18 @@ static bool initialize()
     emptyTickResolver.lastTryClock = 0;
 
     // Convert time parameters for full custom mining time
-    gFullExternalStartTime = convertWeekTimeFromPackedData(FULL_EXTERNAL_COMPUTATIONS_TIME_START_TIME);
-    gFullExternalEndTime = convertWeekTimeFromPackedData(FULL_EXTERNAL_COMPUTATIONS_TIME_STOP_TIME);
+    if (gNumberOfFullExternalMiningEvents > 0)
+    {
+        if ((!allocPoolWithErrorLog(L"gFullExternalEventTime", gNumberOfFullExternalMiningEvents * sizeof(FullExternallEvent), (void**)&gFullExternalEventTime, __LINE__)))
+        {
+            return false;
+        }
+        for (int i = 0; i < gNumberOfFullExternalMiningEvents; i++)
+        {
+            gFullExternalEventTime[i].startTime = convertWeekTimeFromPackedData(gFullExternalComputationTimes[i][0]);
+            gFullExternalEventTime[i].endTime = convertWeekTimeFromPackedData(gFullExternalComputationTimes[i][1]);
+        }
+    }
 
     return true;
 }
@@ -6934,7 +6945,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         // prepare and send ExchangePublicPeers message
                         ExchangePublicPeers* request = (ExchangePublicPeers*)&peers[i].dataToTransmit[sizeof(RequestResponseHeader)];
                         bool noVerifiedPublicPeers = true;
-                        for (unsigned int k = 0; k < numberOfPublicPeers; k++)
+                        // Only check non-private peers for handshake status
+                        for (unsigned int k = NUMBER_OF_PRIVATE_IP; k < numberOfPublicPeers; k++)
                         {
                             if (publicPeers[k].isHandshaked /*&& publicPeers[k].isFullnode*/)
                             {
@@ -6952,15 +6964,24 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             }
                             else
                             {
-                                // randomly select verified public peers
-                                const unsigned int publicPeerIndex = random(numberOfPublicPeers);
-                                if (publicPeers[publicPeerIndex].isHandshaked /*&& publicPeers[publicPeerIndex].isFullnode*/)
+                                if (NUMBER_OF_PRIVATE_IP < numberOfPublicPeers)
                                 {
-                                    request->peers[j] = publicPeers[publicPeerIndex].address;
+                                    // randomly select verified public peers and discard private IPs
+                                    // first NUMBER_OF_PRIVATE_IP ips are same on both array publicPeers and knownPublicPeers
+                                    const unsigned int publicPeerIndex = NUMBER_OF_PRIVATE_IP + random(numberOfPublicPeers - NUMBER_OF_PRIVATE_IP);
+                                    // share the peer if it's not our private IPs and is handshaked
+                                    if (publicPeers[publicPeerIndex].isHandshaked)
+                                    {
+                                        request->peers[j] = publicPeers[publicPeerIndex].address;
+                                    }
+                                    else
+                                    {
+                                        j--;
+                                    }
                                 }
                                 else
                                 {
-                                    j--;
+                                    request->peers[j].u32 = 0;
                                 }
                             }
                         }

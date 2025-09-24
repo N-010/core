@@ -220,7 +220,7 @@ protected:
 		sint64 price;
 		sint64 numberOfShares;
 
-		char _terminator;
+		sint8 _terminator;
 	} _tradeMessage;
 
 	struct _NumberOfReservedShares_input
@@ -533,8 +533,8 @@ protected:
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
 		}
 
-		if (input.price <= 0
-			|| input.numberOfShares <= 0)
+		if (input.price <= 0 || input.price >= MAX_AMOUNT
+			|| input.numberOfShares <= 0 || input.numberOfShares >= MAX_AMOUNT)
 		{
 			output.addedNumberOfShares = 0;
 		}
@@ -625,7 +625,7 @@ protected:
 								state._elementIndex2 = state._entityOrders.nextElementIndex(state._elementIndex2);
 							}
 
-							state._fee = (state._price * state._assetOrder.numberOfShares * state._tradeFee / 1000000000UL) + 1;
+							state._fee = div<sint64>(state._price * state._assetOrder.numberOfShares * state._tradeFee, 1000000000LL) + 1;
 							state._earnedAmount += state._fee;
 							qpi.transfer(qpi.invocator(), state._price * state._assetOrder.numberOfShares - state._fee);
 							qpi.transferShareOwnershipAndPossession(input.assetName, input.issuer, qpi.invocator(), qpi.invocator(), state._assetOrder.numberOfShares, state._assetOrder.entity);
@@ -659,7 +659,7 @@ protected:
 								state._elementIndex = state._entityOrders.nextElementIndex(state._elementIndex);
 							}
 
-							state._fee = (state._price * input.numberOfShares * state._tradeFee / 1000000000UL) + 1;
+							state._fee = div<sint64>(state._price * input.numberOfShares * state._tradeFee, 1000000000LL) + 1;
 							state._earnedAmount += state._fee;
 							qpi.transfer(qpi.invocator(), state._price * input.numberOfShares - state._fee);
 							qpi.transferShareOwnershipAndPossession(input.assetName, input.issuer, qpi.invocator(), qpi.invocator(), input.numberOfShares, state._assetOrder.entity);
@@ -694,9 +694,9 @@ protected:
 
 	PUBLIC_PROCEDURE(AddToBidOrder)
 	{
-		if (input.price <= 0
-			|| input.numberOfShares <= 0
-			|| qpi.invocationReward() < input.price * input.numberOfShares)
+		if (input.price <= 0  || input.price >= MAX_AMOUNT
+			|| input.numberOfShares <= 0 || input.numberOfShares >= MAX_AMOUNT
+			|| qpi.invocationReward() < smul(input.price, input.numberOfShares))
 		{
 			output.addedNumberOfShares = 0;
 
@@ -707,9 +707,9 @@ protected:
 		}
 		else
 		{
-			if (qpi.invocationReward() > input.price * input.numberOfShares)
+			if (qpi.invocationReward() > smul(input.price, input.numberOfShares))
 			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward() - input.price * input.numberOfShares);
+				qpi.transfer(qpi.invocator(), qpi.invocationReward() - smul(input.price, input.numberOfShares));
 			}
 
 			output.addedNumberOfShares = input.numberOfShares;
@@ -788,7 +788,7 @@ protected:
 							state._elementIndex2 = state._entityOrders.nextElementIndex(state._elementIndex2);
 						}
 
-						state._fee = (state._price * state._assetOrder.numberOfShares * state._tradeFee / 1000000000UL) + 1;
+						state._fee = div<sint64>(state._price * state._assetOrder.numberOfShares * state._tradeFee, 1000000000LL) + 1;
 						state._earnedAmount += state._fee;
 						qpi.transfer(state._assetOrder.entity, state._price * state._assetOrder.numberOfShares - state._fee);
 						qpi.transferShareOwnershipAndPossession(input.assetName, input.issuer, state._assetOrder.entity, state._assetOrder.entity, state._assetOrder.numberOfShares, qpi.invocator());
@@ -826,7 +826,7 @@ protected:
 							state._elementIndex = state._entityOrders.nextElementIndex(state._elementIndex);
 						}
 
-						state._fee = (state._price * input.numberOfShares * state._tradeFee / 1000000000UL) + 1;
+						state._fee = div<sint64>(state._price * input.numberOfShares * state._tradeFee, 1000000000LL) + 1;
 						state._earnedAmount += state._fee;
 						qpi.transfer(state._assetOrder.entity, state._price * input.numberOfShares - state._fee);
 						qpi.transferShareOwnershipAndPossession(input.assetName, input.issuer, state._assetOrder.entity, state._assetOrder.entity, input.numberOfShares, qpi.invocator());
@@ -869,8 +869,8 @@ protected:
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
 		}
 
-		if (input.price <= 0
-			|| input.numberOfShares <= 0)
+		if (input.price <= 0 || input.price >= MAX_AMOUNT
+			|| input.numberOfShares <= 0 || input.numberOfShares >= MAX_AMOUNT)
 		{
 			output.removedNumberOfShares = 0;
 		}
@@ -956,8 +956,8 @@ protected:
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
 		}
 
-		if (input.price <= 0
-			|| input.numberOfShares <= 0)
+		if (input.price <= 0 || input.price >= MAX_AMOUNT
+			|| input.numberOfShares <= 0 || input.numberOfShares >= MAX_AMOUNT)
 		{
 			output.removedNumberOfShares = 0;
 		}
