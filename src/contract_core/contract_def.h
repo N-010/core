@@ -215,10 +215,10 @@
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
 
-#define RANDBEACON_CONTRACT_INDEX 21
-#define CONTRACT_INDEX RANDBEACON_CONTRACT_INDEX
-#define CONTRACT_STATE_TYPE RANDBEACON
-#define CONTRACT_STATE2_TYPE RANDBEACON2
+#define RBEACON_CONTRACT_INDEX 21
+#define CONTRACT_INDEX RBEACON_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE RBEACON
+#define CONTRACT_STATE2_TYPE RBEACON2
 #include "contracts/RandBeacon.h"
 
 // new contracts should be added above this line
@@ -329,7 +329,7 @@ constexpr struct ContractDescription
     {"QIP", 189, 10000, sizeof(QIP)}, // proposal in epoch 187, IPO in 188, construction and first use in 189
     {"QRAFFLE", 192, 10000, sizeof(QRAFFLE)}, // proposal in epoch 190, IPO in 191, construction and first use in 192
     {"QRWA", 197, 10000, sizeof(QRWA)}, // proposal in epoch 195, IPO in 196, construction and first use in 197
-    {"RANDBEACON", 199, 10000, sizeof(RANDBEACON)}, // proposal in epoch 197, IPO in 198, construction and first use in 199
+    {"RBEACON", 199, 10000, sizeof(RBEACON)}, // proposal in epoch 197, IPO in 198, construction and first use in 199
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     {"TESTEXA", 138, 10000, sizeof(TESTEXA)},
@@ -446,7 +446,7 @@ static void initializeContracts()
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QIP);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QRAFFLE);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QRWA);
-    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(RANDBEACON);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(RBEACON);
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXA);

@@ -25,9 +25,11 @@ constexpr uint32 RBEACON_MAX_ROUNDS = 256;         // Max rounds in history
 constexpr uint32 RBEACON_K_WINNERS = 20;           // Number of winners for rewards
 constexpr uint32 RBEACON_REWARD_PERCENT = 80;      // % of fees to operators
 constexpr uint32 RBEACON_TREASURY_PERCENT = 20;    // % of fees to treasury
+constexpr uint16 RBEACON_MIN_REVEALS = 2;          // Minimum reveals required to use round random
+constexpr uint32 RBEACON_TOPK_CAPACITY = 32;       // Must be power of 2, >= RBEACON_K_WINNERS
 
 // Placeholder for future extensions
-struct RANDBEACON2
+struct RBEACON2
 {
 };
 
@@ -40,7 +42,7 @@ struct RANDBEACON2
  *  3. Tick 0 of next round: Finalize - generate random, forfeit unrevealed deposits
  *  4. External SC calls GetRandomWithFee - triggers reward distribution to K winners
  */
-struct RANDBEACON : public ContractBase
+struct RBEACON : public ContractBase
 {
 public:
     /**
@@ -57,7 +59,8 @@ public:
         HASH_MISMATCH = 6,
         ROUND_NOT_FINALIZED = 7,
         ROUND_NOT_FOUND = 8,
-        MAX_OPERATORS_REACHED = 9
+        MAX_OPERATORS_REACHED = 9,
+        INSUFFICIENT_REVEALS = 10
     };
 
     /**
@@ -69,6 +72,19 @@ public:
         m256i seed;              // Revealed seed (zero until revealed)
         uint64 deposit;       // Locked deposit amount
         bit revealed;         // True if successfully revealed
+    };
+
+    struct CommitHashInput
+    {
+        m256i seed;
+        m256i salt;
+        m256i round;
+    };
+
+    struct WinnerHashInput
+    {
+        m256i random;
+        id operatorAddr;
     };
 
     /**
@@ -89,7 +105,7 @@ public:
 
     struct Commit_input
     {
-        m256i commitHash;  // K12(seed || salt || roundId)
+        m256i commitHash;  // K12(CommitHashInput{seed, salt, roundId})
     };
 
     struct Commit_output
@@ -118,7 +134,7 @@ public:
     {
         OperatorCommit record;
         m256i computedHash;
-        m256i hashInput;
+        CommitHashInput hashInput;
         bit found;
     };
 
@@ -140,9 +156,15 @@ public:
         uint64 treasuryAmount;
         uint64 rewardPerWinner;
         uint32 winnersCount;
+        uint32 topCount;
+        uint32 worstIndex;
         sint64 i;
         sint64 j;
         id operatorAddr;
+        m256i currentScore;
+        WinnerHashInput winnerHashInput;
+        Array<id, RBEACON_TOPK_CAPACITY> winnerAddrs;
+        Array<m256i, RBEACON_TOPK_CAPACITY> winnerScores;
         bit found;
     };
 
@@ -264,11 +286,7 @@ public:
                 locals.i = state.commits.nextElementIndex(locals.i);
             }
 
-            // If no reveals, use fallback: hash of previous random
-            if (state.revealedCount == 0)
-            {
-                locals.combinedSeeds = qpi.K12(state.previousRoundRandom);
-            }
+            // If no reveals, keep combinedSeeds at NULL_ID; round will be unusable below
 
             // Step 2: Store round data in history
             locals.roundData.roundId = state.currentRoundId;
@@ -282,7 +300,10 @@ public:
             state.rounds.set(state.currentRoundId, locals.roundData);
 
             // Update previous random for next fallback
-            state.previousRoundRandom = locals.combinedSeeds;
+            if (state.revealedCount >= RBEACON_MIN_REVEALS)
+            {
+                state.previousRoundRandom = locals.combinedSeeds;
+            }
 
             // Step 3: Clear state for new round
             state.commits.reset();
@@ -379,11 +400,10 @@ public:
         }
 
         // Verify hash: K12(seed || salt || roundId) == commitHash
-        // We concatenate by XORing parts for simplicity (proper concat would need struct)
-        locals.hashInput.u64._0 = input.seed.u64._0 ^ input.salt.u64._0 ^ state.currentRoundId;
-        locals.hashInput.u64._1 = input.seed.u64._1 ^ input.salt.u64._1;
-        locals.hashInput.u64._2 = input.seed.u64._2 ^ input.salt.u64._2;
-        locals.hashInput.u64._3 = input.seed.u64._3 ^ input.salt.u64._3;
+        locals.hashInput.seed = input.seed;
+        locals.hashInput.salt = input.salt;
+        locals.hashInput.round = NULL_ID;
+        locals.hashInput.round.u64._0 = state.currentRoundId;
         locals.computedHash = qpi.K12(locals.hashInput);
 
         if (locals.computedHash != locals.record.commitHash)
@@ -436,13 +456,23 @@ public:
             return;
         }
 
+        if (locals.roundData.revealedCount < RBEACON_MIN_REVEALS)
+        {
+            output.returnCode = static_cast<uint8>(EReturnCode::INSUFFICIENT_REVEALS);
+            if (qpi.invocationReward() > 0)
+            {
+                qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            }
+            return;
+        }
+
         output.randomValue = locals.roundData.roundRandom;
 
         // Process fee if any
         if (qpi.invocationReward() > 0)
         {
             // Split fee: 80% to reward pool, 20% to treasury
-            locals.operatorReward = div<uint64>(qpi.invocationReward() * RBEACON_REWARD_PERCENT, 100ULL);
+            locals.operatorReward = div<uint64>(smul(qpi.invocationReward() , static_cast<sint64>(RBEACON_REWARD_PERCENT)), 100ULL);
             locals.treasuryAmount = qpi.invocationReward() - locals.operatorReward;
 
             state.treasury += locals.treasuryAmount;
@@ -458,20 +488,58 @@ public:
                     locals.winnersCount = RBEACON_K_WINNERS;
                 }
 
-                // For simplicity in this version, distribute equally to first winnersCount revealed operators
-                // A proper implementation would compute scores and sort
-                locals.rewardPerWinner = div<uint64>(locals.roundData.rewardPool, (uint64)locals.winnersCount);
-
-                if (locals.rewardPerWinner > 0)
+                // Select Top-K winners by score = K12(roundRandom || operatorAddr)
+                locals.i = state.revealedOperators.nextElementIndex(NULL_INDEX);
+                while (locals.i != NULL_INDEX)
                 {
-                    locals.j = 0;
-                    locals.i = state.revealedOperators.nextElementIndex(NULL_INDEX);
-                    while (locals.i != NULL_INDEX && locals.j < locals.winnersCount)
+                    locals.operatorAddr = state.revealedOperators.key(locals.i);
+                    locals.winnerHashInput.random = locals.roundData.roundRandom;
+                    locals.winnerHashInput.operatorAddr = locals.operatorAddr;
+                    locals.currentScore = qpi.K12(locals.winnerHashInput);
+
+                    if (locals.topCount < locals.winnersCount)
                     {
-                        locals.operatorAddr = state.revealedOperators.key(locals.i);
-                        qpi.transfer(locals.operatorAddr, locals.rewardPerWinner);
-                        locals.j++;
-                        locals.i = state.revealedOperators.nextElementIndex(locals.i);
+                        locals.winnerAddrs.set(locals.topCount, locals.operatorAddr);
+                        locals.winnerScores.set(locals.topCount, locals.currentScore);
+                        locals.topCount++;
+                    }
+                    else
+                    {
+                        // Find worst (highest) score in current Top-K
+                        locals.worstIndex = 0;
+                        locals.j = 1;
+                        while (locals.j < locals.topCount)
+                        {
+                            if (isScoreLess(locals.winnerScores.get(locals.worstIndex), locals.winnerScores.get(locals.j)))
+                            {
+                                locals.worstIndex = static_cast<uint32>(locals.j);
+                            }
+                            locals.j++;
+                        }
+
+                        // Replace worst if current score is better (lower)
+                        if (isScoreLess(locals.currentScore, locals.winnerScores.get(locals.worstIndex)))
+                        {
+                            locals.winnerAddrs.set(locals.worstIndex, locals.operatorAddr);
+                            locals.winnerScores.set(locals.worstIndex, locals.currentScore);
+                        }
+                    }
+
+                    locals.i = state.revealedOperators.nextElementIndex(locals.i);
+                }
+
+                if (locals.topCount > 0)
+                {
+                    locals.rewardPerWinner = div<uint64>(locals.roundData.rewardPool, (uint64)locals.topCount);
+                    if (locals.rewardPerWinner > 0)
+                    {
+                        locals.j = 0;
+                        while (locals.j < locals.topCount)
+                        {
+                            locals.operatorAddr = locals.winnerAddrs.get(static_cast<uint32>(locals.j));
+                            qpi.transfer(locals.operatorAddr, locals.rewardPerWinner);
+                            locals.j++;
+                        }
                     }
                 }
 
@@ -495,6 +563,12 @@ public:
         if (!locals.found)
         {
             output.returnCode = static_cast<uint8>(EReturnCode::ROUND_NOT_FOUND);
+            return;
+        }
+
+        if (locals.roundData.revealedCount < RBEACON_MIN_REVEALS)
+        {
+            output.returnCode = static_cast<uint8>(EReturnCode::INSUFFICIENT_REVEALS);
             return;
         }
 
@@ -552,4 +626,13 @@ protected:
 
     // For fallback random generation
     m256i previousRoundRandom;
+
+private:
+    static inline bit isScoreLess(const m256i& a, const m256i& b)
+    {
+        if (a.u64._3 != b.u64._3) return a.u64._3 < b.u64._3;
+        if (a.u64._2 != b.u64._2) return a.u64._2 < b.u64._2;
+        if (a.u64._1 != b.u64._1) return a.u64._1 < b.u64._1;
+        return a.u64._0 < b.u64._0;
+    }
 };
