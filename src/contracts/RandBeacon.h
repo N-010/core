@@ -92,13 +92,13 @@ public:
 	 */
 	struct RoundData
 	{
-		m256i roundRandom;      // Generated random for this round
-		uint64 rewardPool;      // Accumulated fees for rewards
-		uint32 roundId;         // Round identifier
-		uint16 operatorCount;   // Total operators who committed
-		uint16 revealedCount;   // Operators who successfully revealed
-		bit finalized;          // Round has been finalized
-		bit rewardsDistributed; // Rewards have been paid out
+		m256i roundRandom;       // Generated random for this round
+		uint64 rewardPool;       // Accumulated fees for rewards
+		uint32 roundId;          // Round identifier
+		uint16 operatorCount;    // Total operators who committed
+		uint16 revealedCount;    // Operators who successfully revealed
+		bool finalized;          // Round has been finalized
+		bool rewardsDistributed; // Rewards have been paid out
 	};
 
 	//---- Input/Output structures ----
@@ -135,7 +135,7 @@ public:
 		OperatorCommit record;
 		m256i computedHash;
 		CommitHashInput hashInput;
-		bit found;
+		bool found;
 	};
 
 	struct GetRandomWithFee_input
@@ -165,7 +165,7 @@ public:
 		WinnerHashInput winnerHashInput;
 		Array<id, RBEACON_TOPK_CAPACITY> winnerAddrs;
 		Array<m256i, RBEACON_TOPK_CAPACITY> winnerScores;
-		bit found;
+		bool found;
 	};
 
 	struct GetRandom_input
@@ -182,7 +182,7 @@ public:
 	struct GetRandom_locals
 	{
 		RoundData roundData;
-		bit found;
+		bool found;
 	};
 
 	struct GetRoundInfo_input
@@ -197,15 +197,15 @@ public:
 		uint64 rewardPool;
 		uint16 operatorCount;
 		uint16 revealedCount;
-		bit finalized;
-		bit rewardsDistributed;
+		bool finalized;
+		bool rewardsDistributed;
 		uint8 returnCode;
 	};
 
 	struct GetRoundInfo_locals
 	{
 		RoundData roundData;
-		bit found;
+		bool found;
 	};
 
 	struct GetCurrentRound_input
@@ -216,8 +216,8 @@ public:
 	{
 		uint32 roundId;
 		uint32 roundTick;
-		bit isCommitPhase;
-		bit isRevealPhase;
+		bool isCommitPhase;
+		bool isRevealPhase;
 		uint16 operatorCount;
 		uint16 revealedCount;
 	};
@@ -248,7 +248,6 @@ public:
 		state.currentRoundId = 0;
 		state.treasury = 0;
 		state.previousRoundRandom = NULL_ID;
-		state.revealedCount = 0;
 	}
 
 	/**
@@ -296,7 +295,7 @@ public:
 		locals.roundData.roundId = state.currentRoundId;
 		locals.roundData.roundRandom = locals.combinedSeeds;
 		locals.roundData.operatorCount = static_cast<uint16>(state.commits.population());
-		locals.roundData.revealedCount = state.revealedCount;
+		locals.roundData.revealedCount = state.revealedOperators.population();
 		locals.roundData.rewardPool = 0;
 		locals.roundData.finalized = true;
 		locals.roundData.rewardsDistributed = false;
@@ -304,7 +303,7 @@ public:
 		state.rounds.set(state.currentRoundId, locals.roundData);
 
 		// Update previous random for next fallback
-		if (state.revealedCount >= RBEACON_MIN_REVEALS)
+		if (state.revealedOperators.population() >= RBEACON_MIN_REVEALS)
 		{
 			state.previousRoundRandom = locals.combinedSeeds;
 		}
@@ -312,7 +311,6 @@ public:
 		// Step 3: Clear state for new round
 		state.commits.reset();
 		state.revealedOperators.reset();
-		state.revealedCount = 0;
 
 		// Update current round ID
 		state.currentRoundId = locals.newRoundId;
@@ -378,6 +376,11 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(Reveal)
 	{
+		if (qpi.invocationReward() > 0)
+		{
+			qpi.transfer(qpi.invocator(), qpi.invocationReward());
+		}
+
 		output.returnCode = static_cast<uint8>(EReturnCode::SUCCESS);
 
 		// Check we're in reveal phase (ticks COMMIT_END to ROUND_LENGTH-1)
@@ -411,8 +414,10 @@ public:
 
 		if (locals.computedHash != locals.record.commitHash)
 		{
+			state.treasury += locals.record.deposit;
 			output.returnCode = static_cast<uint8>(EReturnCode::HASH_MISMATCH);
 			state.commits.removeByKey(qpi.invocator());
+			state.commits.cleanupIfNeeded();
 			return;
 		}
 
@@ -423,7 +428,6 @@ public:
 
 		// Add to revealed operators list
 		state.revealedOperators.add(qpi.invocator());
-		state.revealedCount++;
 
 		// Return deposit
 		qpi.transfer(qpi.invocator(), locals.record.deposit);
@@ -611,7 +615,7 @@ public:
 		output.isCommitPhase = (output.roundTick < RBEACON_COMMIT_END);
 		output.isRevealPhase = (output.roundTick >= RBEACON_COMMIT_END);
 		output.operatorCount = static_cast<uint16>(state.commits.population());
-		output.revealedCount = state.revealedCount;
+		output.revealedCount = state.revealedOperators.population();
 	}
 
 protected:
@@ -619,7 +623,6 @@ protected:
 	HashMap<id, OperatorCommit, RBEACON_MAX_OPERATORS> commits;
 	HashSet<id, RBEACON_MAX_OPERATORS> revealedOperators;
 	uint32 currentRoundId;
-	uint16 revealedCount;
 
 	// Historical data - directly maps roundId to RoundData
 	HashMap<uint32, RoundData, RBEACON_MAX_ROUNDS> rounds;
