@@ -3,8 +3,8 @@
  * @brief Random Beacon contract: decentralized randomness beacon with commit-reveal scheme.
  *
  * This contract implements a multi-participant commit-reveal random number generator:
- *  - Operators commit hash(seed || salt || round_id) during commit phase (ticks 0-49)
- *  - Operators reveal seed+salt during reveal phase (ticks 50-99)
+ *  - Operators commit hash(seed || salt || round_id) during commit phase (ticks 0-29)
+ *  - Operators reveal seed+salt during reveal phase (ticks 30-59)
  *  - Random is generated as XOR of all revealed seeds at round boundary
  *  - K winners selected deterministically via hash(random || address) for rewards
  *  - External SCs can request random via GetRandomWithFee, triggering reward distribution
@@ -13,20 +13,20 @@
 using namespace QPI;
 
 // Round configuration
-constexpr uint32 RBEACON_ROUND_LENGTH = 60;                       // Round length in ticks
-constexpr uint32 RBEACON_COMMIT_END = RBEACON_ROUND_LENGTH * 0.5; // Commit phase: ticks 0 to COMMIT_END-1
-constexpr uint64 RBEACON_DEPOSIT = 100000;                        // Operator deposit (refundable on reveal)
+constexpr uint32 RBEACON_ROUND_LENGTH = 60; // Round length in ticks
+constexpr uint32 RBEACON_COMMIT_END = 30;   // Commit phase: ticks 0 to COMMIT_END-1
+constexpr uint64 RBEACON_DEPOSIT = 100000;  // Operator deposit (refundable on reveal)
 
 // Capacity limits (must be powers of 2)
 constexpr uint32 RBEACON_MAX_OPERATORS = 512; // Max operators per round
 constexpr uint32 RBEACON_MAX_ROUNDS = 256;    // Max rounds in history
 
 // Reward configuration
-constexpr uint32 RBEACON_K_WINNERS = 20;      // Number of winners for rewards
-constexpr uint32 RBEACON_REWARD_PERCENT = 90; // % of fees to operators
-constexpr uint32 RBEACON_DEV_PERCENT = 10;    // % of fees to DEV
-constexpr uint16 RBEACON_MIN_REVEALS = 2;     // Minimum reveals required to use round random
-constexpr uint32 RBEACON_TOPK_CAPACITY = 32;  // Must be power of 2, >= RBEACON_K_WINNERS
+constexpr uint32 RBEACON_K_WINNERS = 20;                         // Number of winners for rewards
+constexpr uint32 RBEACON_REWARD_PERCENT = 90;                    // % of fees to operators
+constexpr uint32 RBEACON_DEV_PERCENT = 10;                       // % of fees to DEV
+constexpr uint16 RBEACON_MIN_REVEALS = 2;                        // Minimum reveals required to use round random
+constexpr uint32 RBEACON_TOPK_CAPACITY = RBEACON_K_WINNERS + 12; // Must be power of 2, >= RBEACON_K_WINNERS
 
 constexpr uint32 RBEACON_FEE = 200000; // Fee for GetRandomWithFee
 
@@ -42,8 +42,8 @@ struct RBEACON2
  * @brief Main contract implementing the random beacon mechanics.
  *
  * Lifecycle per round:
- *  1. Ticks 0-49: COMMIT phase - operators submit commitHash + deposit
- *  2. Ticks 50-99: REVEAL phase - operators reveal seed+salt, get deposit back
+ *  1. Ticks 0-29: COMMIT phase - operators submit commitHash + deposit
+ *  2. Ticks 30-59: REVEAL phase - operators reveal seed+salt, get deposit back
  *  3. Tick 0 of next round: Finalize - generate random, forfeit unrevealed deposits
  *  4. External SC calls GetRandomWithFee - triggers reward distribution to K winners
  */
@@ -173,23 +173,6 @@ public:
 		bool found;
 	};
 
-	struct GetRandom_input
-	{
-		uint32 roundId;
-	};
-
-	struct GetRandom_output
-	{
-		m256i randomValue;
-		uint8 returnCode;
-	};
-
-	struct GetRandom_locals
-	{
-		RoundData roundData;
-		bool found;
-	};
-
 	struct GetRoundInfo_input
 	{
 		uint32 roundId;
@@ -239,7 +222,6 @@ public:
 
 	REGISTER_USER_FUNCTIONS_AND_PROCEDURES()
 	{
-		REGISTER_USER_FUNCTION(GetRandom, 1);
 		REGISTER_USER_FUNCTION(GetRoundInfo, 2);
 		REGISTER_USER_FUNCTION(GetCurrentRound, 3);
 		REGISTER_USER_PROCEDURE(Commit, 1);
@@ -247,11 +229,7 @@ public:
 		REGISTER_USER_PROCEDURE(GetRandomWithFee, 3);
 	}
 
-	INITIALIZE()
-	{
-		state.currentRoundId = 0;
-		state.previousRoundRandom = NULL_ID;
-	}
+	INITIALIZE() { state.currentRoundId = 0; }
 
 	/**
 	 * @brief BEGIN_TICK handles round transitions and finalization
@@ -303,12 +281,6 @@ public:
 		locals.roundData.rewardsDistributed = false;
 
 		state.rounds.set(state.currentRoundId, locals.roundData);
-
-		// Update previous random for next fallback
-		if (state.revealedOperators.population() >= RBEACON_MIN_REVEALS)
-		{
-			state.previousRoundRandom = locals.combinedSeeds;
-		}
 
 		// Step 3: Clear state for new round
 		state.commits.reset();
@@ -575,30 +547,6 @@ public:
 	}
 
 	/**
-	 * @brief GetRandom: Query random for a round (no fee, no rewards)
-	 */
-	PUBLIC_FUNCTION_WITH_LOCALS(GetRandom)
-	{
-		output.returnCode = static_cast<uint8>(EReturnCode::SUCCESS);
-
-		// Find round in history
-		locals.found = state.rounds.get(input.roundId, locals.roundData);
-		if (!locals.found)
-		{
-			output.returnCode = static_cast<uint8>(EReturnCode::ROUND_NOT_FOUND);
-			return;
-		}
-
-		if (locals.roundData.revealedOperators.population() < RBEACON_MIN_REVEALS)
-		{
-			output.returnCode = static_cast<uint8>(EReturnCode::INSUFFICIENT_REVEALS);
-			return;
-		}
-
-		output.randomValue = locals.roundData.roundRandom;
-	}
-
-	/**
 	 * @brief GetRoundInfo: Query full info about a specific round
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetRoundInfo)
@@ -641,9 +589,6 @@ protected:
 
 	// Historical data - directly maps roundId to RoundData
 	HashMap<uint32, RoundData, RBEACON_MAX_ROUNDS> rounds;
-
-	// For fallback random generation
-	m256i previousRoundRandom;
 
 protected:
 	static bool isScoreLess(const m256i& a, const m256i& b)

@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <vector>
 
-static constexpr uint16 FUNCTION_INDEX_GET_RANDOM = 1;
 static constexpr uint16 FUNCTION_INDEX_GET_ROUND_INFO = 2;
 static constexpr uint16 FUNCTION_INDEX_GET_CURRENT_ROUND = 3;
 
@@ -20,7 +19,6 @@ public:
 	uint64 getRevealedOperatorsCount() const { return revealedOperators.population(); }
 	uint16 getRevealedCount() const { return static_cast<uint16>(revealedOperators.population()); }
 	uint64 getRoundCount() const { return rounds.population(); }
-	m256i getPreviousRoundRandom() const { return previousRoundRandom; }
 	bool hasCommit(const id& operatorAddr) const { return commits.contains(operatorAddr); }
 	bool getCommit(const id& operatorAddr, OperatorCommit& out) const { return commits.get(operatorAddr, out); }
 	bool hasRevealedOperator(const id& operatorAddr) const { return revealedOperators.contains(operatorAddr); }
@@ -80,15 +78,6 @@ public:
 		input.salt = salt;
 		RBEACON::Reveal_output output{};
 		invokeUserProcedure(RBEACON_CONTRACT_INDEX, PROCEDURE_INDEX_REVEAL, input, output, user, 0);
-		return output;
-	}
-
-	RBEACON::GetRandom_output getRandom(uint32 roundId)
-	{
-		RBEACON::GetRandom_input input{};
-		input.roundId = roundId;
-		RBEACON::GetRandom_output output{};
-		callFunction(RBEACON_CONTRACT_INDEX, FUNCTION_INDEX_GET_RANDOM, input, output);
 		return output;
 	}
 
@@ -178,7 +167,6 @@ TEST(ContractRBeacon, InitializeStateDefaults)
 
 	auto* state = rb.state();
 	EXPECT_EQ(state->getCurrentRoundId(), 0U);
-	EXPECT_EQ(state->getPreviousRoundRandom(), NULL_ID);
 	EXPECT_EQ(state->getCommitCount(), 0ULL);
 	EXPECT_EQ(state->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(state->getRevealedCount()), 0U);
@@ -322,11 +310,6 @@ TEST(ContractRBeacon, CommitRevealFinalize)
 
 	const m256i expectedRandom = xorSeeds(seeds);
 	EXPECT_EQ(roundInfo.roundRandom, expectedRandom);
-	EXPECT_EQ(rb.state()->getPreviousRoundRandom(), expectedRandom);
-
-	auto randomOut = rb.getRandom(roundId);
-	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
-	EXPECT_EQ(randomOut.randomValue, expectedRandom);
 }
 
 TEST(ContractRBeacon, InsufficientReveals)
@@ -352,10 +335,6 @@ TEST(ContractRBeacon, InsufficientReveals)
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
-	EXPECT_EQ(rb.state()->getPreviousRoundRandom(), NULL_ID);
-
-	auto randomOut = rb.getRandom(roundId);
-	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INSUFFICIENT_REVEALS));
 
 	const id caller = makeUser();
 	static constexpr uint64 fee = 100000;
@@ -623,7 +602,6 @@ TEST(ContractRBeacon, FinalizeForfeitsUnrevealedDeposit)
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
-	EXPECT_EQ(rb.state()->getPreviousRoundRandom(), NULL_ID);
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
@@ -637,9 +615,6 @@ TEST(ContractRBeacon, RoundNotFoundErrors)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 missingRound = 999;
-	auto randomOut = rb.getRandom(missingRound);
-	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::ROUND_NOT_FOUND));
-
 	auto roundInfo = rb.getRoundInfo(missingRound);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::ROUND_NOT_FOUND));
 
@@ -771,13 +746,9 @@ TEST(ContractRBeacon, ReadOnlyFunctionsDoNotMutateState)
 	const uint64 devBalanceBefore = getBalance(DEV_ID);
 	const uint32 currentRoundBefore = state->getCurrentRoundId();
 	const uint64 roundCountBefore = state->getRoundCount();
-	const m256i prevRandomBefore = state->getPreviousRoundRandom();
 
 	auto currentRound = rb.getCurrentRound();
 	EXPECT_EQ(currentRound.roundId, currentRoundBefore);
-
-	auto randomOut = rb.getRandom(42);
-	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::ROUND_NOT_FOUND));
 
 	auto infoOut = rb.getRoundInfo(42);
 	EXPECT_EQ(infoOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::ROUND_NOT_FOUND));
@@ -788,7 +759,6 @@ TEST(ContractRBeacon, ReadOnlyFunctionsDoNotMutateState)
 	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore);
 	EXPECT_EQ(state->getCurrentRoundId(), currentRoundBefore);
 	EXPECT_EQ(state->getRoundCount(), roundCountBefore);
-	EXPECT_EQ(state->getPreviousRoundRandom(), prevRandomBefore);
 	EXPECT_TRUE(state->hasCommit(operatorAddr));
 }
 
@@ -808,11 +778,7 @@ TEST(ContractRBeacon, FinalizeWithNoReveals)
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
-	EXPECT_EQ(rb.state()->getPreviousRoundRandom(), NULL_ID);
 	EXPECT_EQ(rb.state()->getRoundCount(), 1ULL);
-
-	auto randomOut = rb.getRandom(roundId);
-	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INSUFFICIENT_REVEALS));
 }
 
 TEST(ContractRBeacon, CommitZeroDeposit)
