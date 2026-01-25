@@ -15,35 +15,22 @@ static constexpr uint16 PROCEDURE_INDEX_GET_RANDOM_WITH_FEE = 3;
 class RBeaconChecker : public RBEACON
 {
 public:
-	void restoreRevealedOperators(const std::vector<id>& operators)
-	{
-		revealedOperators.reset();
-		for (const auto& op : operators)
-		{
-			revealedOperators.add(op);
-		}
-	}
-
-	uint64 getTreasury() const { return treasury; }
 	uint32 getCurrentRoundId() const { return currentRoundId; }
-	uint16 getRevealedCount() const { return revealedCount; }
 	uint64 getCommitCount() const { return commits.population(); }
 	uint64 getRevealedOperatorsCount() const { return revealedOperators.population(); }
+	uint16 getRevealedCount() const { return static_cast<uint16>(revealedOperators.population()); }
 	uint64 getRoundCount() const { return rounds.population(); }
 	m256i getPreviousRoundRandom() const { return previousRoundRandom; }
 	bool hasCommit(const id& operatorAddr) const { return commits.contains(operatorAddr); }
 	bool getCommit(const id& operatorAddr, OperatorCommit& out) const { return commits.get(operatorAddr, out); }
 	bool hasRevealedOperator(const id& operatorAddr) const { return revealedOperators.contains(operatorAddr); }
 
-	void insertRound(uint32 roundId, const m256i& roundRandom, uint16 operatorCount, uint16 revealedCount, bool finalized,
-	                 bool rewardsDistributed = false)
+	void insertRound(uint32 roundId, const m256i& roundRandom, bool finalized, bool rewardsDistributed = false)
 	{
 		RoundData data{};
 		data.roundId = roundId;
 		data.roundRandom = roundRandom;
 		data.rewardPool = 0;
-		data.operatorCount = operatorCount;
-		data.revealedCount = revealedCount;
 		data.finalized = finalized;
 		data.rewardsDistributed = rewardsDistributed;
 		rounds.set(roundId, data);
@@ -191,7 +178,6 @@ TEST(ContractRBeacon, InitializeStateDefaults)
 
 	auto* state = rb.state();
 	EXPECT_EQ(state->getCurrentRoundId(), 0U);
-	EXPECT_EQ(state->getTreasury(), 0ULL);
 	EXPECT_EQ(state->getPreviousRoundRandom(), NULL_ID);
 	EXPECT_EQ(state->getCommitCount(), 0ULL);
 	EXPECT_EQ(state->getRevealedOperatorsCount(), 0ULL);
@@ -244,7 +230,7 @@ TEST(ContractRBeacon, RevealSuccessUpdatesState)
 	const uint64 balanceAfterCommit = getBalance(operatorAddr);
 	EXPECT_EQ(balanceBeforeCommit - balanceAfterCommit, RBEACON_DEPOSIT);
 
-	rb.setTick(60, false);
+	rb.setTick(RBEACON_COMMIT_END, false);
 	const uint64 balanceBeforeReveal = getBalance(operatorAddr);
 	const auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
@@ -298,7 +284,7 @@ TEST(ContractRBeacon, CommitRevealFinalize)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -313,7 +299,7 @@ TEST(ContractRBeacon, CommitRevealFinalize)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
@@ -322,18 +308,16 @@ TEST(ContractRBeacon, CommitRevealFinalize)
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), operators.size());
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), operators.size());
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
 	EXPECT_EQ(rb.state()->getCurrentRoundId(), 2U);
 	EXPECT_EQ(rb.state()->getRoundCount(), 1ULL);
-	EXPECT_EQ(rb.state()->getTreasury(), 0ULL);
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_TRUE(roundInfo.finalized);
-	EXPECT_EQ(static_cast<uint32>(roundInfo.operatorCount), operators.size());
 	EXPECT_EQ(static_cast<uint32>(roundInfo.revealedCount), operators.size());
 
 	const m256i expectedRandom = xorSeeds(seeds);
@@ -350,7 +334,7 @@ TEST(ContractRBeacon, InsufficientReveals)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorAddr = makeUser();
 	const id seed = makeSeed();
@@ -360,16 +344,15 @@ TEST(ContractRBeacon, InsufficientReveals)
 	auto commitOut = rb.commit(operatorAddr, seed, salt, roundId);
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
 	EXPECT_EQ(rb.state()->getPreviousRoundRandom(), NULL_ID);
-	EXPECT_EQ(rb.state()->getTreasury(), 0ULL);
 
 	auto randomOut = rb.getRandom(roundId);
 	EXPECT_EQ(randomOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INSUFFICIENT_REVEALS));
@@ -392,7 +375,7 @@ TEST(ContractRBeacon, CommitInvalidPhaseRefunds)
 {
 	ContractTestingRBeacon rb;
 
-	rb.setTick(50, true);
+	rb.setTick(RBEACON_COMMIT_END, true);
 
 	const id operatorAddr = makeUser();
 	const id seed = makeSeed();
@@ -509,7 +492,7 @@ TEST(ContractRBeacon, RevealNotCommitted)
 {
 	ContractTestingRBeacon rb;
 
-	rb.setTick(60, true);
+	rb.setTick(RBEACON_COMMIT_END, true);
 
 	const id operatorAddr = makeUser();
 	const id seed = makeSeed();
@@ -535,7 +518,7 @@ TEST(ContractRBeacon, RevealAlreadyRevealed)
 	auto commitOut = rb.commit(operatorAddr, seed, salt, 0);
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(60, false);
+	rb.setTick(RBEACON_COMMIT_END, false);
 	auto firstReveal = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(firstReveal.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	const uint64 balanceAfterFirst = getBalance(operatorAddr);
@@ -564,11 +547,13 @@ TEST(ContractRBeacon, RevealHashMismatchRemovesCommit)
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	const uint64 balanceAfterCommit = getBalance(operatorAddr);
 
-	rb.setTick(60, false);
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
+	rb.setTick(RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, wrongSalt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::HASH_MISMATCH));
 	EXPECT_EQ(getBalance(operatorAddr), balanceAfterCommit);
 	EXPECT_EQ(balanceBefore - balanceAfterCommit, RBEACON_DEPOSIT);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore + RBEACON_DEPOSIT);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
@@ -581,7 +566,7 @@ TEST(ContractRBeacon, RevealHashMismatchWithWrongRoundId)
 {
 	ContractTestingRBeacon rb;
 
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorAddr = makeUser();
 	const id seed = makeSeed();
@@ -596,11 +581,13 @@ TEST(ContractRBeacon, RevealHashMismatchWithWrongRoundId)
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	const uint64 balanceAfterCommit = getBalance(operatorAddr);
 
-	rb.setTick(150, false);
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::HASH_MISMATCH));
 	EXPECT_EQ(getBalance(operatorAddr), balanceAfterCommit);
 	EXPECT_EQ(balanceBefore - balanceAfterCommit, RBEACON_DEPOSIT);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore + RBEACON_DEPOSIT);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
@@ -611,7 +598,7 @@ TEST(ContractRBeacon, FinalizeForfeitsUnrevealedDeposit)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorA = makeUser();
 	const id operatorB = makeUser();
@@ -626,12 +613,13 @@ TEST(ContractRBeacon, FinalizeForfeitsUnrevealedDeposit)
 	EXPECT_EQ(commitA.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_EQ(commitB.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	auto revealA = rb.reveal(operatorA, seedA, saltA);
 	EXPECT_EQ(revealA.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(200, true);
-	EXPECT_EQ(rb.state()->getTreasury(), RBEACON_DEPOSIT);
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore + RBEACON_DEPOSIT);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 	EXPECT_EQ(static_cast<uint32>(rb.state()->getRevealedCount()), 0U);
@@ -639,7 +627,6 @@ TEST(ContractRBeacon, FinalizeForfeitsUnrevealedDeposit)
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
-	EXPECT_EQ(static_cast<uint32>(roundInfo.operatorCount), 2U);
 	EXPECT_EQ(static_cast<uint32>(roundInfo.revealedCount), 1U);
 	EXPECT_TRUE(roundInfo.finalized);
 	EXPECT_EQ(roundInfo.roundRandom, seedA);
@@ -663,7 +650,6 @@ TEST(ContractRBeacon, RoundNotFoundErrors)
 	auto randomWithFeeOut = rb.getRandomWithFee(caller, missingRound, fee);
 	EXPECT_EQ(randomWithFeeOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::ROUND_NOT_FOUND));
 	EXPECT_EQ(getBalance(caller), balanceBefore);
-	EXPECT_EQ(rb.state()->getTreasury(), 0ULL);
 }
 
 TEST(ContractRBeacon, GetRandomWithFeeRoundNotFinalized)
@@ -671,7 +657,7 @@ TEST(ContractRBeacon, GetRandomWithFeeRoundNotFinalized)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 7;
-	rb.state()->insertRound(roundId, NULL_ID, 3, RBEACON_MIN_REVEALS, false);
+	rb.state()->insertRound(roundId, NULL_ID, false);
 
 	const id caller = makeUser();
 	static constexpr uint64 fee = 5000;
@@ -683,7 +669,6 @@ TEST(ContractRBeacon, GetRandomWithFeeRoundNotFinalized)
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.rewardPool, 0ULL);
 	EXPECT_FALSE(roundInfo.rewardsDistributed);
-	EXPECT_EQ(rb.state()->getTreasury(), 0ULL);
 }
 
 TEST(ContractRBeacon, GetRandomWithFeeInsufficientRevealsZero)
@@ -691,7 +676,7 @@ TEST(ContractRBeacon, GetRandomWithFeeInsufficientRevealsZero)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 9;
-	rb.state()->insertRound(roundId, NULL_ID, 0, 0, true);
+	rb.state()->insertRound(roundId, NULL_ID, true);
 
 	const id caller = makeUser();
 	static constexpr uint64 fee = 1000;
@@ -703,37 +688,36 @@ TEST(ContractRBeacon, GetRandomWithFeeInsufficientRevealsZero)
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.rewardPool, 0ULL);
 	EXPECT_FALSE(roundInfo.rewardsDistributed);
-	EXPECT_EQ(rb.state()->getTreasury(), 0ULL);
 }
 
 TEST(ContractRBeacon, GetCurrentRoundPhaseBoundaries)
 {
 	ContractTestingRBeacon rb;
 
-	rb.setTick(49, true);
+	rb.setTick(RBEACON_COMMIT_END - 1, true);
 	auto roundInfo = rb.getCurrentRound();
 	EXPECT_EQ(roundInfo.roundId, 0u);
-	EXPECT_EQ(roundInfo.roundTick, 49u);
+	EXPECT_EQ(roundInfo.roundTick, RBEACON_COMMIT_END - 1);
 	EXPECT_TRUE(roundInfo.isCommitPhase);
 	EXPECT_FALSE(roundInfo.isRevealPhase);
 	EXPECT_EQ(static_cast<uint32>(roundInfo.operatorCount), 0U);
 	EXPECT_EQ(static_cast<uint32>(roundInfo.revealedCount), 0U);
 
-	rb.setTick(50, true);
+	rb.setTick(RBEACON_COMMIT_END, true);
 	roundInfo = rb.getCurrentRound();
 	EXPECT_EQ(roundInfo.roundId, 0u);
-	EXPECT_EQ(roundInfo.roundTick, 50u);
+	EXPECT_EQ(roundInfo.roundTick, RBEACON_COMMIT_END);
 	EXPECT_FALSE(roundInfo.isCommitPhase);
 	EXPECT_TRUE(roundInfo.isRevealPhase);
 
-	rb.setTick(99, true);
+	rb.setTick(RBEACON_ROUND_LENGTH - 1, true);
 	roundInfo = rb.getCurrentRound();
 	EXPECT_EQ(roundInfo.roundId, 0u);
-	EXPECT_EQ(roundInfo.roundTick, 99u);
+	EXPECT_EQ(roundInfo.roundTick, RBEACON_ROUND_LENGTH - 1);
 	EXPECT_FALSE(roundInfo.isCommitPhase);
 	EXPECT_TRUE(roundInfo.isRevealPhase);
 
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 	roundInfo = rb.getCurrentRound();
 	EXPECT_EQ(roundInfo.roundId, 1u);
 	EXPECT_EQ(roundInfo.roundTick, 0u);
@@ -758,7 +742,7 @@ TEST(ContractRBeacon, GetCurrentRoundCountsAfterCommitReveal)
 	EXPECT_EQ(static_cast<uint32>(roundInfo.operatorCount), 1U);
 	EXPECT_EQ(static_cast<uint32>(roundInfo.revealedCount), 0U);
 
-	rb.setTick(60, false);
+	rb.setTick(RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
@@ -784,7 +768,7 @@ TEST(ContractRBeacon, ReadOnlyFunctionsDoNotMutateState)
 	const uint64 commitCountBefore = state->getCommitCount();
 	const uint64 revealedOpsBefore = state->getRevealedOperatorsCount();
 	const uint16 revealedCountBefore = state->getRevealedCount();
-	const uint64 treasuryBefore = state->getTreasury();
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
 	const uint32 currentRoundBefore = state->getCurrentRoundId();
 	const uint64 roundCountBefore = state->getRoundCount();
 	const m256i prevRandomBefore = state->getPreviousRoundRandom();
@@ -801,7 +785,7 @@ TEST(ContractRBeacon, ReadOnlyFunctionsDoNotMutateState)
 	EXPECT_EQ(state->getCommitCount(), commitCountBefore);
 	EXPECT_EQ(state->getRevealedOperatorsCount(), revealedOpsBefore);
 	EXPECT_EQ(static_cast<uint32>(state->getRevealedCount()), static_cast<uint32>(revealedCountBefore));
-	EXPECT_EQ(state->getTreasury(), treasuryBefore);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore);
 	EXPECT_EQ(state->getCurrentRoundId(), currentRoundBefore);
 	EXPECT_EQ(state->getRoundCount(), roundCountBefore);
 	EXPECT_EQ(state->getPreviousRoundRandom(), prevRandomBefore);
@@ -813,13 +797,12 @@ TEST(ContractRBeacon, FinalizeWithNoReveals)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_TRUE(roundInfo.finalized);
-	EXPECT_EQ(static_cast<uint32>(roundInfo.operatorCount), 0U);
 	EXPECT_EQ(static_cast<uint32>(roundInfo.revealedCount), 0U);
 	EXPECT_EQ(roundInfo.roundRandom, NULL_ID);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
@@ -857,7 +840,7 @@ TEST(ContractRBeacon, CommitRoundBoundaryRoundId)
 {
 	ContractTestingRBeacon rb;
 
-	rb.setTick(99, true);
+	rb.setTick(RBEACON_ROUND_LENGTH - 1, true);
 
 	const id operatorA = makeUser();
 	const id seedA = makeSeed();
@@ -868,7 +851,7 @@ TEST(ContractRBeacon, CommitRoundBoundaryRoundId)
 	EXPECT_EQ(commitOutA.roundId, 0U);
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorB = makeUser();
 	const id seedB = makeSeed();
@@ -894,11 +877,11 @@ TEST(ContractRBeacon, RevealPhaseBoundaries)
 	auto commitOut = rb.commit(operatorAddr, seed, salt, 0);
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(49, true);
+	rb.setTick(RBEACON_COMMIT_END - 1, true);
 	auto revealOutEarly = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOutEarly.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INVALID_PHASE));
 
-	rb.setTick(50, false);
+	rb.setTick(RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 }
@@ -908,7 +891,7 @@ TEST(ContractRBeacon, RevealAfterFinalize)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorAddr = makeUser();
 	const id seed = makeSeed();
@@ -917,20 +900,20 @@ TEST(ContractRBeacon, RevealAfterFinalize)
 	auto commitOut = rb.commit(operatorAddr, seed, salt, roundId);
 	EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(200, true);
-	rb.setTick(250, false);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2 + RBEACON_COMMIT_END, false);
 	auto revealOut = rb.reveal(operatorAddr, seed, salt);
 	EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::NOT_COMMITTED));
 	EXPECT_EQ(rb.state()->getCommitCount(), 0ULL);
 	EXPECT_EQ(rb.state()->getRevealedOperatorsCount(), 0ULL);
 }
 
-TEST(ContractRBeacon, GetRandomWithFeeZeroFee)
+TEST(ContractRBeacon, GetRandomWithFeeZeroFeeInvalid)
 {
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -945,37 +928,37 @@ TEST(ContractRBeacon, GetRandomWithFeeZeroFee)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
 		EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 	const m256i expectedRandom = xorSeeds(seeds);
-	const uint64 treasuryBefore = rb.state()->getTreasury();
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
 
 	const id caller = makeUser();
 	increaseEnergy(caller, 1);
 	const uint64 balanceBefore = getBalance(caller);
 	auto out = rb.getRandomWithFee(caller, roundId, 0);
-	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INVALID_FEE));
 	EXPECT_EQ(out.randomValue, expectedRandom);
 	EXPECT_EQ(getBalance(caller), balanceBefore);
-	EXPECT_EQ(rb.state()->getTreasury(), treasuryBefore);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore);
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.rewardPool, 0ULL);
 	EXPECT_FALSE(roundInfo.rewardsDistributed);
 }
 
-TEST(ContractRBeacon, RewardPerWinnerZero)
+TEST(ContractRBeacon, GetRandomWithFeeInvalidFeeRefunds)
 {
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -990,15 +973,14 @@ TEST(ContractRBeacon, RewardPerWinnerZero)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
 		EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(200, true);
-	rb.state()->restoreRevealedOperators(operators);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 
 	std::vector<uint64> balancesBefore;
 	balancesBefore.reserve(operators.size());
@@ -1010,8 +992,12 @@ TEST(ContractRBeacon, RewardPerWinnerZero)
 	const id caller = makeUser();
 	static constexpr uint64 fee = 3;
 	increaseEnergy(caller, fee);
+	const uint64 balanceBefore = getBalance(caller);
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
 	auto out = rb.getRandomWithFee(caller, roundId, fee);
-	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::INVALID_FEE));
+	EXPECT_EQ(getBalance(caller), balanceBefore);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore);
 
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
@@ -1019,16 +1005,16 @@ TEST(ContractRBeacon, RewardPerWinnerZero)
 	}
 
 	auto roundInfo = rb.getRoundInfo(roundId);
-	EXPECT_EQ(roundInfo.rewardPool, 2ULL);
-	EXPECT_TRUE(roundInfo.rewardsDistributed);
+	EXPECT_EQ(roundInfo.rewardPool, 0ULL);
+	EXPECT_FALSE(roundInfo.rewardsDistributed);
 }
 
-TEST(ContractRBeacon, TreasuryFeeSplit)
+TEST(ContractRBeacon, DevFeeSplit)
 {
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -1043,25 +1029,25 @@ TEST(ContractRBeacon, TreasuryFeeSplit)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
 		EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(200, true);
-	rb.state()->restoreRevealedOperators(operators);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 
-	static constexpr uint64 fee = 1000;
-	const uint64 treasuryBefore = rb.state()->getTreasury();
+	static constexpr uint64 fee = RBEACON_FEE;
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
 	const id caller = makeUser();
 	increaseEnergy(caller, fee);
 	auto out = rb.getRandomWithFee(caller, roundId, fee);
 	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	const uint64 expectedTreasury = treasuryBefore + (fee - (fee * RBEACON_REWARD_PERCENT) / 100ULL);
-	EXPECT_EQ(rb.state()->getTreasury(), expectedTreasury);
+	const uint64 operatorReward = (fee * RBEACON_REWARD_PERCENT) / 100ULL;
+	const uint64 expectedDev = fee - operatorReward;
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore + expectedDev);
 }
 
 TEST(ContractRBeacon, RoundHistoryMultipleRounds)
@@ -1069,7 +1055,7 @@ TEST(ContractRBeacon, RoundHistoryMultipleRounds)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 round1 = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	const id operatorA = makeUser();
 	const id seedA = makeSeed();
@@ -1082,14 +1068,14 @@ TEST(ContractRBeacon, RoundHistoryMultipleRounds)
 	EXPECT_EQ(rb.commit(operatorA, seedA, saltA, round1).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_EQ(rb.commit(operatorB, seedB, saltB, round1).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	EXPECT_EQ(rb.reveal(operatorA, seedA, saltA).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_EQ(rb.reveal(operatorB, seedB, saltB).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 
 	static constexpr uint32 round2 = 2;
-	rb.setTick(210, false);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2 + 1, false);
 	const id operatorC = makeUser();
 	const id seedC = makeSeed();
 	const id saltC = makeSalt();
@@ -1101,11 +1087,11 @@ TEST(ContractRBeacon, RoundHistoryMultipleRounds)
 	EXPECT_EQ(rb.commit(operatorC, seedC, saltC, round2).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_EQ(rb.commit(operatorD, seedD, saltD, round2).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(250, false);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2 + RBEACON_COMMIT_END, false);
 	EXPECT_EQ(rb.reveal(operatorC, seedC, saltC).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	EXPECT_EQ(rb.reveal(operatorD, seedD, saltD).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 
-	rb.setTick(300, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 3, true);
 
 	auto round1Info = rb.getRoundInfo(round1);
 	EXPECT_EQ(round1Info.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
@@ -1121,7 +1107,7 @@ TEST(ContractRBeacon, RewardsDistributedOnceWithFewReveals)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -1136,19 +1122,17 @@ TEST(ContractRBeacon, RewardsDistributedOnceWithFewReveals)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
 		EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 	const m256i expectedRandom = xorSeeds(seeds);
 
-	rb.state()->restoreRevealedOperators(operators);
-
-	static constexpr uint64 fee = 90000;
+	static constexpr uint64 fee = RBEACON_FEE;
 	static constexpr uint64 rewardPool = (fee * RBEACON_REWARD_PERCENT) / 100ULL;
 	const uint64 rewardPerWinner = rewardPool / operators.size();
 
@@ -1170,19 +1154,83 @@ TEST(ContractRBeacon, RewardsDistributedOnceWithFewReveals)
 		EXPECT_EQ(getBalance(operators[i]), balancesBefore[i] + rewardPerWinner);
 	}
 
-	static constexpr uint64 secondFee = 50000;
+	static constexpr uint64 secondFee = RBEACON_FEE;
 	increaseEnergy(caller, secondFee);
+	const uint64 callerBalanceBeforeSecond = getBalance(caller);
+	const uint64 devBalanceBeforeSecond = getBalance(DEV_ID);
 	auto secondOut = rb.getRandomWithFee(caller, roundId, secondFee);
 	EXPECT_EQ(secondOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(getBalance(caller), callerBalanceBeforeSecond);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBeforeSecond);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		EXPECT_EQ(getBalance(operators[i]), balancesBefore[i] + rewardPerWinner);
 	}
 
 	auto roundInfo = rb.getRoundInfo(roundId);
-	static constexpr uint64 totalRewardPool = rewardPool + (secondFee * RBEACON_REWARD_PERCENT) / 100ULL;
-	EXPECT_EQ(roundInfo.rewardPool, totalRewardPool);
+	EXPECT_EQ(roundInfo.rewardPool, rewardPool);
 	EXPECT_TRUE(roundInfo.rewardsDistributed);
+}
+
+TEST(ContractRBeacon, RewardsUseStoredRoundOperators)
+{
+	ContractTestingRBeacon rb;
+
+	static constexpr uint32 round1 = 1;
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
+
+	const id operatorA = makeUser();
+	const id operatorB = makeUser();
+	const id seedA = makeSeed();
+	const id seedB = makeSeed();
+	const id saltA = makeSalt();
+	const id saltB = makeSalt();
+	increaseEnergy(operatorA, RBEACON_DEPOSIT);
+	increaseEnergy(operatorB, RBEACON_DEPOSIT);
+	EXPECT_EQ(rb.commit(operatorA, seedA, saltA, round1).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(rb.commit(operatorB, seedB, saltB, round1).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
+	EXPECT_EQ(rb.reveal(operatorA, seedA, saltA).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(rb.reveal(operatorB, seedB, saltB).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
+
+	static constexpr uint32 round2 = 2;
+	rb.setTick(RBEACON_ROUND_LENGTH * 2 + 1, false);
+	const id operatorC = makeUser();
+	const id operatorD = makeUser();
+	const id seedC = makeSeed();
+	const id seedD = makeSeed();
+	const id saltC = makeSalt();
+	const id saltD = makeSalt();
+	increaseEnergy(operatorC, RBEACON_DEPOSIT);
+	increaseEnergy(operatorD, RBEACON_DEPOSIT);
+	EXPECT_EQ(rb.commit(operatorC, seedC, saltC, round2).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(rb.commit(operatorD, seedD, saltD, round2).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+
+	rb.setTick(RBEACON_ROUND_LENGTH * 2 + RBEACON_COMMIT_END, false);
+	EXPECT_EQ(rb.reveal(operatorC, seedC, saltC).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+	EXPECT_EQ(rb.reveal(operatorD, seedD, saltD).returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+
+	const uint64 balanceABefore = getBalance(operatorA);
+	const uint64 balanceBBefore = getBalance(operatorB);
+	const uint64 balanceCBefore = getBalance(operatorC);
+	const uint64 balanceDBefore = getBalance(operatorD);
+	const uint64 devBalanceBefore = getBalance(DEV_ID);
+
+	const id caller = makeUser();
+	increaseEnergy(caller, RBEACON_FEE);
+	auto out = rb.getRandomWithFee(caller, round1, RBEACON_FEE);
+	EXPECT_EQ(out.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
+
+	const uint64 operatorReward = (RBEACON_FEE * RBEACON_REWARD_PERCENT) / 100ULL;
+	const uint64 rewardPerWinner = operatorReward / 2ULL;
+	EXPECT_EQ(getBalance(operatorA), balanceABefore + rewardPerWinner);
+	EXPECT_EQ(getBalance(operatorB), balanceBBefore + rewardPerWinner);
+	EXPECT_EQ(getBalance(operatorC), balanceCBefore);
+	EXPECT_EQ(getBalance(operatorD), balanceDBefore);
+	EXPECT_EQ(getBalance(DEV_ID), devBalanceBefore + (RBEACON_FEE - operatorReward));
 }
 
 TEST(ContractRBeacon, TopKRewardsDistribution)
@@ -1190,7 +1238,7 @@ TEST(ContractRBeacon, TopKRewardsDistribution)
 	ContractTestingRBeacon rb;
 
 	static constexpr uint32 roundId = 1;
-	rb.setTick(100, true);
+	rb.setTick(RBEACON_ROUND_LENGTH, true);
 
 	std::vector<id> operators;
 	std::vector<id> seeds;
@@ -1205,22 +1253,19 @@ TEST(ContractRBeacon, TopKRewardsDistribution)
 		EXPECT_EQ(commitOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(150, false);
+	rb.setTick(RBEACON_ROUND_LENGTH + RBEACON_COMMIT_END, false);
 	for (size_t i = 0; i < operators.size(); ++i)
 	{
 		auto revealOut = rb.reveal(operators[i], seeds[i], salts[i]);
 		EXPECT_EQ(revealOut.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	}
 
-	rb.setTick(200, true);
+	rb.setTick(RBEACON_ROUND_LENGTH * 2, true);
 
 	auto roundInfo = rb.getRoundInfo(roundId);
 	EXPECT_EQ(roundInfo.returnCode, static_cast<uint8>(RBEACON::EReturnCode::SUCCESS));
 	const m256i expectedRandom = xorSeeds(seeds);
 	EXPECT_EQ(roundInfo.roundRandom, expectedRandom);
-
-	// Rehydrate revealedOperators for reward distribution logic.
-	rb.state()->restoreRevealedOperators(operators);
 
 	struct ScoredOperator
 	{
