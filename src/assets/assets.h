@@ -112,7 +112,7 @@ public: // TODO: make protected
             PROFILE_SCOPE();
 
             reset();
-            for (int index = 0; index < ASSETS_CAPACITY; index++)
+            for (int index = ASSETS_CAPACITY - 1; index >= 0; index--)
             {
                 switch (assets[index].varStruct.issuance.type)
                 {
@@ -516,6 +516,7 @@ static bool transferShareOwnershipAndPossession(int sourceOwnershipIndex, int so
         assetOwnershipChange.destinationPublicKey = destinationPublicKey;
         assetOwnershipChange.issuerPublicKey = issuance.publicKey;
         assetOwnershipChange.numberOfShares = numberOfShares;
+        assetOwnershipChange.managingContractIndex = assets[sourceOwnershipIndex].varStruct.ownership.managingContractIndex;
         *((unsigned long long*) & assetOwnershipChange.name) = *((unsigned long long*) & issuance.name); // Order must be preserved!
         assetOwnershipChange.numberOfDecimalPlaces = issuance.numberOfDecimalPlaces; // Order must be preserved!
         *((unsigned long long*) & assetOwnershipChange.unitOfMeasurement) = *((unsigned long long*) & issuance.unitOfMeasurement); // Order must be preserved!
@@ -526,6 +527,7 @@ static bool transferShareOwnershipAndPossession(int sourceOwnershipIndex, int so
         assetPossessionChange.destinationPublicKey = destinationPublicKey;
         assetPossessionChange.issuerPublicKey = issuance.publicKey;
         assetPossessionChange.numberOfShares = numberOfShares;
+        assetPossessionChange.managingContractIndex = assets[sourcePossessionIndex].varStruct.possession.managingContractIndex;
         *((unsigned long long*) & assetPossessionChange.name) = *((unsigned long long*) & issuance.name); // Order must be preserved!
         assetPossessionChange.numberOfDecimalPlaces = issuance.numberOfDecimalPlaces; // Order must be preserved!
         *((unsigned long long*) & assetPossessionChange.unitOfMeasurement) = *((unsigned long long*) & issuance.unitOfMeasurement); // Order must be preserved!
@@ -594,6 +596,7 @@ iteration:
             assetOwnershipChange.destinationPublicKey = destinationPublicKey;
             assetOwnershipChange.issuerPublicKey = assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.publicKey;
             assetOwnershipChange.numberOfShares = numberOfShares;
+            assetOwnershipChange.managingContractIndex = assets[sourceOwnershipIndex].varStruct.ownership.managingContractIndex;
             *((unsigned long long*) & assetOwnershipChange.name) = *((unsigned long long*) & assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.name); // Order must be preserved!
             assetOwnershipChange.numberOfDecimalPlaces = assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.numberOfDecimalPlaces; // Order must be preserved!
             *((unsigned long long*) & assetOwnershipChange.unitOfMeasurement) = *((unsigned long long*) & assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.unitOfMeasurement); // Order must be preserved!
@@ -604,6 +607,7 @@ iteration:
             assetPossessionChange.destinationPublicKey = destinationPublicKey;
             assetPossessionChange.issuerPublicKey = assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.publicKey;
             assetPossessionChange.numberOfShares = numberOfShares;
+            assetPossessionChange.managingContractIndex = assets[sourcePossessionIndex].varStruct.possession.managingContractIndex;
             *((unsigned long long*) & assetPossessionChange.name) = *((unsigned long long*) & assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.name); // Order must be preserved!
             assetPossessionChange.numberOfDecimalPlaces = assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.numberOfDecimalPlaces; // Order must be preserved!
             *((unsigned long long*) & assetPossessionChange.unitOfMeasurement) = *((unsigned long long*) & assets[assets[sourceOwnershipIndex].varStruct.ownership.issuanceIndex].varStruct.issuance.unitOfMeasurement); // Order must be preserved!
@@ -789,8 +793,8 @@ static void assetsEndEpoch()
     ACQUIRE(universeLock);
 
     // rebuild asset hash map, getting rid of all elements with zero shares
-    AssetRecord* reorgAssets = (AssetRecord*)reorgBuffer;
-    setMem(reorgAssets, ASSETS_CAPACITY * sizeof(AssetRecord), 0);
+    AssetRecord* reorgAssets = (AssetRecord*)commonBuffers.acquireBuffer(universeSizeInBytes);
+    setMem(reorgAssets, universeSizeInBytes, 0);
     for (unsigned int i = 0; i < ASSETS_CAPACITY; i++)
     {
         if (assets[i].varStruct.possession.type == POSSESSION
@@ -870,6 +874,7 @@ static void assetsEndEpoch()
         }
     }
     copyMem(assets, reorgAssets, ASSETS_CAPACITY * sizeof(AssetRecord));
+    commonBuffers.releaseBuffer(reorgAssets);
 
     setMem(assetChangeFlags, ASSETS_CAPACITY / 8, 0xFF);
 

@@ -202,7 +202,7 @@ public:
 			// Check that amounts, which are in millionth, are in range of 0 (= 0%) to 1000000 (= 100%)
 			for (locals.i = 0; locals.i < 4; ++locals.i)
 			{
-				locals.millionthAmount = input.transfer.amounts.get(locals.i);
+				locals.millionthAmount = input.data.transfer.amounts.get(locals.i);
 				if (locals.millionthAmount < 0 || locals.millionthAmount > 1000000)
 				{
 					return;
@@ -212,8 +212,8 @@ public:
 
 		case ProposalTypes::Class::TransferInEpoch:
 			// Check amount and epoch
-			locals.millionthAmount = input.transferInEpoch.amount;
-			if (locals.millionthAmount < 0 || locals.millionthAmount > 1000000 || input.transferInEpoch.targetEpoch <= qpi.epoch())
+			locals.millionthAmount = input.data.transferInEpoch.amount;
+			if (locals.millionthAmount < 0 || locals.millionthAmount > 1000000 || input.data.transferInEpoch.targetEpoch <= qpi.epoch())
 			{
 				return;
 			}
@@ -318,7 +318,7 @@ public:
 	{
 		output.okay = qpi(state.proposals).getVote(
 			input.proposalIndex,
-			qpi(state.proposals).voterIndex(input.voter),
+			qpi(state.proposals).voteIndex(input.voter),
 			output.vote);
 	}
 
@@ -396,7 +396,7 @@ public:
 					if (qpi(state.proposals).getVotingSummary(locals.proposalIndex, locals.results))
 					{
 						// The total number of votes needs to be at least the quorum
-						if (locals.results.totalVotes >= QUORUM)
+						if (locals.results.totalVotesCasted >= QUORUM)
 						{
 							// Find most voted option
 							locals.mostVotedOptionIndex = 0;
@@ -419,15 +419,15 @@ public:
 								if (locals.propClass == ProposalTypes::Class::TransferInEpoch)
 								{
 									ASSERT(locals.mostVotedOptionIndex == 1);
-									ASSERT(locals.proposal.transferInEpoch.targetEpoch >= qpi.epoch());
-									locals.revenueDonationEntry.destinationPublicKey = locals.proposal.transferInEpoch.destination;
-									locals.revenueDonationEntry.millionthAmount = locals.proposal.transferInEpoch.amount;
-									locals.revenueDonationEntry.firstEpoch = locals.proposal.transferInEpoch.targetEpoch;
+									ASSERT(locals.proposal.data.transferInEpoch.targetEpoch >= qpi.epoch());
+									locals.revenueDonationEntry.destinationPublicKey = locals.proposal.data.transferInEpoch.destination;
+									locals.revenueDonationEntry.millionthAmount = locals.proposal.data.transferInEpoch.amount;
+									locals.revenueDonationEntry.firstEpoch = locals.proposal.data.transferInEpoch.targetEpoch;
 								}
 								else
 								{
-									locals.revenueDonationEntry.destinationPublicKey = locals.proposal.transfer.destination;
-									locals.revenueDonationEntry.millionthAmount = locals.proposal.transfer.amounts.get(locals.mostVotedOptionIndex - 1);
+									locals.revenueDonationEntry.destinationPublicKey = locals.proposal.data.transfer.destination;
+									locals.revenueDonationEntry.millionthAmount = locals.proposal.data.transfer.amounts.get(locals.mostVotedOptionIndex - 1);
 									locals.revenueDonationEntry.firstEpoch = qpi.epoch();
 								}
 								CALL(_SetRevenueDonationEntry, locals.revenueDonationEntry, locals.success);

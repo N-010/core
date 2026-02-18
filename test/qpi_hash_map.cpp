@@ -2,14 +2,7 @@
 
 #include "gtest/gtest.h"
 
-namespace QPI
-{
-	struct QpiContextProcedureCall;
-	struct QpiContextFunctionCall;
-}
-typedef void (*USER_FUNCTION)(const QPI::QpiContextFunctionCall&, void* state, void* input, void* output, void* locals);
-typedef void (*USER_PROCEDURE)(const QPI::QpiContextProcedureCall&, void* state, void* input, void* output, void* locals);
-
+#include "../src/contract_core/pre_qpi_def.h"
 #include "../src/contracts/qpi.h"
 #include "../src/common_buffers.h"
 #include "../src/contract_core/qpi_hash_map_impl.h"
@@ -370,7 +363,7 @@ TYPED_TEST_P(QPIHashMapTest, TestCleanup)
 	constexpr QPI::uint64 capacity = 4;
 	QPI::HashMap<TypeParam::first_type, TypeParam::second_type, capacity> hashMap;
 
-	reorgBuffer = new char[2 * sizeof(hashMap)];
+	commonBuffers.init(1, 2 * sizeof(hashMap));
 
 	std::array<TypeParam, 4> keyValuePairs = HashMapTestData<TypeParam::first_type, TypeParam::second_type>::CreateKeyValueTestPairs();
 	auto ids = std::views::keys(keyValuePairs);
@@ -409,8 +402,7 @@ TYPED_TEST_P(QPIHashMapTest, TestCleanup)
 	EXPECT_NE(returnedIndex, QPI::NULL_INDEX);
 	EXPECT_EQ(hashMap.population(), 4);
 
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 TYPED_TEST_P(QPIHashMapTest, TestCleanupPerformanceShortcuts)
@@ -446,7 +438,7 @@ TEST(NonTypedQPIHashMapTest, TestCleanupLargeMapSameHashes)
 	constexpr QPI::uint64 capacity = 64;
 	QPI::HashMap<QPI::id, int, capacity> hashMap;
 
-	reorgBuffer = new char[2 * sizeof(hashMap)];
+	commonBuffers.init(1, 2 * sizeof(hashMap));
 
 	for (QPI::uint64 i = 0; i < 64; ++i)
 	{
@@ -459,8 +451,7 @@ TEST(NonTypedQPIHashMapTest, TestCleanupLargeMapSameHashes)
 	// Cleanup will have to iterate through the whole map to find an empty slot for the last element.
 	hashMap.cleanup();
 
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 TYPED_TEST_P(QPIHashMapTest, TestReplace)
@@ -619,7 +610,7 @@ void testHashMapPseudoRandom(int seed, int cleanups, int percentAdd, int percent
 	std::map<KeyT, ValueT> referenceMap;
 	QPI::HashMap<KeyT, ValueT, capacity> map;
 
-	reorgBuffer = new char[2 * sizeof(map)];
+	commonBuffers.init(1, 2 * sizeof(map));
 
 	map.reset();
 
@@ -681,8 +672,7 @@ void testHashMapPseudoRandom(int seed, int cleanups, int percentAdd, int percent
 		// std::cout << "capacity: " << set.capacity() << ", pupulation:" << set.population() << std::endl;
 	}
 
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 TEST(QPIHashMapTest, HashMapPseudoRandom)
@@ -714,7 +704,7 @@ TEST(QPIHashMapTest, HashSet)
 {
 	constexpr QPI::uint64 capacity = 128;
 	QPI::HashSet<QPI::id, capacity> hashSet;
-	reorgBuffer = new char[2 * sizeof(hashSet)];
+	commonBuffers.init(1, 2 * sizeof(hashSet));
 	EXPECT_EQ(hashSet.capacity(), capacity);
 
 	// Test add() and contains()
@@ -812,8 +802,7 @@ TEST(QPIHashMapTest, HashSet)
 	hashSet.reset();
 	EXPECT_EQ(hashSet.population(), 0);
 
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 template <class T, unsigned int capacity>
@@ -882,7 +871,7 @@ void testHashSetPseudoRandom(int seed, int cleanups, int percentAdd, int percent
 	std::set<T> referenceSet;
 	QPI::HashSet<T, capacity> set;
 
-	reorgBuffer = new char[2 * sizeof(set)];
+	commonBuffers.init(1, 2 * sizeof(set));
 
 	set.reset();
 
@@ -942,8 +931,7 @@ void testHashSetPseudoRandom(int seed, int cleanups, int percentAdd, int percent
 		// std::cout << "capacity: " << set.capacity() << ", pupulation:" << set.population() << std::endl;
 	}
 
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 TEST(QPIHashMapTest, HashSetPseudoRandom)
@@ -979,7 +967,7 @@ static void perfTestCleanup(int seed)
 	std::mt19937_64 gen64(seed);
 
 	auto* set = new QPI::HashSet<QPI::id, capacity>();
-	reorgBuffer = new char[sizeof(*set)];
+	commonBuffers.init(1, sizeof(*set));
 
 	for (QPI::uint64 i = 1; i <= 100; ++i)
 	{
@@ -1003,8 +991,7 @@ static void perfTestCleanup(int seed)
 	}
 
 	delete set;
-	delete[] reorgBuffer;
-	reorgBuffer = nullptr;
+	commonBuffers.deinit();
 }
 
 TEST(QPIHashMapTest, HashSetPerfTest)

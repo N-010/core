@@ -1,6 +1,4 @@
 #pragma once
-#include "network_messages/common_def.h"
-#include "platform/m256.h"
 
 ////////// Smart contracts \\\\\\\\\\
 
@@ -10,63 +8,15 @@
 // Additionally, most types, functions, and variables of the core have to be defined after including
 // the contract to keep them unavailable in the contract code.
 
-namespace QPI
-{
-    struct QpiContextProcedureCall;
-    struct QpiContextFunctionCall;
-}
-
-// TODO: add option for having locals to SYSTEM and EXPAND procedures
-typedef void (*SYSTEM_PROCEDURE)(const QPI::QpiContextProcedureCall&, void* state, void* input, void* output, void* locals);
-typedef void (*EXPAND_PROCEDURE)(const QPI::QpiContextFunctionCall&, void*, void*); // cannot not change anything except state
-typedef void (*USER_FUNCTION)(const QPI::QpiContextFunctionCall&, void* state, void* input, void* output, void* locals);
-typedef void (*USER_PROCEDURE)(const QPI::QpiContextProcedureCall&, void* state, void* input, void* output, void* locals);
-
-constexpr unsigned long long MAX_CONTRACT_STATE_SIZE = 1073741824;
-
-// Maximum size of local variables that may be used by a contract function or procedure
-// If increased, the size of contractLocalsStack should be increased as well.
-constexpr unsigned int MAX_SIZE_OF_CONTRACT_LOCALS = 32 * 1024;
-
-// TODO: make sure the limit of nested calls is not violated
-constexpr unsigned short MAX_NESTED_CONTRACT_CALLS = 10;
-
-// Size of the contract action tracker, limits the number of transfers that one contract call can execute.
-constexpr unsigned long long CONTRACT_ACTION_TRACKER_SIZE = 16 * 1024 * 1024;
-
-
-static void __beginFunctionOrProcedure(const unsigned int); // TODO: more human-readable form of function ID?
-static void __endFunctionOrProcedure(const unsigned int);
-template <typename T> static m256i __K12(T);
-template <typename T> static void __logContractDebugMessage(unsigned int, T&);
-template <typename T> static void __logContractErrorMessage(unsigned int, T&);
-template <typename T> static void __logContractInfoMessage(unsigned int, T&);
-template <typename T> static void __logContractWarningMessage(unsigned int, T&);
-static void* __scratchpad();    // TODO: concurrency support (n buffers for n allowed concurrent contract executions)
-// static void* __tryAcquireScratchpad(unsigned int size);  // Thread-safe, may return nullptr if no appropriate buffer is available
-// static void __ReleaseScratchpad(void*);
-
-template <unsigned int functionOrProcedureId>
-struct __FunctionOrProcedureBeginEndGuard
-{
-    // Constructor calling __beginFunctionOrProcedure()
-    __FunctionOrProcedureBeginEndGuard()
-    {
-        __beginFunctionOrProcedure(functionOrProcedureId);
-    }
-
-    // Destructor making sure __endFunctionOrProcedure() is called for every return path
-    ~__FunctionOrProcedureBeginEndGuard()
-    {
-        __endFunctionOrProcedure(functionOrProcedureId);
-    }
-};
-
 
 // With no other includes before, the following are the only headers available to contracts.
 // When adding something, be cautious to keep access of contracts limited to safe features only.
+#include "pre_qpi_def.h"
 #include "contracts/qpi.h"
 #include "qpi_proposal_voting.h"
+
+// make interfaces to oracles available for all contracts
+#include "oracle_core/oracle_interfaces_def.h"
 
 #define QX_CONTRACT_INDEX 1
 #define CONTRACT_INDEX QX_CONTRACT_INDEX
@@ -234,9 +184,86 @@ struct __FunctionOrProcedureBeginEndGuard
 #define CONTRACT_STATE2_TYPE QBOND2
 #include "contracts/QBond.h"
 
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QIP_CONTRACT_INDEX 18
+#define CONTRACT_INDEX QIP_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QIP
+#define CONTRACT_STATE2_TYPE QIP2
+#include "contracts/QIP.h"
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QRAFFLE_CONTRACT_INDEX 19
+#define CONTRACT_INDEX QRAFFLE_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QRAFFLE
+#define CONTRACT_STATE2_TYPE QRAFFLE2
+#include "contracts/QRaffle.h"
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QRWA_CONTRACT_INDEX 20
+#define CONTRACT_INDEX QRWA_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QRWA
+#define CONTRACT_STATE2_TYPE QRWA2
+#include "contracts/qRWA.h"
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QRP_CONTRACT_INDEX 21
+#define CONTRACT_INDEX QRP_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QRP
+#define CONTRACT_STATE2_TYPE QRP2
+#include "contracts/QReservePool.h"
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QTF_CONTRACT_INDEX 22
+#define CONTRACT_INDEX QTF_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QTF
+#define CONTRACT_STATE2_TYPE QTF2
+#include "contracts/QThirtyFour.h"
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define QDUEL_CONTRACT_INDEX 23
+#define CONTRACT_INDEX QDUEL_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE QDUEL
+#define CONTRACT_STATE2_TYPE QDUEL2
+#include "contracts/QDuel.h"
+
+#ifndef NO_PULSE
+
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#define PULSE_CONTRACT_INDEX 24
+#define CONTRACT_INDEX PULSE_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE PULSE
+#define CONTRACT_STATE2_TYPE PULSE2
+#include "contracts/Pulse.h"
+
+#endif
+
 // new contracts should be added above this line
 
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
+// forward declaration, defined in qpi_spectrum_impl.h
+static void setContractFeeReserve(unsigned int contractIndex, long long newValue);
+
 constexpr unsigned short TESTEXA_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
@@ -283,6 +310,8 @@ constexpr unsigned short TESTEXD_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #undef POST_RELEASE_SHARES
 #undef POST_ACQUIRE_SHARES
 #undef POST_INCOMING_TRANSFER
+#undef SET_SHAREHOLDER_PROPOSAL
+#undef SET_SHAREHOLDER_VOTES
 
 
 // The following are included after the contracts to keep their definitions and dependencies
@@ -334,10 +363,19 @@ constexpr struct ContractDescription
     {"QDRAW", 179, 10000, sizeof(QDRAW)}, // proposal in epoch 177, IPO in 178, construction and first use in 179
     {"RL", 182, 10000, sizeof(RL)}, // proposal in epoch 180, IPO in 181, construction and first use in 182
     {"QBOND", 182, 10000, sizeof(QBOND)}, // proposal in epoch 180, IPO in 181, construction and first use in 182
+    {"QIP", 189, 10000, sizeof(QIP)}, // proposal in epoch 187, IPO in 188, construction and first use in 189
+    {"QRAFFLE", 192, 10000, sizeof(QRAFFLE)}, // proposal in epoch 190, IPO in 191, construction and first use in 192
+    {"QRWA", 197, 10000, sizeof(QRWA)}, // proposal in epoch 195, IPO in 196, construction and first use in 197
+	{"QRP", 199, 10000, sizeof(IPO)}, // proposal in epoch 197, IPO in 198, construction and first use in 199
+	{"QTF", 199, 10000, sizeof(QTF)}, // proposal in epoch 197, IPO in 198, construction and first use in 199
+    {"QDUEL", 199, 10000, sizeof(QDUEL)}, // proposal in epoch 197, IPO in 198, construction and first use in 199
+#ifndef NO_PULSE
+	{"PULSE", 202, 10000, sizeof(PULSE)}, // proposal in epoch 200, IPO in 201, construction and first use in 202
+#endif
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
-    {"TESTEXA", 138, 10000, sizeof(IPO)},
-    {"TESTEXB", 138, 10000, sizeof(IPO)},
+    {"TESTEXA", 138, 10000, sizeof(TESTEXA)},
+    {"TESTEXB", 138, 10000, sizeof(TESTEXB)},
     {"TESTEXC", 138, 10000, sizeof(IPO)},
     {"TESTEXD", 155, 10000, sizeof(IPO)},
 #endif
@@ -377,6 +415,8 @@ enum SystemProcedureID
     POST_RELEASE_SHARES,
     POST_ACQUIRE_SHARES,
     POST_INCOMING_TRANSFER,
+    SET_SHAREHOLDER_PROPOSAL,
+    SET_SHAREHOLDER_VOTES,
     contractSystemProcedureCount,
 };
 
@@ -385,7 +425,8 @@ enum OtherEntryPointIDs
     // Used together with SystemProcedureID values, so there must be no overlap!
     USER_PROCEDURE_CALL = contractSystemProcedureCount + 1,
     USER_FUNCTION_CALL = contractSystemProcedureCount + 2,
-    REGISTER_USER_FUNCTIONS_AND_PROCEDURES_CALL = contractSystemProcedureCount + 3
+    REGISTER_USER_FUNCTIONS_AND_PROCEDURES_CALL = contractSystemProcedureCount + 3,
+    USER_PROCEDURE_NOTIFICATION_CALL = contractSystemProcedureCount + 4,
 };
 
 GLOBAL_VAR_DECL SYSTEM_PROCEDURE contractSystemProcedures[contractCount][contractSystemProcedureCount];
@@ -414,6 +455,10 @@ if (!contractName::__postReleaseSharesEmpty) contractSystemProcedures[contractIn
 contractSystemProcedureLocalsSizes[contractIndex][POST_RELEASE_SHARES] = contractName::__postReleaseSharesLocalsSize; \
 if (!contractName::__postIncomingTransferEmpty) contractSystemProcedures[contractIndex][POST_INCOMING_TRANSFER] = (SYSTEM_PROCEDURE)contractName::__postIncomingTransfer;\
 contractSystemProcedureLocalsSizes[contractIndex][POST_INCOMING_TRANSFER] = contractName::__postIncomingTransferLocalsSize; \
+if (!contractName::__setShareholderProposalEmpty) contractSystemProcedures[contractIndex][SET_SHAREHOLDER_PROPOSAL] = (SYSTEM_PROCEDURE)contractName::__setShareholderProposal;\
+contractSystemProcedureLocalsSizes[contractIndex][SET_SHAREHOLDER_PROPOSAL] = contractName::__setShareholderProposalLocalsSize; \
+if (!contractName::__setShareholderVotesEmpty) contractSystemProcedures[contractIndex][SET_SHAREHOLDER_VOTES] = (SYSTEM_PROCEDURE)contractName::__setShareholderVotes;\
+contractSystemProcedureLocalsSizes[contractIndex][SET_SHAREHOLDER_VOTES] = contractName::__setShareholderVotesLocalsSize; \
 if (!contractName::__expandEmpty) contractExpandProcedures[contractIndex] = (EXPAND_PROCEDURE)contractName::__expand;\
 QpiContextForInit qpi(contractIndex); \
 contractName::__registerUserFunctionsAndProcedures(qpi); \
@@ -440,11 +485,72 @@ static void initializeContracts()
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QDRAW);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(RL);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QBOND);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QIP);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QRAFFLE);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QRWA);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QRP);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QTF);
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QDUEL);
+#ifndef NO_PULSE
+	REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(PULSE);
+#endif
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXA);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXB);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXC);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXD);
+
+    // fill execution fee reserves for test contracts
+    setContractFeeReserve(TESTEXA_CONTRACT_INDEX, 100000000000);
+    setContractFeeReserve(TESTEXB_CONTRACT_INDEX, 100000000000);
+    setContractFeeReserve(TESTEXC_CONTRACT_INDEX, 100000000000);
+    setContractFeeReserve(TESTEXD_CONTRACT_INDEX, 100000000000);
 #endif
 }
+
+// Class for registering and looking up user procedures independently of input type, for example for notifications
+class UserProcedureRegistry
+{
+public:
+    struct UserProcedureData
+    {
+        USER_PROCEDURE procedure;
+        unsigned int contractIndex;
+        unsigned int localsSize;
+        unsigned short inputSize;
+        unsigned short outputSize;
+    };
+
+    void init()
+    {
+        setMemory(*this, 0);
+    }
+
+    bool add(unsigned int procedureId, const UserProcedureData& data)
+    {
+        const unsigned int cnt = (unsigned int)idToIndex.population();
+        if (cnt >= idToIndex.capacity())
+            return false;
+
+        copyMemory(userProcData[cnt], data);
+        idToIndex.set(procedureId, cnt);
+
+        return true;
+    }
+
+    const UserProcedureData* get(unsigned int procedureId) const
+    {
+        unsigned int idx;
+        if (!idToIndex.get(procedureId, idx))
+            return nullptr;
+        return userProcData + idx;
+    }
+
+protected:
+    UserProcedureData userProcData[MAX_CONTRACT_PROCEDURES_REGISTERED];
+    QPI::HashMap<unsigned int, unsigned int, MAX_CONTRACT_PROCEDURES_REGISTERED> idToIndex;
+};
+
+// For registering and looking up user procedures independently of input type (for notifications), initialized by initContractExec()
+GLOBAL_VAR_DECL UserProcedureRegistry* userProcedureRegistry GLOBAL_VAR_INIT(nullptr);
