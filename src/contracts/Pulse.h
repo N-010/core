@@ -23,6 +23,7 @@ constexpr uint8 PULSE_MAX_DIGIT_ALIGNED = PULSE_MAX_DIGIT + 7;
 constexpr uint64 PULSE_TICKET_PRICE_DEFAULT = 200000ULL;
 constexpr uint16 PULSE_MAX_NUMBER_OF_WINNERS_IN_HISTORY = 1024;
 constexpr uint64 PULSE_QHEART_ASSET_NAME = 92712259110993ULL; // "QHEART"
+constexpr uint64 PULSE_PUNKS_ASSET_NAME = 357745710416ULL;    // "PUNKS"
 constexpr uint8 PULSE_DEFAULT_DEV_PERCENT = 10;
 constexpr uint8 PULSE_DEFAULT_BURN_PERCENT = 10;
 constexpr uint8 PULSE_DEFAULT_SHAREHOLDERS_PERCENT = 10;
@@ -34,6 +35,22 @@ constexpr uint8 PULSE_DEFAULT_SCHEDULE = 1 << WEDNESDAY | 1 << FRIDAY | 1 << SUN
 constexpr uint32 PULSE_DEFAULT_INIT_TIME = 22 << 9 | 4 << 5 | 13;
 constexpr uint16 PULSE_DEFAULT_MAX_AUTO_TICKETS_PER_USER = div<uint16>(PULSE_MAX_NUMBER_OF_PLAYERS, 2);
 constexpr uint64 PULSE_CLEANUP_THRESHOLD = 75ULL;
+constexpr uint16 PULSE_BOOST_BP_DENOMINATOR = 10000;
+constexpr uint16 PULSE_BOOST_BP_STEP_10 = 1000;
+constexpr uint16 PULSE_BOOST_BP_STEP_15 = 1500;
+constexpr uint16 PULSE_BOOST_BP_STEP_20 = 2000;
+constexpr uint16 PULSE_BOOST_BP_STEP_25 = 2500;
+constexpr uint16 PULSE_BOOST_BP_STEP_30 = 3000;
+constexpr uint64 PULSE_PUNKS_BOOST_TIER_1_MIN = 1ULL;
+constexpr uint64 PULSE_PUNKS_BOOST_TIER_2_MIN = 11ULL;
+constexpr uint64 PULSE_PUNKS_BOOST_TIER_3_MIN = 16ULL;
+constexpr uint64 PULSE_PUNKS_BOOST_TIER_4_MIN = 21ULL;
+constexpr uint64 PULSE_PUNKS_BOOST_TIER_5_MIN = 26ULL;
+constexpr uint64 PULSE_QHEART_BOOST_TIER_1_MIN = 30000000ULL;
+constexpr uint64 PULSE_QHEART_BOOST_TIER_2_MIN = 51000000ULL;
+constexpr uint64 PULSE_QHEART_BOOST_TIER_3_MIN = 76000000ULL;
+constexpr uint64 PULSE_QHEART_BOOST_TIER_4_MIN = 101000000ULL;
+constexpr uint64 PULSE_QHEART_BOOST_TIER_5_MIN = 126000000ULL;
 
 constexpr uint64 PULSE_CONTRACT_ASSET_NAME = 297750254928ULL; // "PULSE"
 
@@ -513,6 +530,20 @@ public:
 		uint8 returnCode;
 	};
 
+	struct GetPlayerBoost_input
+	{
+		id player;
+	};
+	struct GetPlayerBoost_output
+	{
+		uint64 punksBalance;
+		uint64 qheartBalance;
+		uint16 punksBoostBp;
+		uint16 qheartBoostBp;
+		uint16 totalBoostBp;
+		uint8 returnCode;
+	};
+
 	struct GetFees_input
 	{
 	};
@@ -736,8 +767,11 @@ public:
 		uint64 reservedBalance;
 		m256i mixedSpectrumValue;
 		uint64 randomSeed;
+		Array<uint64, PULSE_MAX_NUMBER_OF_PLAYERS> prizes;
 		GetRandomDigits_input randomInput;
 		GetRandomDigits_output randomOutput;
+		GetPlayerBoost_input boostInput;
+		GetPlayerBoost_output boostOutput;
 		Ticket ticket;
 		ComputePrize_locals computePrizeLocals;
 		FillWinnersInfo_input fillWinnersInfoInput;
@@ -801,6 +835,7 @@ public:
 		REGISTER_USER_FUNCTION(ValidateDigits, 12);
 		REGISTER_USER_FUNCTION(GetPlayers, 13);
 		REGISTER_USER_FUNCTION(GetPrizeTable, 14);
+		REGISTER_USER_FUNCTION(GetPlayerBoost, 15);
 
 		REGISTER_USER_PROCEDURE(BuyTicket, 1);
 		REGISTER_USER_PROCEDURE(SetPrice, 2);
@@ -962,6 +997,25 @@ public:
 	{
 		output.balance =
 		    qpi.numberOfPossessedShares(PULSE_QHEART_ASSET_NAME, state.get().qheartIssuer, input.player, input.player, SELF_INDEX, SELF_INDEX);
+		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+	}
+
+	/**
+	 * Returns the current prize boost inputs and summed boost for a player.
+	 * @param player Address whose PUNKS and QHEART balances are checked.
+	 * @return Current token balances, individual boost basis points, the summed boost basis points, and a status code.
+	 */
+	PUBLIC_FUNCTION(GetPlayerBoost)
+	{
+		output.punksBalance = max(
+		    qpi.numberOfPossessedShares(PULSE_PUNKS_ASSET_NAME, getPunksIssuer(), input.player, input.player, QX_CONTRACT_INDEX, QX_CONTRACT_INDEX),
+		    0LL);
+		output.qheartBalance = max(qpi.numberOfPossessedShares(PULSE_QHEART_ASSET_NAME, state.get().qheartIssuer, input.player, input.player,
+		                                                       QX_CONTRACT_INDEX, QX_CONTRACT_INDEX),
+		                           0LL);
+		output.punksBoostBp = getPunksBoostBp(output.punksBalance);
+		output.qheartBoostBp = getQHeartBoostBp(output.qheartBalance);
+		output.totalBoostBp = output.punksBoostBp + output.qheartBoostBp;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
 	}
 
@@ -1527,8 +1581,8 @@ public:
 			return;
 		}
 
-		if (qpi.numberOfPossessedShares(PULSE_QHEART_ASSET_NAME, state.get().qheartIssuer, qpi.invocator(), qpi.invocator(), SELF_INDEX,
-		                                SELF_INDEX) < input.numberOfShares)
+		if (qpi.numberOfPossessedShares(PULSE_QHEART_ASSET_NAME, state.get().qheartIssuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX) <
+		    input.numberOfShares)
 		{
 			output.returnCode = toReturnCode(EReturnCode::TRANSFER_FROM_PULSE_FAILED);
 			return;
@@ -1630,6 +1684,7 @@ private:
 		}
 	}
 
+private:
 	PRIVATE_PROCEDURE_WITH_LOCALS(SettleRound)
 	{
 		if (state.get().ticketCounter == 0)
@@ -1683,6 +1738,10 @@ private:
 		{
 			locals.ticket = state.get().tickets.get(locals.i);
 			locals.prize = computePrize(state, locals.ticket, state.get().lastWinningDigits, locals.computePrizeLocals);
+			locals.boostInput.player = locals.ticket.player;
+			CALL(GetPlayerBoost, locals.boostInput, locals.boostOutput);
+			locals.prize = applyPrizeBoost(locals.prize, locals.boostOutput.totalBoostBp);
+			locals.prizes.set(locals.i, locals.prize);
 			locals.totalPrize += locals.prize;
 		}
 
@@ -1690,7 +1749,7 @@ private:
 		for (locals.i = 0; locals.i < state.get().ticketCounter; ++locals.i)
 		{
 			locals.ticket = state.get().tickets.get(locals.i);
-			locals.prize = computePrize(state, locals.ticket, state.get().lastWinningDigits, locals.computePrizeLocals);
+			locals.prize = locals.prizes.get(locals.i);
 
 			if (locals.totalPrize > 0 && locals.availableBalance < locals.totalPrize)
 			{
@@ -1901,6 +1960,12 @@ public:
 		           : 0LL;
 	}
 
+	static id getPunksIssuer()
+	{
+		return ID(_L, _U, _O, _B, _H, _D, _K, _F, _N, _K, _J, _W, _P, _D, _R, _L, _D, _G, _I, _E, _B, _M, _Z, _W, _U, _X, _Y, _B, _W, _S, _Q, _E, _P,
+		          _X, _A, _Z, _B, _G, _H, _R, _M, _A, _G, _E, _L, _H, _Y, _D, _O, _W, _A, _F, _M, _L, _G, _F);
+	}
+
 protected:
 	static void clearStateOnEndEpoch(QPI::ContractState<StateData, CONTRACT_INDEX>& state)
 	{
@@ -1991,6 +2056,68 @@ protected:
 		locals.anyPositionReward = getAnyPositionReward(state, locals.anyPositionMatches);
 		locals.prize = max(locals.leftAlignedReward, locals.anyPositionReward);
 		return locals.prize;
+	}
+
+	static uint16 getPunksBoostBp(uint64 balance)
+	{
+		if (balance >= PULSE_PUNKS_BOOST_TIER_5_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_30;
+		}
+		if (balance >= PULSE_PUNKS_BOOST_TIER_4_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_25;
+		}
+		if (balance >= PULSE_PUNKS_BOOST_TIER_3_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_20;
+		}
+		if (balance >= PULSE_PUNKS_BOOST_TIER_2_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_15;
+		}
+		if (balance >= PULSE_PUNKS_BOOST_TIER_1_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_10;
+		}
+		return 0;
+	}
+
+	static uint16 getQHeartBoostBp(uint64 balance)
+	{
+		if (balance >= PULSE_QHEART_BOOST_TIER_5_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_30;
+		}
+		if (balance >= PULSE_QHEART_BOOST_TIER_4_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_25;
+		}
+		if (balance >= PULSE_QHEART_BOOST_TIER_3_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_20;
+		}
+		if (balance >= PULSE_QHEART_BOOST_TIER_2_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_15;
+		}
+		if (balance >= PULSE_QHEART_BOOST_TIER_1_MIN)
+		{
+			return PULSE_BOOST_BP_STEP_10;
+		}
+		return 0;
+	}
+
+	static uint64 applyPrizeBoost(uint64 basePrize, uint16 totalBoostBp)
+	{
+		if (basePrize == 0 || totalBoostBp == 0)
+		{
+			return basePrize;
+		}
+
+		return static_cast<uint64>(
+		    sadd(static_cast<sint64>(basePrize),
+		         div<sint64>(smul(static_cast<sint64>(basePrize), static_cast<sint64>(totalBoostBp)), PULSE_BOOST_BP_DENOMINATOR)));
 	}
 
 	static uint16 clampPublicTicketCount(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, sint64 value)
