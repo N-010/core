@@ -29,6 +29,7 @@ constexpr uint16 PULSE_FUNCTION_GET_AUTO_STATS = 11;
 constexpr uint16 PULSE_FUNCTION_VALIDATE_DIGITS = 12;
 constexpr uint16 PULSE_FUNCTION_GET_PLAYERS = 13;
 constexpr uint16 PULSE_FUNCTION_GET_PRIZE_TABLE = 14;
+constexpr uint16 PULSE_FUNCTION_GET_PLAYER_BOOST = 15;
 
 namespace
 {
@@ -232,6 +233,11 @@ public:
 		ComputePrize_locals locals{};
 		return computePrize(asMutState(), ticket, winning, locals);
 	}
+
+	static uint16 callGetPunksBoostBp(uint64 balance) { return getPunksBoostBp(balance); }
+	static uint16 callGetQHeartBoostBp(uint64 balance) { return getQHeartBoostBp(balance); }
+	static uint64 callApplyPrizeBoost(uint64 basePrize, uint16 totalBoostBp) { return applyPrizeBoost(basePrize, totalBoostBp); }
+	static id getPunksIssuerForTests() { return getPunksIssuer(); }
 };
 
 class ContractTestingPulse : protected ContractTesting
@@ -326,6 +332,23 @@ public:
 		PULSE::GetAutoStats_input input{};
 		PULSE::GetAutoStats_output output{};
 		callFunction(PULSE_CONTRACT_INDEX, PULSE_FUNCTION_GET_AUTO_STATS, input, output);
+		return output;
+	}
+
+	PULSE::GetPrizeTable_output getPrizeTable()
+	{
+		PULSE::GetPrizeTable_input input{};
+		PULSE::GetPrizeTable_output output{};
+		callFunction(PULSE_CONTRACT_INDEX, PULSE_FUNCTION_GET_PRIZE_TABLE, input, output);
+		return output;
+	}
+
+	PULSE::GetPlayerBoost_output getPlayerBoost(const id& user)
+	{
+		PULSE::GetPlayerBoost_input input{};
+		input.player = user;
+		PULSE::GetPlayerBoost_output output{};
+		callFunction(PULSE_CONTRACT_INDEX, PULSE_FUNCTION_GET_PLAYER_BOOST, input, output);
 		return output;
 	}
 
@@ -508,6 +531,13 @@ public:
 		int possessionIndex;
 	};
 
+	struct ManagedAssetIssuance
+	{
+		int issuanceIndex;
+		int ownershipIndex;
+		int possessionIndex;
+	};
+
 	QHeartIssuance issueQHeart(sint64 totalShares)
 	{
 		static constexpr char name[7] = {'Q', 'H', 'E', 'A', 'R', 'T', 0};
@@ -519,7 +549,37 @@ public:
 		return info;
 	}
 
+	ManagedAssetIssuance issueQXManagedQHeart(sint64 totalShares)
+	{
+		static constexpr char name[7] = {'Q', 'H', 'E', 'A', 'R', 'T', 0};
+		static constexpr char unit[7] = {};
+		ManagedAssetIssuance info{};
+		const sint64 issued = issueAsset(state()->getQHeartIssuer(), name, 0, unit, totalShares, QX_CONTRACT_INDEX, &info.issuanceIndex,
+		                                 &info.ownershipIndex, &info.possessionIndex);
+		EXPECT_EQ(issued, totalShares);
+		return info;
+	}
+
+	ManagedAssetIssuance issueQXManagedPunks(sint64 totalShares)
+	{
+		static constexpr char name[7] = {'P', 'U', 'N', 'K', 'S', 0, 0};
+		static constexpr char unit[7] = {};
+		ManagedAssetIssuance info{};
+		const sint64 issued = issueAsset(PULSEChecker::getPunksIssuerForTests(), name, 0, unit, totalShares, QX_CONTRACT_INDEX, &info.issuanceIndex,
+		                                 &info.ownershipIndex, &info.possessionIndex);
+		EXPECT_EQ(issued, totalShares);
+		return info;
+	}
+
 	void transferQHeart(const QHeartIssuance& issuance, const id& dest, sint64 amount)
+	{
+		int destOwnershipIndex = 0;
+		int destPossessionIndex = 0;
+		EXPECT_TRUE(transferShareOwnershipAndPossession(issuance.ownershipIndex, issuance.possessionIndex, dest, amount, &destOwnershipIndex,
+		                                                &destPossessionIndex, true));
+	}
+
+	void transferManagedAsset(const ManagedAssetIssuance& issuance, const id& dest, sint64 amount)
 	{
 		int destOwnershipIndex = 0;
 		int destPossessionIndex = 0;
@@ -656,6 +716,30 @@ TEST(ContractPulse_Static, ComputePrizeSelectsBestReward)
 
 	const Array<uint8, PULSE_PLAYER_DIGITS_ALIGNED> none = makePlayerDigits(9, 9, 9, 9, 9, 9);
 	EXPECT_EQ(ctl.state()->callComputePrize(winning, none), 0u);
+}
+
+// Keep boost tiers and percentage math aligned with contract constants.
+TEST(ContractPulse_Static, PrizeBoostThresholdsAndMath)
+{
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(0)), 0u);
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(PULSE_PUNKS_BOOST_TIER_1_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_10));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(PULSE_PUNKS_BOOST_TIER_2_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_15));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(PULSE_PUNKS_BOOST_TIER_3_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_20));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(PULSE_PUNKS_BOOST_TIER_4_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_25));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetPunksBoostBp(PULSE_PUNKS_BOOST_TIER_5_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_30));
+
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(0)), 0u);
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(PULSE_QHEART_BOOST_TIER_1_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_10));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(PULSE_QHEART_BOOST_TIER_2_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_15));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(PULSE_QHEART_BOOST_TIER_3_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_20));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(PULSE_QHEART_BOOST_TIER_4_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_25));
+	EXPECT_EQ(static_cast<uint32>(PULSEChecker::callGetQHeartBoostBp(PULSE_QHEART_BOOST_TIER_5_MIN)), static_cast<uint32>(PULSE_BOOST_BP_STEP_30));
+
+	EXPECT_EQ(PULSEChecker::callApplyPrizeBoost(0, PULSE_BOOST_BP_STEP_30), 0u);
+	EXPECT_EQ(PULSEChecker::callApplyPrizeBoost(2000, 0), 2000u);
+	EXPECT_EQ(PULSEChecker::callApplyPrizeBoost(2000, PULSE_BOOST_BP_STEP_10), 2200u);
+	EXPECT_EQ(PULSEChecker::callApplyPrizeBoost(2000, PULSE_BOOST_BP_STEP_25), 2500u);
+	EXPECT_EQ(PULSEChecker::callApplyPrizeBoost(2000, static_cast<uint16>(PULSE_BOOST_BP_STEP_15 + PULSE_BOOST_BP_STEP_25)), 2800u);
 }
 
 // Prevent stale config from leaking across epochs.
@@ -1684,6 +1768,42 @@ TEST(ContractPulse_Public, GetBalanceReportsQHeartWalletBalance)
 	EXPECT_EQ(ctl.getBalance().balance, 12345u);
 }
 
+// Ensure prize table reflects the current configured ticket price.
+TEST(ContractPulse_Public, GetPrizeTableReflectsCurrentTicketPrice)
+{
+	ContractTestingPulse ctl;
+	EXPECT_EQ(ctl.setPrice(ctl.state()->getQHeartIssuer(), 7).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	ctl.endEpoch();
+
+	const PULSE::GetPrizeTable_output table = ctl.getPrizeTable();
+	EXPECT_EQ(table.returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	EXPECT_EQ(table.ticketPrice, 7u);
+	EXPECT_EQ(table.leftAlignedRewards.get(6), 14000u);
+	EXPECT_EQ(table.leftAlignedRewards.get(3), 140u);
+	EXPECT_EQ(table.anyPositionRewards.get(6), 700u);
+	EXPECT_EQ(table.anyPositionRewards.get(4), 21u);
+	EXPECT_EQ(table.anyPositionRewards.get(2), 0u);
+}
+
+// Report combined token balances and tiered boosts through the public API.
+TEST(ContractPulse_Public, GetPlayerBoostReportsCombinedBoosts)
+{
+	ContractTestingPulse ctl;
+	const id user = id::randomValue();
+	const ContractTestingPulse::ManagedAssetIssuance punks = ctl.issueQXManagedPunks(100);
+	const ContractTestingPulse::ManagedAssetIssuance qheart = ctl.issueQXManagedQHeart(1000000000);
+	ctl.transferManagedAsset(punks, user, PULSE_PUNKS_BOOST_TIER_4_MIN);
+	ctl.transferManagedAsset(qheart, user, PULSE_QHEART_BOOST_TIER_2_MIN);
+
+	const PULSE::GetPlayerBoost_output boost = ctl.getPlayerBoost(user);
+	EXPECT_EQ(boost.returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	EXPECT_EQ(boost.punksBalance, PULSE_PUNKS_BOOST_TIER_4_MIN);
+	EXPECT_EQ(boost.qheartBalance, PULSE_QHEART_BOOST_TIER_2_MIN);
+	EXPECT_EQ(static_cast<uint32>(boost.punksBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_25));
+	EXPECT_EQ(static_cast<uint32>(boost.qheartBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_15));
+	EXPECT_EQ(static_cast<uint32>(boost.totalBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_25 + PULSE_BOOST_BP_STEP_15));
+}
+
 // Report empty winner history before any draws.
 TEST(ContractPulse_Public, GetWinnersReportsEmptyWhenNoWinners)
 {
@@ -1738,6 +1858,49 @@ TEST(ContractPulse_Public, GetWinnersReportsPaidTickets)
 	EXPECT_EQ(winners.winners.get(0).revenue, prizeA);
 	EXPECT_EQ(winners.winners.get(1).winnerAddress, playerB);
 	EXPECT_EQ(winners.winners.get(1).revenue, prizeB);
+}
+
+// Verify payout flow applies the player's live boost before recording winner revenue.
+TEST(ContractPulse_Gameplay, WinnerRevenueIncludesPunksBoost)
+{
+	ContractTestingPulse ctl;
+	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+
+	EXPECT_EQ(ctl.setFees(ctl.state()->getQHeartIssuer(), 0, 0, 0, 0).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	EXPECT_EQ(ctl.setPrice(ctl.state()->getQHeartIssuer(), 1).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	ctl.endEpoch();
+
+	ctl.setDateTime(2025, 1, 9, 12);
+	ctl.beginEpoch();
+
+	ctl.transferQHeart(issuance, ctl.pulseSelf(), 10000);
+	const m256i digest(0x7777ULL, 0x6666ULL, 0x5555ULL, 0x4444ULL);
+	etalonTick.prevSpectrumDigest = digest;
+	const Array<uint8, PULSE_WINNING_DIGITS_ALIGNED>& winning = deriveWinningDigits(ctl, digest);
+	const Array<uint8, PULSE_PLAYER_DIGITS_ALIGNED> exact =
+	    makePlayerDigits(winning.get(0), winning.get(1), winning.get(2), winning.get(3), winning.get(4), winning.get(5));
+
+	const id player = id::randomValue();
+	const ContractTestingPulse::ManagedAssetIssuance punks = ctl.issueQXManagedPunks(100);
+	ctl.transferManagedAsset(punks, player, static_cast<sint64>(PULSE_PUNKS_BOOST_TIER_5_MIN));
+	ctl.transferQHeart(issuance, player, 1);
+	EXPECT_EQ(ctl.buyTicket(player, exact).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+
+	const uint64 balanceAfterBuy = ctl.qheartBalanceOf(player);
+	const uint64 basePrize = ctl.state()->callComputePrize(winning, exact);
+	const uint64 boostedPrize = PULSEChecker::callApplyPrizeBoost(basePrize, PULSE_BOOST_BP_STEP_30);
+	ASSERT_EQ(basePrize, 2000u);
+
+	ctl.setDateTime(2025, 1, 10, 12);
+	ctl.forceBeginTick();
+
+	const PULSE::GetWinners_output winners = ctl.getWinners();
+	EXPECT_EQ(winners.returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	EXPECT_EQ(winners.winnersCounter, 1u);
+	EXPECT_EQ(winners.winners.get(0).winnerAddress, player);
+	EXPECT_EQ(winners.winners.get(0).revenue, boostedPrize);
+	EXPECT_EQ(ctl.qheartBalanceOf(player), balanceAfterBuy + boostedPrize);
 }
 
 // ============================================================================

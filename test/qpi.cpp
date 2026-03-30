@@ -294,6 +294,24 @@ TEST(TestCoreQPI, BitArray)
     EXPECT_FALSE(b128 == b128_3);
 }
 
+TEST(TestCoreQPI, AssetName)
+{
+    constexpr uint64 oneCharacter = assetName("Q");
+    constexpr uint64 fiveCharacters = assetName("PULSE");
+    constexpr uint64 sevenCharacters = assetName("QTFTEST");
+
+    EXPECT_EQ(oneCharacter, assetNameFromString("Q"));
+    EXPECT_EQ(fiveCharacters, assetNameFromString("PULSE"));
+    EXPECT_EQ(sevenCharacters, assetNameFromString("QTFTEST"));
+
+    EXPECT_EQ(assetNameFromInt64(oneCharacter), "Q");
+    EXPECT_EQ(assetNameFromInt64(fiveCharacters), "PULSE");
+    EXPECT_EQ(assetNameFromInt64(sevenCharacters), "QTFTEST");
+
+    EXPECT_EQ(assetName("AB"), 0x4241ULL);
+    EXPECT_EQ(assetName("ABCDEFG"), 0x47464544434241ULL);
+}
+
 TEST(TestCoreQPI, Div) {
     EXPECT_EQ(QPI::div(0, 0), 0);
     EXPECT_EQ(QPI::div(10, 0), 0);
