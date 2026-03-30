@@ -2152,9 +2152,7 @@ protected:
 			return basePrize;
 		}
 
-		return static_cast<uint64>(
-		    sadd(static_cast<sint64>(basePrize),
-		         div<sint64>(smul(static_cast<sint64>(basePrize), static_cast<sint64>(totalBoostBp)), PULSE_BOOST_BP_DENOMINATOR)));
+		return sadd(basePrize, div<uint64>(smul(basePrize, static_cast<uint64>(totalBoostBp)), PULSE_BOOST_BP_DENOMINATOR));
 	}
 
 	static uint16 clampPublicTicketCount(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, sint64 value)
