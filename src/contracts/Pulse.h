@@ -542,6 +542,13 @@ public:
 		uint16 totalBoostBp;
 		uint8 returnCode;
 	};
+	struct GetPlayerBoost_locals
+	{
+		AssetPossessionIterator iterator;
+		Asset asset;
+		sint64 totalBalance;
+		sint64 currentBalance;
+	};
 
 	struct GetFees_input
 	{
@@ -1004,14 +1011,41 @@ public:
 	 * @param player Address whose PUNKS and QHEART balances are checked.
 	 * @return Current token balances, individual boost basis points, the summed boost basis points, and a status code.
 	 */
-	PUBLIC_FUNCTION(GetPlayerBoost)
+	PUBLIC_FUNCTION_WITH_LOCALS(GetPlayerBoost)
 	{
-		output.punksBalance = max(
-		    qpi.numberOfPossessedShares(PULSE_PUNKS_ASSET_NAME, getPunksIssuer(), input.player, input.player, QX_CONTRACT_INDEX, QX_CONTRACT_INDEX),
-		    0LL);
-		output.qheartBalance = max(qpi.numberOfPossessedShares(PULSE_QHEART_ASSET_NAME, state.get().qheartIssuer, input.player, input.player,
-		                                                       QX_CONTRACT_INDEX, QX_CONTRACT_INDEX),
-		                           0LL);
+		// Punks
+		locals.asset.issuer = getPunksIssuer();
+		locals.asset.assetName = PULSE_PUNKS_ASSET_NAME;
+		locals.totalBalance = 0;
+		locals.iterator.begin(locals.asset, AssetOwnershipSelect::byOwner(input.player), AssetPossessionSelect::byPossessor(input.player));
+		while (!locals.iterator.reachedEnd())
+		{
+			locals.currentBalance = locals.iterator.numberOfPossessedShares();
+			if (locals.currentBalance > 0)
+			{
+				locals.totalBalance = sadd(locals.totalBalance, locals.currentBalance);
+			}
+			locals.iterator.next();
+		}
+		output.punksBalance = max(locals.totalBalance, 0LL);
+
+		// QHeart
+		locals.asset.issuer = state.get().qheartIssuer;
+		locals.asset.assetName = PULSE_QHEART_ASSET_NAME;
+		locals.totalBalance = 0;
+		locals.iterator.begin(locals.asset, AssetOwnershipSelect::byOwner(input.player), AssetPossessionSelect::byPossessor(input.player));
+		while (!locals.iterator.reachedEnd())
+		{
+			locals.currentBalance = locals.iterator.numberOfPossessedShares();
+			if (locals.currentBalance > 0)
+			{
+				locals.totalBalance = sadd(locals.totalBalance, locals.currentBalance);
+			}
+			locals.iterator.next();
+		}
+		output.qheartBalance = max(locals.totalBalance, 0LL);
+
+		// Result
 		output.punksBoostBp = getPunksBoostBp(output.punksBalance);
 		output.qheartBoostBp = getQHeartBoostBp(output.qheartBalance);
 		output.totalBoostBp = output.punksBoostBp + output.qheartBoostBp;

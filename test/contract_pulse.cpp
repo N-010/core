@@ -30,6 +30,7 @@ constexpr uint16 PULSE_FUNCTION_VALIDATE_DIGITS = 12;
 constexpr uint16 PULSE_FUNCTION_GET_PLAYERS = 13;
 constexpr uint16 PULSE_FUNCTION_GET_PRIZE_TABLE = 14;
 constexpr uint16 PULSE_FUNCTION_GET_PLAYER_BOOST = 15;
+constexpr uint16 QX_PROCEDURE_TRANSFER_SHARE_MANAGEMENT_RIGHTS = 9;
 
 namespace
 {
@@ -585,6 +586,18 @@ public:
 		int destPossessionIndex = 0;
 		EXPECT_TRUE(transferShareOwnershipAndPossession(issuance.ownershipIndex, issuance.possessionIndex, dest, amount, &destOwnershipIndex,
 		                                                &destPossessionIndex, true));
+	}
+
+	QX::TransferShareManagementRights_output transferManagedAssetRightsOnQX(const id& owner, const Asset& asset, sint64 amount, uint32 newManagingContractIndex)
+	{
+		ensureUserEnergy(owner);
+		QX::TransferShareManagementRights_input input{};
+		input.asset = asset;
+		input.numberOfShares = amount;
+		input.newManagingContractIndex = newManagingContractIndex;
+		QX::TransferShareManagementRights_output output{};
+		invokeUserProcedure(QX_CONTRACT_INDEX, QX_PROCEDURE_TRANSFER_SHARE_MANAGEMENT_RIGHTS, input, output, owner, 0);
+		return output;
 	}
 
 	void issuePulseSharesTo(const id& holder, unsigned int shares)
@@ -1802,6 +1815,43 @@ TEST(ContractPulse_Public, GetPlayerBoostReportsCombinedBoosts)
 	EXPECT_EQ(static_cast<uint32>(boost.punksBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_25));
 	EXPECT_EQ(static_cast<uint32>(boost.qheartBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_15));
 	EXPECT_EQ(static_cast<uint32>(boost.totalBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_25 + PULSE_BOOST_BP_STEP_15));
+}
+
+// Ensure GetPlayerBoost aggregates balances across multiple management-rights records.
+TEST(ContractPulse_Public, GetPlayerBoostAggregatesBalancesAcrossManagingContracts)
+{
+	ContractTestingPulse ctl;
+	const id user = id::randomValue();
+	const ContractTestingPulse::ManagedAssetIssuance punks = ctl.issueQXManagedPunks(100);
+	const ContractTestingPulse::ManagedAssetIssuance qheart = ctl.issueQXManagedQHeart(200000000);
+
+	ctl.transferManagedAsset(punks, user, PULSE_PUNKS_BOOST_TIER_5_MIN);
+	ctl.transferManagedAsset(qheart, user, PULSE_QHEART_BOOST_TIER_5_MIN);
+
+	const Asset punksAsset{PULSEChecker::getPunksIssuerForTests(), PULSE_PUNKS_ASSET_NAME};
+	const Asset qheartAsset{ctl.state()->getQHeartIssuer(), PULSE_QHEART_ASSET_NAME};
+
+	const QX::TransferShareManagementRights_output punksToPulse =
+	    ctl.transferManagedAssetRightsOnQX(user, punksAsset, 10, PULSE_CONTRACT_INDEX);
+	const QX::TransferShareManagementRights_output punksToRl =
+	    ctl.transferManagedAssetRightsOnQX(user, punksAsset, 8, RL_CONTRACT_INDEX);
+	const QX::TransferShareManagementRights_output qheartToPulse =
+	    ctl.transferManagedAssetRightsOnQX(user, qheartAsset, 50000000, PULSE_CONTRACT_INDEX);
+	const QX::TransferShareManagementRights_output qheartToRl =
+	    ctl.transferManagedAssetRightsOnQX(user, qheartAsset, 40000000, RL_CONTRACT_INDEX);
+
+	EXPECT_EQ(punksToPulse.transferredNumberOfShares, 10);
+	EXPECT_EQ(punksToRl.transferredNumberOfShares, 8);
+	EXPECT_EQ(qheartToPulse.transferredNumberOfShares, 50000000);
+	EXPECT_EQ(qheartToRl.transferredNumberOfShares, 40000000);
+
+	const PULSE::GetPlayerBoost_output boost = ctl.getPlayerBoost(user);
+	EXPECT_EQ(boost.returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
+	EXPECT_EQ(boost.punksBalance, PULSE_PUNKS_BOOST_TIER_5_MIN);
+	EXPECT_EQ(boost.qheartBalance, PULSE_QHEART_BOOST_TIER_5_MIN);
+	EXPECT_EQ(static_cast<uint32>(boost.punksBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_30));
+	EXPECT_EQ(static_cast<uint32>(boost.qheartBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_30));
+	EXPECT_EQ(static_cast<uint32>(boost.totalBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_30 + PULSE_BOOST_BP_STEP_30));
 }
 
 // Report empty winner history before any draws.
