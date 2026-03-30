@@ -253,6 +253,19 @@ public:
 		callSystemProcedure(PULSE_CONTRACT_INDEX, INITIALIZE);
 	}
 
+	void qxInitialize()
+	{
+		INIT_CONTRACT(QX);
+		callSystemProcedure(QX_CONTRACT_INDEX, INITIALIZE);
+	}
+
+	void qboundInitialzie()
+	{
+		INIT_CONTRACT(QBOND);
+		callSystemProcedure(QBOND_CONTRACT_INDEX, INITIALIZE);
+
+	}
+
 	PULSEChecker* state() { return reinterpret_cast<PULSEChecker*>(contractStates[PULSE_CONTRACT_INDEX]); }
 	const PULSEChecker* state() const { return reinterpret_cast<PULSEChecker*>(contractStates[PULSE_CONTRACT_INDEX]); }
 
@@ -1817,10 +1830,14 @@ TEST(ContractPulse_Public, GetPlayerBoostReportsCombinedBoosts)
 	EXPECT_EQ(static_cast<uint32>(boost.totalBoostBp), static_cast<uint32>(PULSE_BOOST_BP_STEP_25 + PULSE_BOOST_BP_STEP_15));
 }
 
+
 // Ensure GetPlayerBoost aggregates balances across multiple management-rights records.
 TEST(ContractPulse_Public, GetPlayerBoostAggregatesBalancesAcrossManagingContracts)
 {
 	ContractTestingPulse ctl;
+	ctl.qxInitialize();
+	ctl.qboundInitialzie();
+
 	const id user = id::randomValue();
 	const ContractTestingPulse::ManagedAssetIssuance punks = ctl.issueQXManagedPunks(100);
 	const ContractTestingPulse::ManagedAssetIssuance qheart = ctl.issueQXManagedQHeart(200000000);
@@ -1833,12 +1850,10 @@ TEST(ContractPulse_Public, GetPlayerBoostAggregatesBalancesAcrossManagingContrac
 
 	const QX::TransferShareManagementRights_output punksToPulse =
 	    ctl.transferManagedAssetRightsOnQX(user, punksAsset, 10, PULSE_CONTRACT_INDEX);
-	const QX::TransferShareManagementRights_output punksToRl =
-	    ctl.transferManagedAssetRightsOnQX(user, punksAsset, 8, RL_CONTRACT_INDEX);
+	const QX::TransferShareManagementRights_output punksToRl = ctl.transferManagedAssetRightsOnQX(user, punksAsset, 8, QBOND_CONTRACT_INDEX);
 	const QX::TransferShareManagementRights_output qheartToPulse =
 	    ctl.transferManagedAssetRightsOnQX(user, qheartAsset, 50000000, PULSE_CONTRACT_INDEX);
-	const QX::TransferShareManagementRights_output qheartToRl =
-	    ctl.transferManagedAssetRightsOnQX(user, qheartAsset, 40000000, RL_CONTRACT_INDEX);
+	const QX::TransferShareManagementRights_output qheartToRl = ctl.transferManagedAssetRightsOnQX(user, qheartAsset, 40000000, QBOND_CONTRACT_INDEX);
 
 	EXPECT_EQ(punksToPulse.transferredNumberOfShares, 10);
 	EXPECT_EQ(punksToRl.transferredNumberOfShares, 8);
