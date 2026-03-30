@@ -1770,6 +1770,11 @@ private:
 		{
 			locals.ticket = state.get().tickets.get(locals.i);
 			locals.prize = computePrize(state, locals.ticket, state.get().lastWinningDigits, locals.computePrizeLocals);
+			if (locals.prize == 0)
+			{
+				continue;
+			}
+
 			locals.boostInput.player = locals.ticket.player;
 			CALL(GetPlayerBoost, locals.boostInput, locals.boostOutput);
 			locals.prize = applyPrizeBoost(locals.prize, locals.boostOutput.totalBoostBp);
