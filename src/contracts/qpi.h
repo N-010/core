@@ -1674,6 +1674,25 @@ namespace QPI
 		inline uint16 possessionManagingContract() const;
 	};
 
+	/**
+	 * Packs an asset name string literal into the uint64 representation used by QPI.
+	 * The characters are stored in little-endian byte order; the trailing null terminator is ignored.
+	 * Examples: `assetName("PUNKS")`, `assetName("QHEART")`.
+	 */
+	template<size_t N>
+	constexpr uint64 assetName(const char (&assetName)[N])
+	{
+		static_assert(N >= 2, "Asset name must not be empty");
+		static_assert(N <= 8, "Asset name must be 1..8 characters");
+
+		uint64 value = 0;
+		for (size_t i = 0; i < N - 1; ++i)
+		{
+			value |= static_cast<uint64>(static_cast<unsigned char>(assetName[i])) << (i * 8);
+		}
+		return value;
+	}
+
 	//////////
 	
 	constexpr uint16 INVALID_PROPOSAL_INDEX = 0xffff;

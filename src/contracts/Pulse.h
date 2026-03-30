@@ -22,8 +22,9 @@ constexpr uint8 PULSE_MAX_DIGIT = 9;
 constexpr uint8 PULSE_MAX_DIGIT_ALIGNED = PULSE_MAX_DIGIT + 7;
 constexpr uint64 PULSE_TICKET_PRICE_DEFAULT = 200000ULL;
 constexpr uint16 PULSE_MAX_NUMBER_OF_WINNERS_IN_HISTORY = 1024;
-constexpr uint64 PULSE_QHEART_ASSET_NAME = 92712259110993ULL; // "QHEART"
-constexpr uint64 PULSE_PUNKS_ASSET_NAME = 357745710416ULL;    // "PUNKS"
+constexpr uint64 PULSE_QHEART_ASSET_NAME = assetName("QHEART");
+constexpr uint64 PULSE_PUNKS_ASSET_NAME = assetName("PUNKS");
+constexpr uint64 PULSE_CONTRACT_ASSET_NAME = assetName("PULSE");
 constexpr uint8 PULSE_DEFAULT_DEV_PERCENT = 10;
 constexpr uint8 PULSE_DEFAULT_BURN_PERCENT = 10;
 constexpr uint8 PULSE_DEFAULT_SHAREHOLDERS_PERCENT = 10;
@@ -51,8 +52,6 @@ constexpr uint64 PULSE_QHEART_BOOST_TIER_2_MIN = 51000000ULL;
 constexpr uint64 PULSE_QHEART_BOOST_TIER_3_MIN = 76000000ULL;
 constexpr uint64 PULSE_QHEART_BOOST_TIER_4_MIN = 101000000ULL;
 constexpr uint64 PULSE_QHEART_BOOST_TIER_5_MIN = 126000000ULL;
-
-constexpr uint64 PULSE_CONTRACT_ASSET_NAME = 297750254928ULL; // "PULSE"
 
 struct PULSE2
 {
@@ -1603,7 +1602,6 @@ public:
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
 	}
 
-private:
 	PRIVATE_PROCEDURE_WITH_LOCALS(ProcessAutoTickets)
 	{
 		if (!isSellingOpen(state) || state.get().autoParticipants.population() == 0)
