@@ -1013,6 +1013,9 @@ public:
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetPlayerBoost)
 	{
+		// Sum all possession records owned and possessed by the player so boosts stay stable
+		// even after management rights are moved away from QX to other contracts.
+
 		// Punks
 		locals.asset.issuer = getPunksIssuer();
 		locals.asset.assetName = PULSE_PUNKS_ASSET_NAME;
