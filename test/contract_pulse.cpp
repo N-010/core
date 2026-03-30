@@ -538,7 +538,7 @@ public:
 		int possessionIndex;
 	};
 
-	QHeartIssuance issueQHeart(sint64 totalShares)
+	QHeartIssuance issuePulseManagedQHeart(sint64 totalShares)
 	{
 		static constexpr char name[7] = {'Q', 'H', 'E', 'A', 'R', 'T', 0};
 		static constexpr char unit[7] = {};
@@ -870,7 +870,7 @@ TEST(ContractPulse_Private, PrepareRandomTicketsRejectsWhenSoldOut)
 TEST(ContractPulse_Private, ChargeTicketsFromPlayerRejectsInvalidOrInsufficient)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	ctl.transferQHeart(issuance, user, ticketPrice);
@@ -1136,7 +1136,7 @@ TEST(ContractPulse_Public, BuyTicketValidatesDigits)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	ctl.transferQHeart(issuance, user, PULSE_TICKET_PRICE_DEFAULT);
 
@@ -1163,7 +1163,7 @@ TEST(ContractPulse_Public, BuyTicketFailsWithInsufficientBalance)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	ctl.transferQHeart(issuance, user, PULSE_TICKET_PRICE_DEFAULT - 1);
 
@@ -1178,7 +1178,7 @@ TEST(ContractPulse_Public, BuyTicketSucceedsAndMovesQHeart)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	ctl.transferQHeart(issuance, user, PULSE_TICKET_PRICE_DEFAULT * 2);
 
@@ -1233,7 +1233,7 @@ TEST(ContractPulse_Public, BuyRandomTicketsFailsWithInsufficientBalance)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	ctl.transferQHeart(issuance, user, PULSE_TICKET_PRICE_DEFAULT);
 
@@ -1248,7 +1248,7 @@ TEST(ContractPulse_Public, BuyRandomTicketsSucceedsAndMovesQHeart)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	static constexpr uint16 ticketCount = 3;
 	static constexpr uint64 totalPrice = static_cast<uint64>(ticketCount) * PULSE_TICKET_PRICE_DEFAULT;
@@ -1292,7 +1292,7 @@ TEST(ContractPulse_Public, BuyRandomTicketsDeterministicWithFixedDigest)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	ctl.transferQHeart(issuance, user, ticketPrice);
@@ -1333,7 +1333,7 @@ TEST(ContractPulse_Public, BuyRandomTicketsClampsToSlotsLeft)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	ctl.transferQHeart(issuance, user, ticketPrice * 2);
@@ -1365,7 +1365,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationClampsDesiredTicketsAndStores
 	ContractTestingPulse ctl;
 	EXPECT_EQ(ctl.setAutoLimits(ctl.state()->getQHeartIssuer(), 2).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 2);
@@ -1384,7 +1384,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationClampsDesiredTicketsAndStores
 TEST(ContractPulse_Public, DepositAutoParticipationClampsAmountToBalance)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 balance = static_cast<sint64>(ticketPrice * 2);
@@ -1402,7 +1402,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationClampsAmountToBalance)
 TEST(ContractPulse_Public, DepositAutoParticipationAccumulatesAndUpdatesDesiredTickets)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amountFirst = static_cast<sint64>(ticketPrice * 2);
@@ -1423,7 +1423,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationAccumulatesAndUpdatesDesiredT
 TEST(ContractPulse_Public, DepositAutoParticipationRejectsInsufficientAmount)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	ctl.transferQHeart(issuance, user, ticketPrice);
@@ -1442,7 +1442,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationRejectsWhenAutoParticipantsFu
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice);
 	const sint64 totalShares = static_cast<sint64>(ticketPrice) * static_cast<sint64>(PULSE_MAX_NUMBER_OF_AUTO_PARTICIPANTS + 1);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(totalShares);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(totalShares);
 
 	for (uint32 i = 0; i < PULSE_MAX_NUMBER_OF_AUTO_PARTICIPANTS; ++i)
 	{
@@ -1464,7 +1464,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationBuyNowConsumesAllAndSkipsDepo
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	static constexpr uint16 desiredTickets = 2;
@@ -1491,7 +1491,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationBuyNowStoresRemainder)
 	ctl.setDateTime(2025, 1, 10, 12);
 	ctl.beginEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	static constexpr uint16 desiredTickets = 2;
@@ -1518,7 +1518,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationBuyNowStoresDepositWhenSellin
 	ContractTestingPulse ctl;
 	ctl.endEpoch();
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	static constexpr uint16 desiredTickets = 2;
@@ -1545,7 +1545,7 @@ TEST(ContractPulse_Public, DepositAutoParticipationBuyNowFailsWhenSoldOut)
 	ctl.beginEpoch();
 	ctl.state()->setTicketCounter(PULSE_MAX_NUMBER_OF_PLAYERS);
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	static constexpr uint16 desiredTickets = 1;
@@ -1577,7 +1577,7 @@ TEST(ContractPulse_Public, WithdrawAutoParticipationRejectsMissingEntry)
 TEST(ContractPulse_Public, WithdrawAutoParticipationFullRemovesEntry)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 2);
@@ -1600,7 +1600,7 @@ TEST(ContractPulse_Public, WithdrawAutoParticipationFullRemovesEntry)
 TEST(ContractPulse_Public, WithdrawAutoParticipationPartialKeepsEntry)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 3);
@@ -1619,7 +1619,7 @@ TEST(ContractPulse_Public, WithdrawAutoParticipationPartialKeepsEntry)
 TEST(ContractPulse_Public, WithdrawAutoParticipationOverdrawsToFullWithdrawal)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 2);
@@ -1658,7 +1658,7 @@ TEST(ContractPulse_Public, WithdrawAutoParticipationFailsWhenTransferFails)
 TEST(ContractPulse_Public, SetAutoConfigValidatesAndClamps)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 3);
@@ -1682,7 +1682,7 @@ TEST(ContractPulse_Public, SetAutoConfigValidatesAndClamps)
 TEST(ContractPulse_Public, SetAutoConfigRejectsZeroDesiredTickets)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 2);
@@ -1736,7 +1736,7 @@ TEST(ContractPulse_Public, SetAutoLimitsAllowsDisabling)
 TEST(ContractPulse_Public, GetAutoStatsReportsParticipantRosterAndSharedState)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 
 	const id userA = id::randomValue();
@@ -1763,7 +1763,7 @@ TEST(ContractPulse_Public, GetAutoStatsReportsParticipantRosterAndSharedState)
 TEST(ContractPulse_Public, GetBalanceReportsQHeartWalletBalance)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	ctl.transferQHeart(issuance, ctl.pulseSelf(), 12345);
 	EXPECT_EQ(ctl.getBalance().balance, 12345u);
 }
@@ -1818,7 +1818,7 @@ TEST(ContractPulse_Public, GetWinnersReportsPaidTickets)
 {
 	ContractTestingPulse ctl;
 	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 
 	EXPECT_EQ(ctl.setFees(ctl.state()->getQHeartIssuer(), 0, 0, 0, 0).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
 	EXPECT_EQ(ctl.setPrice(ctl.state()->getQHeartIssuer(), 1).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
@@ -1865,7 +1865,7 @@ TEST(ContractPulse_Gameplay, WinnerRevenueIncludesPunksBoost)
 {
 	ContractTestingPulse ctl;
 	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 
 	EXPECT_EQ(ctl.setFees(ctl.state()->getQHeartIssuer(), 0, 0, 0, 0).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
 	EXPECT_EQ(ctl.setPrice(ctl.state()->getQHeartIssuer(), 1).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
@@ -1883,7 +1883,7 @@ TEST(ContractPulse_Gameplay, WinnerRevenueIncludesPunksBoost)
 
 	const id player = id::randomValue();
 	const ContractTestingPulse::ManagedAssetIssuance punks = ctl.issueQXManagedPunks(100);
-	ctl.transferManagedAsset(punks, player, static_cast<sint64>(PULSE_PUNKS_BOOST_TIER_5_MIN));
+	ctl.transferManagedAsset(punks, player, PULSE_PUNKS_BOOST_TIER_5_MIN);
 	ctl.transferQHeart(issuance, player, 1);
 	EXPECT_EQ(ctl.buyTicket(player, exact).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
 
@@ -1925,7 +1925,7 @@ TEST(ContractPulse_System, BeginEpochRestoresDefaultsAndOpensSelling)
 TEST(ContractPulse_System, BeginEpochProcessesAutoParticipants)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 2);
@@ -1946,7 +1946,7 @@ TEST(ContractPulse_System, BeginEpochProcessesAutoParticipants)
 TEST(ContractPulse_System, BeginEpochAutoParticipationLeavesRemainingDeposit)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	const id user = id::randomValue();
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	const sint64 amount = static_cast<sint64>(ticketPrice * 3);
@@ -2026,7 +2026,7 @@ TEST(ContractPulse_System, BeginTickRunsDrawOnScheduledDay)
 {
 	ContractTestingPulse ctl;
 	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	ctl.transferQHeart(issuance, ctl.pulseSelf(), 100000);
 
 	const id player = id::randomValue();
@@ -2054,7 +2054,7 @@ TEST(ContractPulse_Gameplay, MultipleRoundsMultiplePlayers)
 	ctl.state()->setTicketPriceInternal(10);
 
 	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(100000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(100000000);
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	ctl.transferQHeart(issuance, ctl.pulseSelf(), 10000000);
 	EXPECT_EQ(ctl.getBalance().balance, 10000000);
@@ -2130,7 +2130,7 @@ TEST(ContractPulse_Gameplay, MultipleRoundsMultiplePlayers)
 TEST(ContractPulse_Gameplay, ProRataPayoutWhenBalanceInsufficient)
 {
 	ContractTestingPulse ctl;
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(2000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(2000000);
 
 	EXPECT_EQ(ctl.setFees(ctl.state()->getQHeartIssuer(), 0, 0, 0, 0).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
 	EXPECT_EQ(ctl.setPrice(ctl.state()->getQHeartIssuer(), 1).returnCode, static_cast<uint8>(PULSE::EReturnCode::SUCCESS));
@@ -2186,7 +2186,7 @@ TEST(ContractPulse_Gameplay, FeesDistributedToDevAndShareholders)
 	const id shareholder = id::randomValue();
 	ctl.issuePulseSharesTo(shareholder, NUMBER_OF_COMPUTORS);
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	static constexpr uint8 devPercent = 10;
 	static constexpr uint8 burnPercent = 0;
 	static constexpr uint8 shareholdersPercent = 10;
@@ -2232,7 +2232,7 @@ TEST(ContractPulse_Gameplay, FeesDistributedToRLShareholders)
 	const id rlShareholder = id::randomValue();
 	ctl.issueRandomLotterySharesTo(rlShareholder, NUMBER_OF_COMPUTORS);
 
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(1000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(1000000);
 	static constexpr uint8 devPercent = 0;
 	static constexpr uint8 burnPercent = 0;
 	static constexpr uint8 shareholdersPercent = 0;
@@ -2270,7 +2270,7 @@ TEST(ContractPulse_Gameplay, QHeartHoldLimitExcessTransferred)
 	ContractTestingPulse ctl;
 	ctl.issuePulseSharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
 	ctl.issueRandomLotterySharesTo(id::randomValue(), NUMBER_OF_COMPUTORS);
-	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issueQHeart(5000000);
+	const ContractTestingPulse::QHeartIssuance& issuance = ctl.issuePulseManagedQHeart(5000000);
 	const uint64 ticketPrice = ctl.getTicketPrice().ticketPrice;
 	static constexpr uint64 holdLimit = 100000;
 	static constexpr uint64 preFund = 500000;
