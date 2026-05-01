@@ -20,113 +20,206 @@ constexpr uint16 pulseEditorNextPowerOfTwo(const uint16 value, const uint16 powe
 	return power >= value ? power : pulseEditorNextPowerOfTwo(value, power << 1);
 }
 
-/// Maximum number of game templates stored by the MVP contract.
+// Maximum number of game templates stored by the MVP contract.
 constexpr uint32 PULSEEDITOR_MAX_TEMPLATES = 1024;
-/// Maximum number of tickets retained globally across stored rounds.
+// Maximum number of tickets retained globally across stored rounds.
 constexpr uint32 PULSEEDITOR_MAX_TICKETS = 1024 * PULSEEDITOR_MAX_TEMPLATES;
-/// Maximum number of winner history entries retained in the ring buffer.
+// Maximum number of winner history entries retained in the ring buffer.
 constexpr uint32 PULSEEDITOR_MAX_WINNERS = 1024 * PULSEEDITOR_MAX_TEMPLATES;
-/// Maximum number of winner history entries returned by one `GetWinners` call.
+// Maximum number of winner history entries returned by one `GetWinners` call.
 constexpr uint16 PULSEEDITOR_WINNERS_PAGE_SIZE = 512;
 static_assert((PULSEEDITOR_WINNERS_PAGE_SIZE & (PULSEEDITOR_WINNERS_PAGE_SIZE - 1)) == 0);
-/// Maximum number of player tickets returned by one `GetPlayerTickets` call.
+// Maximum number of player tickets returned by one `GetPlayerTickets` call.
 constexpr uint16 PULSEEDITOR_TICKETS_PAGE_SIZE = 256;
 static_assert((PULSEEDITOR_TICKETS_PAGE_SIZE & (PULSEEDITOR_TICKETS_PAGE_SIZE - 1)) == 0);
-/// Maximum number of templates returned by one discovery query.
+// Maximum number of templates returned by one discovery query.
 constexpr uint16 PULSEEDITOR_TEMPLATES_PAGE_SIZE = 64;
 static_assert((PULSEEDITOR_TEMPLATES_PAGE_SIZE & (PULSEEDITOR_TEMPLATES_PAGE_SIZE - 1)) == 0);
-/// Maximum number of tickets accepted by one batched purchase call.
+// Maximum number of tickets accepted by one batched purchase call.
 constexpr uint16 PULSEEDITOR_MAX_BATCH_TICKETS = 16;
 static_assert((PULSEEDITOR_MAX_BATCH_TICKETS & (PULSEEDITOR_MAX_BATCH_TICKETS - 1)) == 0);
-/// Maximum number of assets that can qualify a winner for the multiplier bonus.
+// Maximum number of assets that can qualify a winner for the multiplier bonus.
 constexpr uint16 PULSEEDITOR_MAX_BONUS_ASSETS = 8;
 static_assert((PULSEEDITOR_MAX_BONUS_ASSETS & (PULSEEDITOR_MAX_BONUS_ASSETS - 1)) == 0);
-/// Maximum supported code length; each ticket uses at most this many digits.
+// Maximum supported code length; each ticket uses at most this many digits.
 constexpr uint8 PULSEEDITOR_MAX_CODE_LENGTH = 10;
-/// QPI-aligned digit storage capacity for ticket and result arrays.
+// QPI-aligned digit storage capacity for ticket and result arrays.
 constexpr uint8 PULSEEDITOR_DIGITS_ALIGNED = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_CODE_LENGTH);
-/// Maximum allowed digit value; derived from code length so the default unique-code alphabet is `0..MAX_CODE_LENGTH-1`.
+// Maximum allowed digit value; derived from code length so the default unique-code alphabet is `0..MAX_CODE_LENGTH-1`.
 constexpr uint8 PULSEEDITOR_MAX_DIGIT = PULSEEDITOR_MAX_CODE_LENGTH - 1;
-/// Bucket count used for digit frequency arrays; rounded up so QPI arrays cover every supported digit.
+// Bucket count used for digit frequency arrays; rounded up so QPI arrays cover every supported digit.
 constexpr uint8 PULSEEDITOR_DIGIT_BUCKETS = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_DIGIT + 1);
-/// Number of possible values on one payout-matrix axis: exact or misplaced matches from `0..MAX_CODE_LENGTH`.
+// Number of possible values on one payout-matrix axis: exact or misplaced matches from `0..MAX_CODE_LENGTH`.
 constexpr uint8 PULSEEDITOR_MATRIX_SIDE = PULSEEDITOR_MAX_CODE_LENGTH + 1;
-/// Logical payout matrix cell count before QPI power-of-two alignment.
+// Logical payout matrix cell count before QPI power-of-two alignment.
 constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SIZE = (PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 1);
-/// Physical payout matrix capacity rounded up for QPI `Array` storage.
+// Physical payout matrix capacity rounded up for QPI `Array` storage.
 constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY = pulseEditorNextPowerOfTwo(PULSEEDITOR_PAYOUT_MATRIX_SIZE);
-/// Platform fee percent deducted from each gross ticket purchase.
+// Platform fee percent deducted from each gross ticket purchase.
 constexpr uint8 PULSEEDITOR_PLATFORM_FEE_PERCENT = 3;
-/// Developer 1 share of the platform fee, expressed as percent of the platform fee.
+// Developer 1 share of the platform fee, expressed as percent of the platform fee.
 constexpr uint8 PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT = 25;
-/// Developer 2 share of the platform fee, expressed as percent of the platform fee.
+// Developer 2 share of the platform fee, expressed as percent of the platform fee.
 constexpr uint8 PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT = 25;
-/// Default upper bound for creator fee percent from non-platform ticket revenue.
+// Default upper bound for creator fee percent from non-platform ticket revenue.
 constexpr uint8 PULSEEDITOR_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
-/// Hard upper bound for burn percent from non-platform ticket revenue.
+// Hard upper bound for burn percent from non-platform ticket revenue.
 constexpr uint8 PULSEEDITOR_MAX_BURN_PERCENT = 20;
-/// Maximum retry count when generating unique random digits before deterministic fallback.
+// Maximum retry count when generating unique random digits before deterministic fallback.
 constexpr uint8 PULSEEDITOR_RANDOM_RETRY_LIMIT = 32;
-/// Contract-share asset name used to distribute asset-entry dividends to PulseEditor shareholders.
+// Contract-share asset name used to distribute asset-entry dividends to PulseEditor shareholders.
 constexpr uint64 PULSEEDITOR_CONTRACT_ASSET_NAME = 90500669654352ULL; // "PEDTOR"
-/// Fixed-point scale for bonus multipliers; `12000` means `1.2x`.
+// Fixed-point scale for bonus multipliers; `12000` means `1.2x`.
 constexpr uint32 PULSEEDITOR_BONUS_MULTIPLIER_SCALE = 10000;
-/// Safety cap for configured bonus multipliers; `100000` means `10x`.
+// Safety cap for configured bonus multipliers; `100000` means `10x`.
 constexpr uint32 PULSEEDITOR_MAX_BONUS_MULTIPLIER_BPS = 100000;
-/// Tick cadence for lifecycle automation; throttling avoids scanning template storage on every tick.
+// Tick cadence for lifecycle automation; throttling avoids scanning template storage on every tick.
 constexpr uint32 PULSEEDITOR_TICK_UPDATE_PERIOD = 100;
-/// Bootstrap date sentinel used by QPI before calendar time is initialized.
+// Bootstrap date sentinel used by QPI before calendar time is initialized.
 constexpr uint32 PULSEEDITOR_DEFAULT_INIT_TIME = 22 << 9 | 4 << 5 | 13;
-/// Maximum template slots inspected by the lifecycle automation during one throttled tick.
+// Maximum template slots inspected by the lifecycle automation during one throttled tick.
 constexpr uint16 PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK = 32;
-/// Templates with no draws for this many epochs are deleted and their template-local funds are returned.
+// Templates with no draws for this many epochs are deleted and their template-local funds are returned.
 constexpr uint16 PULSEEDITOR_TEMPLATE_IDLE_EPOCH_LIMIT = 5;
 
+/**
+ * @brief Reserved secondary contract marker kept for contract registration compatibility.
+ */
 struct PULSEEDITOR2
 {
 };
 
+/**
+ * @brief PulseEditor smart contract that stores game templates, ticket flows, settlement, and platform accounting.
+ */
 struct PULSEEDITOR : public ContractBase
 {
 public:
+	/**
+	 * @brief Compact public and internal result codes returned by PulseEditor procedures and functions.
+	 */
 	enum class EReturnCode : uint8
 	{
+		/**
+		 * @brief Operation completed successfully.
+		 */
 		SUCCESS,
+		/**
+		 * @brief Invocator is not allowed to perform the requested action.
+		 */
 		ACCESS_DENIED,
+		/**
+		 * @brief Template id is outside the created range or points to an empty slot.
+		 */
 		INVALID_TEMPLATE,
+		/**
+		 * @brief Template, round, or lifecycle status blocks the requested action.
+		 */
 		INVALID_STATE,
+		/**
+		 * @brief Input value is outside supported bounds.
+		 */
 		INVALID_VALUE,
+		/**
+		 * @brief Submitted digits violate length, range, or duplicate rules.
+		 */
 		INVALID_DIGITS,
+		/**
+		 * @brief Required Qubic or asset balance/reserve is not available.
+		 */
 		INSUFFICIENT_FUNDS,
+		/**
+		 * @brief Invocation reward or asset ticket payment does not match the ticket price.
+		 */
 		TICKET_INVALID_PRICE,
+		/**
+		 * @brief Global or per-round ticket capacity has been reached.
+		 */
 		TICKET_SOLD_OUT,
+		/**
+		 * @brief Player has reached the per-round ticket limit.
+		 */
 		PLAYER_TICKET_LIMIT,
+		/**
+		 * @brief Contract storage capacity for the requested entity is full.
+		 */
 		STORAGE_FULL,
+		/**
+		 * @brief Fallback error for unexpected internal failures.
+		 */
 		UNKNOWN_ERROR = UINT8_MAX
 	};
 
+	/**
+	 * @brief Stored lifecycle state of a game template.
+	 */
 	enum class ETemplateStatus : uint8
 	{
+		/**
+		 * @brief Slot has no active template data.
+		 */
 		EMPTY,
+		/**
+		 * @brief Template is configurable and not yet published.
+		 */
 		DRAFT,
+		/**
+		 * @brief Template is active and may have an open or settled round.
+		 */
 		PUBLISHED,
+		/**
+		 * @brief Owner requested graceful shutdown after the active round settles.
+		 */
 		STOP_REQUESTED,
+		/**
+		 * @brief Template is stopped and no new rounds should open.
+		 */
 		STOPPED
 	};
 
+	/**
+	 * @brief Stored lifecycle state of the current round slot for a template.
+	 */
 	enum class ERoundStatus : uint8
 	{
+		/**
+		 * @brief Round slot is empty.
+		 */
 		NONE,
+		/**
+		 * @brief Round accepts ticket purchases.
+		 */
 		SELLING,
+		/**
+		 * @brief Round no longer accepts tickets and is waiting for settlement.
+		 */
 		CLOSED,
+		/**
+		 * @brief Round result and ticket payouts have been finalized.
+		 */
 		SETTLED
 	};
 
+	/**
+	 * @brief Stored settlement state of a ticket.
+	 */
 	enum class ETicketStatus : uint8
 	{
+		/**
+		 * @brief Ticket slot is unused.
+		 */
 		EMPTY,
+		/**
+		 * @brief Ticket is accepted and waiting for settlement.
+		 */
 		ACTIVE,
+		/**
+		 * @brief Ticket has been settled, including zero-payout outcomes.
+		 */
 		PAID,
+		/**
+		 * @brief Ticket had a positive payout that could not be transferred.
+		 */
 		UNPAID
 	};
 
@@ -135,9 +228,13 @@ public:
 	 */
 	enum class ERewardMode : uint8
 	{
-		/// Winners are paid in Qubic from the template's Qubic reserves.
+		/**
+		 * @brief Winners are paid in Qubic from the template's Qubic reserves.
+		 */
 		QUBIC,
-		/// Winners are paid in managed asset shares from the template's asset reserves.
+		/**
+		 * @brief Winners are paid in managed asset shares from the template's asset reserves.
+		 */
 		ASSET
 	};
 
@@ -146,9 +243,13 @@ public:
 	 */
 	enum class EEntryMode : uint8
 	{
-		/// Players pay ticket price with the Qubic invocation reward.
+		/**
+		 * @brief Players pay ticket price with the Qubic invocation reward.
+		 */
 		QUBIC,
-		/// Players pay ticket price with managed asset shares collected from their account.
+		/**
+		 * @brief Players pay ticket price with managed asset shares collected from their account.
+		 */
 		ASSET
 	};
 
@@ -160,6 +261,8 @@ public:
 	static constexpr uint8 toReturnCode(const EReturnCode& code) { return static_cast<uint8>(code); }
 
 	/**
+	 * @brief Persistent template configuration, accounting, and lifecycle state.
+	 *
 	 * Invariants:
 	 * - Each template owns exactly one round slot; `currentRoundId` disambiguates tickets from previous rounds.
 	 * - Ticket storage is append-only; global ticket indexes returned to clients remain stable.
@@ -171,120 +274,429 @@ public:
 	 */
 	struct GameTemplate
 	{
+		/**
+		 * @brief Fixed payout table indexed by `(exact, misplaced)`.
+		 */
 		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		/**
+		 * @brief Assets whose possession qualifies a winner for the multiplier bonus.
+		 */
 		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
+		/**
+		 * @brief Raw display name bytes supplied by the creator.
+		 */
 		Array<uint8, 32> name;
+		/**
+		 * @brief Asset paid to winners when `rewardMode == ASSET`.
+		 */
 		Asset rewardAsset;
+		/**
+		 * @brief Asset collected from players when `entryMode == ASSET`.
+		 */
 		Asset entryAsset;
+		/**
+		 * @brief Template owner allowed to fund, edit, stop, and withdraw creator revenue.
+		 */
 		id owner;
+		/**
+		 * @brief Ticket price in Qubic or managed asset shares.
+		 */
 		uint64 ticketPrice;
+		/**
+		 * @brief Qubic reserve used for base payouts.
+		 */
 		uint64 prizeReserve;
+		/**
+		 * @brief Qubic reserve used for multiplier-bonus extra payouts.
+		 */
 		uint64 bonusReserve;
+		/**
+		 * @brief Asset reserve used for base payouts.
+		 */
 		uint64 assetPrizeReserve;
+		/**
+		 * @brief Asset reserve used for multiplier-bonus extra payouts.
+		 */
 		uint64 assetBonusReserve;
+		/**
+		 * @brief Gross asset ticket revenue collected by this template.
+		 */
 		uint64 assetEntryRevenue;
+		/**
+		 * @brief Asset creator revenue available for owner withdrawal.
+		 */
 		uint64 assetCreatorRevenue;
+		/**
+		 * @brief Asset shares burned or accounted as burn for this template.
+		 */
 		uint64 assetBurnAccrued;
+		/**
+		 * @brief Asset developer 1 fee balance accrued for this template.
+		 */
 		uint64 assetDeveloper1Accrued;
+		/**
+		 * @brief Asset developer 2 fee balance accrued for this template.
+		 */
 		uint64 assetDeveloper2Accrued;
+		/**
+		 * @brief Asset dividend balance accrued for PulseEditor shareholders.
+		 */
 		uint64 assetDividendAccrued;
+		/**
+		 * @brief Qubic creator revenue available for owner withdrawal.
+		 */
 		uint64 creatorRevenue;
+		/**
+		 * @brief Qubic burn amount accounted by this template.
+		 */
 		uint64 burnAccrued;
+		/**
+		 * @brief Gross Qubic ticket revenue collected by this template.
+		 */
 		uint64 totalRevenue;
+		/**
+		 * @brief Total Qubic amount paid to winners.
+		 */
 		uint64 totalPaid;
+		/**
+		 * @brief Total multiplier-bonus extra payout paid in Qubic or asset shares.
+		 */
 		uint64 totalBonusPaid;
+		/**
+		 * @brief Total asset shares paid to winners.
+		 */
 		uint64 totalAssetPaid;
+		/**
+		 * @brief Maximum base payout in the payout matrix.
+		 */
 		uint64 maxSinglePayout;
+		/**
+		 * @brief Current round id for this template.
+		 */
 		uint32 currentRoundId;
+		/**
+		 * @brief First tick that accepts purchases; zero means no lower bound.
+		 */
 		uint32 roundStartTick;
+		/**
+		 * @brief Last selling tick; zero disables time-based auto-close.
+		 */
 		uint32 roundEndTick;
+		/**
+		 * @brief Bonus multiplier in fixed-point basis points.
+		 */
 		uint32 bonusMultiplierBps;
+		/**
+		 * @brief Maximum tickets accepted by each round.
+		 */
 		uint16 ticketLimit;
+		/**
+		 * @brief Maximum tickets one player may buy in a round.
+		 */
 		uint16 playerTicketLimit;
+		/**
+		 * @brief Number of valid entries in `bonusAssets`.
+		 */
 		uint16 bonusAssetCount;
+		/**
+		 * @brief Most recent draw epoch, or the idle-deletion baseline before the first draw.
+		 */
 		uint16 lastDrawEpoch;
+		/**
+		 * @brief Ownership managing contract used for reward asset reserve and payout.
+		 */
 		uint16 rewardOwnershipManagingContractIndex;
+		/**
+		 * @brief Possession managing contract used for reward asset reserve and payout.
+		 */
 		uint16 rewardPossessionManagingContractIndex;
+		/**
+		 * @brief Ownership managing contract used for bonus asset checks.
+		 */
 		uint16 bonusOwnershipManagingContractIndex;
+		/**
+		 * @brief Possession managing contract used for bonus asset checks.
+		 */
 		uint16 bonusPossessionManagingContractIndex;
+		/**
+		 * @brief Ownership managing contract used for asset ticket payments.
+		 */
 		uint16 entryOwnershipManagingContractIndex;
+		/**
+		 * @brief Possession managing contract used for asset ticket payments.
+		 */
 		uint16 entryPossessionManagingContractIndex;
+		/**
+		 * @brief Number of digits in submitted and generated codes.
+		 */
 		uint8 codeLength;
+		/**
+		 * @brief Maximum allowed digit value.
+		 */
 		uint8 maxDigit;
+		/**
+		 * @brief Creator share percent of non-platform ticket revenue.
+		 */
 		uint8 creatorFeePercent;
+		/**
+		 * @brief Burn share percent of non-platform ticket revenue.
+		 */
 		uint8 burnPercent;
+		/**
+		 * @brief Reward payout mode.
+		 */
 		ERewardMode rewardMode;
+		/**
+		 * @brief Ticket payment mode.
+		 */
 		EEntryMode entryMode;
+		/**
+		 * @brief Enables multiplier-bonus ownership checks and reserve accounting.
+		 */
 		bit bonusEnabled;
+		/**
+		 * @brief Enables immediate settlement after each accepted ticket.
+		 */
 		bit instantSettlement;
+		/**
+		 * @brief Allows duplicate digits in submitted and generated codes.
+		 */
 		bit allowRepeatedDigits;
+		/**
+		 * @brief Prevents settings updates after the first accepted ticket.
+		 */
 		bit hasTicketSales;
+		/**
+		 * @brief Template lifecycle status.
+		 */
 		ETemplateStatus status;
 	};
 
+	/**
+	 * @brief Current round slot for one template.
+	 */
 	struct Round
 	{
+		/**
+		 * @brief Generated winning digits for a settled round.
+		 */
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
+		/**
+		 * @brief Gross revenue collected in this round.
+		 */
 		uint64 revenue;
+		/**
+		 * @brief Amount added to the prize reserve by ticket purchases in this round.
+		 */
 		uint64 prizeAdded;
+		/**
+		 * @brief Amount paid to winners in this round.
+		 */
 		uint64 paid;
+		/**
+		 * @brief Round id scoped to the owning template.
+		 */
 		uint32 roundId;
+		/**
+		 * @brief First tick that accepts purchases.
+		 */
 		uint32 startTick;
+		/**
+		 * @brief Last selling tick.
+		 */
 		uint32 endTick;
+		/**
+		 * @brief Tick at which settlement completed.
+		 */
 		uint32 settledTick;
+		/**
+		 * @brief Number of accepted tickets in this round.
+		 */
 		uint16 ticketCount;
+		/**
+		 * @brief Number of positive-payout tickets in this round.
+		 */
 		uint16 winnerCount;
+		/**
+		 * @brief Number of positive-payout tickets that could not be paid.
+		 */
 		uint16 unpaidWinnerCount;
+		/**
+		 * @brief Round lifecycle status.
+		 */
 		ERoundStatus status;
 	};
 
+	/**
+	 * @brief Stored ticket snapshot retained in the global ticket array.
+	 */
 	struct Ticket
 	{
+		/**
+		 * @brief Player-submitted code digits.
+		 */
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		/**
+		 * @brief Player who bought the ticket.
+		 */
 		id player;
+		/**
+		 * @brief Qubic payout amount, including bonus when applicable.
+		 */
 		uint64 payout;
+		/**
+		 * @brief Qubic multiplier-bonus extra payout.
+		 */
 		uint64 bonusPayout;
+		/**
+		 * @brief Asset payout amount, including bonus when applicable.
+		 */
 		uint64 assetPayout;
+		/**
+		 * @brief Asset multiplier-bonus extra payout.
+		 */
 		uint64 assetBonusPayout;
+		/**
+		 * @brief Round id this ticket belongs to.
+		 */
 		uint32 roundId;
+		/**
+		 * @brief Template id this ticket belongs to.
+		 */
 		uint16 templateId;
+		/**
+		 * @brief Exact-position match count after settlement.
+		 */
 		uint8 exact;
+		/**
+		 * @brief Misplaced match count after settlement.
+		 */
 		uint8 misplaced;
+		/**
+		 * @brief Ticket settlement status.
+		 */
 		ETicketStatus status;
 	};
 
+	/**
+	 * @brief Winner-history entry stored in the global ring buffer.
+	 */
 	struct WinnerInfo
 	{
+		/**
+		 * @brief Winning player id.
+		 */
 		id player;
+		/**
+		 * @brief Qubic payout amount.
+		 */
 		uint64 payout;
+		/**
+		 * @brief Qubic multiplier-bonus extra payout.
+		 */
 		uint64 bonusPayout;
+		/**
+		 * @brief Asset payout amount.
+		 */
 		uint64 assetPayout;
+		/**
+		 * @brief Asset multiplier-bonus extra payout.
+		 */
 		uint64 assetBonusPayout;
+		/**
+		 * @brief Round id that produced the win.
+		 */
 		uint32 roundId;
+		/**
+		 * @brief Tick at which the win was recorded.
+		 */
 		uint32 tick;
+		/**
+		 * @brief Template id that produced the win.
+		 */
 		uint16 templateId;
+		/**
+		 * @brief Epoch at which the win was recorded.
+		 */
 		uint16 epoch;
+		/**
+		 * @brief Exact-position match count.
+		 */
 		uint8 exact;
+		/**
+		 * @brief Misplaced match count.
+		 */
 		uint8 misplaced;
 	};
 
+	/**
+	 * @brief Full persistent contract state.
+	 */
 	struct StateData
 	{
+		/**
+		 * @brief Template storage indexed by template id.
+		 */
 		Array<GameTemplate, PULSEEDITOR_MAX_TEMPLATES> templates;
+		/**
+		 * @brief One current round slot per template id.
+		 */
 		Array<Round, PULSEEDITOR_MAX_TEMPLATES> rounds;
+		/**
+		 * @brief Global append-only ticket storage.
+		 */
 		Array<Ticket, PULSEEDITOR_MAX_TICKETS> tickets;
+		/**
+		 * @brief Global winner-history ring buffer.
+		 */
 		Array<WinnerInfo, PULSEEDITOR_MAX_WINNERS> winners;
+		/**
+		 * @brief Platform owner allowed to configure and withdraw platform revenue.
+		 */
 		id platformOwner;
+		/**
+		 * @brief First developer fee recipient.
+		 */
 		id developer1;
+		/**
+		 * @brief Second developer fee recipient.
+		 */
 		id developer2;
+		/**
+		 * @brief Pending Qubic amount owed to developer 1.
+		 */
 		uint64 developer1Accrued;
+		/**
+		 * @brief Pending Qubic amount owed to developer 2.
+		 */
 		uint64 developer2Accrued;
+		/**
+		 * @brief Pending Qubic amount reserved for shareholder dividends.
+		 */
 		uint64 dividendAccrued;
+		/**
+		 * @brief Number of template slots ever allocated.
+		 */
 		uint64 templateCount;
+		/**
+		 * @brief Number of tickets ever allocated.
+		 */
 		uint64 ticketCount;
+		/**
+		 * @brief Monotonic winner counter used by the ring buffer.
+		 */
 		uint64 winnerCounter;
+		/**
+		 * @brief Cursor used by throttled lifecycle automation.
+		 */
 		uint16 automationCursor;
+		/**
+		 * @brief Platform fee percent deducted from tickets.
+		 */
 		uint8 platformFeePercent;
+		/**
+		 * @brief Maximum creator fee allowed for future templates.
+		 */
 		uint8 maxCreatorFeePercent;
 	};
 
@@ -293,6 +705,9 @@ public:
 	 */
 	struct TicketDigits
 	{
+		/**
+		 * @brief Submitted code digits for one batched ticket.
+		 */
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
 	};
 
@@ -328,32 +743,59 @@ public:
 	 */
 	struct CreateTemplate_input
 	{
+		// Fixed payout table indexed by `(exact, misplaced)`.
 		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		// Assets whose possession qualifies a winning player for the multiplier bonus.
 		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
+		// Raw template display name bytes.
 		Array<uint8, 32> name;
+		// Asset paid to winners when asset reward mode is selected.
 		Asset rewardAsset;
+		// Asset collected from players when asset entry mode is selected.
 		Asset entryAsset;
+		// Ticket price in Qubic or managed asset shares.
 		uint64 ticketPrice;
+		// First tick that accepts purchases; zero means no lower bound.
 		uint32 roundStartTick;
+		// Last selling tick; zero disables time-based auto-close.
 		uint32 roundEndTick;
+		// Multiplier in fixed-point basis points; `12000` means `1.2x`.
 		uint32 bonusMultiplierBps;
+		// Maximum tickets accepted by each round.
 		uint16 ticketLimit;
+		// Maximum tickets one player may buy in a round.
 		uint16 playerTicketLimit;
+		// Number of valid entries in `bonusAssets`.
 		uint16 bonusAssetCount;
+		// Ownership managing contract used for reward asset reserve and payout.
 		uint16 rewardOwnershipManagingContractIndex;
+		// Possession managing contract used for reward asset reserve and payout.
 		uint16 rewardPossessionManagingContractIndex;
+		// Ownership managing contract used for bonus asset possession checks.
 		uint16 bonusOwnershipManagingContractIndex;
+		// Possession managing contract used for bonus asset possession checks.
 		uint16 bonusPossessionManagingContractIndex;
+		// Ownership managing contract used for asset ticket payments.
 		uint16 entryOwnershipManagingContractIndex;
+		// Possession managing contract used for asset ticket payments.
 		uint16 entryPossessionManagingContractIndex;
+		// Number of digits in each submitted code.
 		uint8 codeLength;
+		// Maximum allowed digit value.
 		uint8 maxDigit;
+		// Creator share percent of non-platform ticket revenue.
 		uint8 creatorFeePercent;
+		// Burn share percent of non-platform ticket revenue.
 		uint8 burnPercent;
+		// Reward payout currency mode.
 		ERewardMode rewardMode;
+		// Ticket payment currency mode.
 		EEntryMode entryMode;
+		// Enables multiplier bonus checks and reserve accounting.
 		bit bonusEnabled;
+		// Enables immediate per-ticket settlement.
 		bit instantSettlement;
+		// Allows duplicate digits in submitted and generated codes.
 		bit allowRepeatedDigits;
 	};
 
@@ -366,9 +808,13 @@ public:
 	 */
 	struct CreateTemplate_output
 	{
+		// Minimum base reserve required before publication.
 		uint64 requiredPrizeReserve;
+		// Minimum multiplier bonus reserve required before publication.
 		uint64 requiredBonusReserve;
+		// Created template index.
 		uint16 templateId;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -406,33 +852,61 @@ public:
 	 */
 	struct UpdateTemplate_input
 	{
+		// Replacement fixed payout table indexed by `(exact, misplaced)`.
 		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		// Replacement bonus qualifying assets.
 		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
+		// Replacement raw template display name bytes.
 		Array<uint8, 32> name;
+		// Replacement reward asset for asset reward mode.
 		Asset rewardAsset;
+		// Replacement entry asset for asset entry mode.
 		Asset entryAsset;
+		// Replacement ticket price in Qubic or managed asset shares.
 		uint64 ticketPrice;
+		// Replacement first selling tick; zero means no lower bound.
 		uint32 roundStartTick;
+		// Replacement last selling tick; zero disables time-based auto-close.
 		uint32 roundEndTick;
+		// Replacement multiplier in fixed-point basis points.
 		uint32 bonusMultiplierBps;
+		// Template index to update.
 		uint16 templateId;
+		// Replacement maximum tickets accepted by each round.
 		uint16 ticketLimit;
+		// Replacement maximum tickets one player may buy in a round.
 		uint16 playerTicketLimit;
+		// Replacement number of valid entries in `bonusAssets`.
 		uint16 bonusAssetCount;
+		// Replacement ownership managing contract for reward asset reserve and payout.
 		uint16 rewardOwnershipManagingContractIndex;
+		// Replacement possession managing contract for reward asset reserve and payout.
 		uint16 rewardPossessionManagingContractIndex;
+		// Replacement ownership managing contract for bonus asset possession checks.
 		uint16 bonusOwnershipManagingContractIndex;
+		// Replacement possession managing contract for bonus asset possession checks.
 		uint16 bonusPossessionManagingContractIndex;
+		// Replacement ownership managing contract for asset ticket payments.
 		uint16 entryOwnershipManagingContractIndex;
+		// Replacement possession managing contract for asset ticket payments.
 		uint16 entryPossessionManagingContractIndex;
+		// Replacement number of digits in each submitted code.
 		uint8 codeLength;
+		// Replacement maximum allowed digit value.
 		uint8 maxDigit;
+		// Replacement creator share percent of non-platform ticket revenue.
 		uint8 creatorFeePercent;
+		// Replacement burn share percent of non-platform ticket revenue.
 		uint8 burnPercent;
+		// Replacement reward payout currency mode.
 		ERewardMode rewardMode;
+		// Replacement ticket payment currency mode.
 		EEntryMode entryMode;
+		// Replacement multiplier bonus enable flag.
 		bit bonusEnabled;
+		// Replacement immediate per-ticket settlement flag.
 		bit instantSettlement;
+		// Replacement duplicate-digit policy.
 		bit allowRepeatedDigits;
 	};
 
@@ -444,8 +918,11 @@ public:
 	 */
 	struct UpdateTemplate_output
 	{
+		// Recomputed minimum base reserve required before publication.
 		uint64 requiredPrizeReserve;
+		// Recomputed minimum multiplier bonus reserve required before publication.
 		uint64 requiredBonusReserve;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -456,6 +933,7 @@ public:
 	 */
 	struct DepositPrizeReserve_input
 	{
+		// Template whose Qubic prize reserve receives the invocation reward.
 		uint16 templateId;
 	};
 
@@ -467,8 +945,11 @@ public:
 	 */
 	struct DepositPrizeReserve_output
 	{
+		// Amount accepted from the invocation reward.
 		uint64 depositedAmount;
+		// Updated Qubic prize reserve.
 		uint64 prizeReserve;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -479,6 +960,7 @@ public:
 	 */
 	struct DepositBonusReserve_input
 	{
+		// Template whose Qubic bonus reserve receives the invocation reward.
 		uint16 templateId;
 	};
 
@@ -490,8 +972,11 @@ public:
 	 */
 	struct DepositBonusReserve_output
 	{
+		// Amount accepted from the invocation reward.
 		uint64 depositedAmount;
+		// Updated Qubic multiplier-bonus reserve.
 		uint64 bonusReserve;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -504,8 +989,11 @@ public:
 	 */
 	struct DepositAssetReserve_input
 	{
+		// Asset shares transferred from the invocator to this contract.
 		uint64 numberOfShares;
+		// Template whose asset reserve receives the shares.
 		uint16 templateId;
+		// True when funding the multiplier-bonus reserve instead of the base prize reserve.
 		bit depositToBonusReserve;
 	};
 
@@ -518,9 +1006,13 @@ public:
 	 */
 	struct DepositAssetReserve_output
 	{
+		// Asset shares accepted by the contract.
 		uint64 depositedNumberOfShares;
+		// Updated base asset reward reserve.
 		uint64 assetPrizeReserve;
+		// Updated multiplier-bonus asset reserve.
 		uint64 assetBonusReserve;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -530,6 +1022,7 @@ public:
 	 */
 	struct PublishTemplate_input
 	{
+		// Draft template to publish.
 		uint16 templateId;
 	};
 
@@ -540,7 +1033,9 @@ public:
 	 */
 	struct PublishTemplate_output
 	{
+		// First selling round id created by publication.
 		uint32 roundId;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -552,7 +1047,9 @@ public:
 	 */
 	struct BuyTicket_input
 	{
+		// Submitted code digits.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		// Template whose active selling round receives the ticket.
 		uint16 templateId;
 	};
 
@@ -564,8 +1061,11 @@ public:
 	 */
 	struct BuyTicket_output
 	{
+		// Global ticket index assigned to the accepted purchase.
 		uint64 ticketIndex;
+		// Round id that accepted the ticket.
 		uint32 roundId;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -579,8 +1079,11 @@ public:
 	 */
 	struct BuyTickets_input
 	{
+		// Submitted ticket codes.
 		Array<TicketDigits, PULSEEDITOR_MAX_BATCH_TICKETS> tickets;
+		// Template whose active selling round receives the tickets.
 		uint16 templateId;
+		// Number of tickets to buy.
 		uint16 ticketCount;
 	};
 
@@ -593,9 +1096,13 @@ public:
 	 */
 	struct BuyTickets_output
 	{
+		// Global ticket indexes assigned to accepted purchases.
 		Array<uint64, PULSEEDITOR_MAX_BATCH_TICKETS> ticketIndexes;
+		// First round id that accepted a ticket.
 		uint32 roundId;
+		// Number of accepted tickets.
 		uint16 acceptedCount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -605,6 +1112,7 @@ public:
 	 */
 	struct SettleRound_input
 	{
+		// Template whose active round should be settled.
 		uint16 templateId;
 	};
 
@@ -618,10 +1126,15 @@ public:
 	 */
 	struct SettleRound_output
 	{
+		// Generated winning code stored for the settled round.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
+		// Total amount paid to winners during settlement.
 		uint64 totalPaid;
+		// Number of tickets with a positive base payout.
 		uint16 winnerCount;
+		// Number of positive-payout tickets that could not be paid.
 		uint16 unpaidWinnerCount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -631,6 +1144,7 @@ public:
 	 */
 	struct RequestStop_input
 	{
+		// Template owned by the invocator.
 		uint16 templateId;
 	};
 
@@ -640,6 +1154,7 @@ public:
 	 */
 	struct RequestStop_output
 	{
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -650,7 +1165,9 @@ public:
 	 */
 	struct WithdrawCreatorRevenue_input
 	{
+		// Template whose creator balance is used.
 		uint16 templateId;
+		// Amount to transfer to the template owner.
 		uint64 amount;
 	};
 
@@ -662,8 +1179,11 @@ public:
 	 */
 	struct WithdrawCreatorRevenue_output
 	{
+		// Amount transferred to the invocator.
 		uint64 withdrawnAmount;
+		// Creator revenue left after withdrawal.
 		uint64 remainingRevenue;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -674,6 +1194,7 @@ public:
 	 */
 	struct WithdrawAssetPlatformRevenue_input
 	{
+		// Template whose asset platform balances are processed.
 		uint16 templateId;
 	};
 
@@ -687,10 +1208,15 @@ public:
 	 */
 	struct WithdrawAssetPlatformRevenue_output
 	{
+		// Asset shares transferred to developer 1.
 		uint64 developer1Amount;
+		// Asset shares transferred to developer 2.
 		uint64 developer2Amount;
+		// Asset shares distributed to PulseEditor shareholders.
 		uint64 dividendAmount;
+		// Asset dividend balance retained after distribution.
 		uint64 dividendAccrued;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -703,9 +1229,13 @@ public:
 	 */
 	struct SetPlatformConfig_input
 	{
+		// Owner allowed to update platform config and withdraw platform revenue.
 		id platformOwner;
+		// First developer fee recipient.
 		id developer1;
+		// Second developer fee recipient.
 		id developer2;
+		// Maximum creator fee allowed for future templates.
 		uint8 maxCreatorFeePercent;
 	};
 
@@ -715,6 +1245,7 @@ public:
 	 */
 	struct SetPlatformConfig_output
 	{
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -735,9 +1266,13 @@ public:
 	 */
 	struct WithdrawPlatformRevenue_output
 	{
+		// Amount transferred to developer 1.
 		uint64 developer1Amount;
+		// Amount transferred to developer 2.
 		uint64 developer2Amount;
+		// Total amount distributed to contract shareholders.
 		uint64 dividendAmount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -747,6 +1282,7 @@ public:
 	 */
 	struct StartNextRound_input
 	{
+		// Template whose next round should open.
 		uint16 templateId;
 	};
 
@@ -757,7 +1293,9 @@ public:
 	 */
 	struct StartNextRound_output
 	{
+		// New active round id.
 		uint32 roundId;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -767,6 +1305,7 @@ public:
 	 */
 	struct GetTemplate_input
 	{
+		// Template index to read.
 		uint16 templateId;
 	};
 
@@ -777,7 +1316,9 @@ public:
 	 */
 	struct GetTemplate_output
 	{
+		// Full stored template snapshot.
 		GameTemplate gameTemplate;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -787,6 +1328,7 @@ public:
 	 */
 	struct GetRound_input
 	{
+		// Template whose round slot should be read.
 		uint16 templateId;
 	};
 
@@ -797,7 +1339,9 @@ public:
 	 */
 	struct GetRound_output
 	{
+		// Current round snapshot for the template.
 		Round round;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -807,6 +1351,7 @@ public:
 	 */
 	struct GetTemplateReadiness_input
 	{
+		// Template index to inspect.
 		uint16 templateId;
 	};
 
@@ -825,15 +1370,25 @@ public:
 	 */
 	struct GetTemplateReadiness_output
 	{
+		// Minimum base prize reserve required for one funded round.
 		uint64 requiredPrizeReserve;
+		// Minimum multiplier bonus reserve required before opening a round.
 		uint64 requiredBonusReserve;
+		// Current Qubic base prize reserve.
 		uint64 prizeReserve;
+		// Current Qubic multiplier-bonus reserve.
 		uint64 bonusReserve;
+		// Current asset base reward reserve.
 		uint64 assetPrizeReserve;
+		// Current asset multiplier-bonus reserve.
 		uint64 assetBonusReserve;
+		// Tick observed while evaluating time-window readiness.
 		uint32 currentTick;
+		// First readiness blocker, or `SUCCESS` when ready.
 		uint8 reasonCode;
+		// Operation result code.
 		uint8 returnCode;
+		// True when current funding and lifecycle state allow publication or next-round start.
 		bit isReady;
 	};
 
@@ -844,7 +1399,9 @@ public:
 	 */
 	struct GetTemplates_input
 	{
+		// Zero-based template offset.
 		uint64 offset;
+		// Requested number of ids; zero means the default page size.
 		uint16 limit;
 	};
 
@@ -858,10 +1415,15 @@ public:
 	 */
 	struct GetTemplates_output
 	{
+		// Page of template ids.
 		Array<uint16, PULSEEDITOR_TEMPLATES_PAGE_SIZE> templateIds;
+		// Status byte for each returned template id.
 		Array<uint8, PULSEEDITOR_TEMPLATES_PAGE_SIZE> statuses;
+		// Number of templates ever created.
 		uint64 totalTemplates;
+		// Number of valid entries in `templateIds` and `statuses`.
 		uint16 returnedCount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -871,6 +1433,7 @@ public:
 	 */
 	struct GetTicket_input
 	{
+		// Global ticket index to read.
 		uint64 ticketIndex;
 	};
 
@@ -881,7 +1444,9 @@ public:
 	 */
 	struct GetTicket_output
 	{
+		// Stored ticket snapshot.
 		Ticket ticket;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -898,12 +1463,19 @@ public:
 	 */
 	struct GetPlayerTickets_input
 	{
+		// Player id whose tickets should be scanned.
 		id player;
+		// Zero-based offset within the matched ticket set.
 		uint64 offset;
+		// Optional round id filter.
 		uint32 roundId;
+		// Optional template id filter.
 		uint16 templateId;
+		// Requested number of entries; zero means the default page size.
 		uint16 limit;
+		// Enables filtering by `templateId`.
 		bit useTemplateFilter;
+		// Enables filtering by `roundId`.
 		bit useRoundFilter;
 	};
 
@@ -917,10 +1489,15 @@ public:
 	 */
 	struct GetPlayerTickets_output
 	{
+		// Page of matched ticket snapshots.
 		Array<Ticket, PULSEEDITOR_TICKETS_PAGE_SIZE> tickets;
+		// Global indexes corresponding to `tickets`.
 		Array<uint64, PULSEEDITOR_TICKETS_PAGE_SIZE> ticketIndexes;
+		// Total tickets matching the player and optional filters.
 		uint64 totalMatched;
+		// Number of valid entries in `tickets` and `ticketIndexes`.
 		uint16 returnedCount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -932,7 +1509,9 @@ public:
 	 */
 	struct GetWinners_input
 	{
+		// Zero-based offset from the oldest retained winner.
 		uint64 offset;
+		// Requested number of entries; zero means the default page size.
 		uint16 limit;
 	};
 
@@ -946,10 +1525,15 @@ public:
 	 */
 	struct GetWinners_output
 	{
+		// Page of winner entries.
 		Array<WinnerInfo, PULSEEDITOR_WINNERS_PAGE_SIZE> winners;
+		// Monotonic winner counter used to interpret ring-buffer order.
 		uint64 winnerCounter;
+		// Number of winner entries currently retained.
 		uint64 totalStored;
+		// Number of valid entries in `winners`.
 		uint16 returnedCount;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -974,14 +1558,23 @@ public:
 	 */
 	struct GetPlatformAccounting_output
 	{
+		// Current platform owner.
 		id platformOwner;
+		// Current first developer recipient.
 		id developer1;
+		// Current second developer recipient.
 		id developer2;
+		// Pending amount owed to developer 1.
 		uint64 developer1Accrued;
+		// Pending amount owed to developer 2.
 		uint64 developer2Accrued;
+		// Pending total amount reserved for shareholder dividends.
 		uint64 dividendAccrued;
+		// Platform fee percent deducted from tickets.
 		uint8 platformFeePercent;
+		// Current creator-fee upper bound.
 		uint8 maxCreatorFeePercent;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -994,9 +1587,13 @@ public:
 	 */
 	struct ValidateDigits_input
 	{
+		// Code digits to validate.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		// Number of leading entries to validate.
 		uint8 codeLength;
+		// Maximum allowed digit value.
 		uint8 maxDigit;
+		// Whether duplicate digits are accepted.
 		bit allowRepeatedDigits;
 	};
 
@@ -1007,7 +1604,9 @@ public:
 	 */
 	struct ValidateDigits_output
 	{
+		// True when the code obeys range and uniqueness rules.
 		bit isValid;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -1019,8 +1618,11 @@ public:
 	 */
 	struct TransferShareManagementRights_input
 	{
+		// Asset whose management rights should be moved.
 		Asset asset;
+		// Number of shares to release.
 		sint64 numberOfShares;
+		// Destination ownership and possession managing contract index.
 		uint32 newManagingContractIndex;
 	};
 
@@ -1030,9 +1632,13 @@ public:
 	 */
 	struct TransferShareManagementRights_output
 	{
+		// Number of shares released, or zero on failure.
 		sint64 transferredNumberOfShares;
 	};
 
+	/**
+	 * @brief Local state used while releasing asset management rights.
+	 */
 	struct TransferShareManagementRights_locals
 	{
 		sint64 result;
@@ -1049,8 +1655,11 @@ public:
 	 */
 	struct CountMatches_input
 	{
+		// Player-submitted code.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> playerDigits;
+		// Generated winning code.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
+		// Number of leading positions to compare.
 		uint8 codeLength;
 	};
 
@@ -1062,8 +1671,11 @@ public:
 	 */
 	struct CountMatches_output
 	{
+		// Linear payout matrix index for `(exact, misplaced)`.
 		uint16 payoutMatrixIndex;
+		// Number of position-correct digits.
 		uint8 exact;
+		// Number of value-correct but position-wrong digits.
 		uint8 misplaced;
 	};
 
@@ -1076,9 +1688,13 @@ public:
 	 */
 	struct GenerateWinningDigits_input
 	{
+		// K12-derived deterministic round seed.
 		uint64 seed;
+		// Number of digits to generate.
 		uint8 codeLength;
+		// Maximum generated digit value.
 		uint8 maxDigit;
+		// Whether generated digits may repeat.
 		bit allowRepeatedDigits;
 	};
 
@@ -1088,30 +1704,59 @@ public:
 	 */
 	struct GenerateWinningDigits_output
 	{
+		// Generated winning digits in QPI-aligned storage.
 		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
 	};
 
+	/**
+	 * @brief Internal input for settling one just-purchased instant ticket.
+	 * @param ticketIndex Global ticket index to settle.
+	 * @param templateId Template that accepted the ticket.
+	 */
 	struct SettleInstantTicket_input
 	{
+		// Global ticket index to settle.
 		uint64 ticketIndex;
+		// Template that accepted the ticket.
 		uint16 templateId;
 	};
 
+	/**
+	 * @brief Internal output from instant-ticket settlement.
+	 * @param returnCode `SUCCESS` or the internal settlement blocker.
+	 */
 	struct SettleInstantTicket_output
 	{
+		// Operation result code.
 		uint8 returnCode;
 	};
 
+	/**
+	 * @brief Internal input for distributing asset dividends to shareholders.
+	 * @param dividendAsset Asset being distributed as dividends.
+	 * @param shareholdersAsset Contract-share asset used to enumerate holders.
+	 * @param dividendAmount Total dividend asset shares available for distribution.
+	 * @param shareholdersTotalShares Total shareholder supply used for per-share division.
+	 */
 	struct TransferAssetDividendToShareholders_input
 	{
+		// Asset being distributed as dividends.
 		Asset dividendAsset;
+		// Contract-share asset used to enumerate holders.
 		Asset shareholdersAsset;
+		// Total dividend asset shares available for distribution.
 		sint64 dividendAmount;
+		// Total shareholder supply used for per-share division.
 		sint64 shareholdersTotalShares;
 	};
 
+	/**
+	 * @brief Internal output from asset dividend distribution.
+	 * @param distributedAmount Asset shares actually distributed to shareholders.
+	 */
 	struct TransferAssetDividendToShareholders_output
 	{
+		// Asset shares actually distributed to shareholders.
 		uint64 distributedAmount;
 	};
 
@@ -1121,6 +1766,7 @@ public:
 	 */
 	struct DeleteIdleTemplate_input
 	{
+		// Template whose local balances should be refunded before clearing storage.
 		uint16 templateId;
 	};
 
@@ -1132,8 +1778,11 @@ public:
 	 */
 	struct DeleteIdleTemplate_output
 	{
+		// Qubic amount returned to the template owner.
 		uint64 qubicRefund;
+		// Asset shares returned to the template owner.
 		uint64 assetRefund;
+		// Operation result code.
 		uint8 returnCode;
 	};
 
@@ -1151,10 +1800,15 @@ public:
 	 */
 	struct ProcessLifecycleAutomation_output
 	{
+		// Number of template slots checked in this pass.
 		uint16 inspectedTemplates;
+		// Number of settle/start/delete actions attempted in this pass.
 		uint16 lifecycleActions;
 	};
 
+	/**
+	 * @brief Scratch storage for digit validation.
+	 */
 	struct ValidateDigits_locals
 	{
 		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> seen;
@@ -1163,6 +1817,9 @@ public:
 		uint8 count;
 	};
 
+	/**
+	 * @brief Scratch storage for exact and misplaced match counting.
+	 */
 	struct CountMatches_locals
 	{
 		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> playerCounts;
@@ -1174,6 +1831,9 @@ public:
 		uint8 winningCount;
 	};
 
+	/**
+	 * @brief Scratch storage for deterministic winning digit generation.
+	 */
 	struct GenerateWinningDigits_locals
 	{
 		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> used;
@@ -1184,6 +1844,9 @@ public:
 		uint8 fallback;
 	};
 
+	/**
+	 * @brief Local state used while creating a template.
+	 */
 	struct CreateTemplate_locals
 	{
 		GameTemplate gameTemplate;
@@ -1192,6 +1855,9 @@ public:
 		uint64 payout;
 	};
 
+	/**
+	 * @brief Local state used while updating a template.
+	 */
 	struct UpdateTemplate_locals
 	{
 		GameTemplate gameTemplate;
@@ -1200,18 +1866,27 @@ public:
 		uint64 payout;
 	};
 
+	/**
+	 * @brief Local state used while depositing Qubic prize reserve.
+	 */
 	struct DepositPrizeReserve_locals
 	{
 		GameTemplate gameTemplate;
 		uint64 depositAmount;
 	};
 
+	/**
+	 * @brief Local state used while depositing Qubic bonus reserve.
+	 */
 	struct DepositBonusReserve_locals
 	{
 		GameTemplate gameTemplate;
 		uint64 depositAmount;
 	};
 
+	/**
+	 * @brief Local state used while depositing asset reserve shares.
+	 */
 	struct DepositAssetReserve_locals
 	{
 		GameTemplate gameTemplate;
@@ -1219,12 +1894,18 @@ public:
 		sint64 possessedShares;
 	};
 
+	/**
+	 * @brief Local state used while publishing a template.
+	 */
 	struct PublishTemplate_locals
 	{
 		GameTemplate gameTemplate;
 		Round round;
 	};
 
+	/**
+	 * @brief Local state used while buying one ticket.
+	 */
 	struct BuyTicket_locals
 	{
 		GameTemplate gameTemplate;
@@ -1249,6 +1930,9 @@ public:
 		uint16 playerTicketCount;
 	};
 
+	/**
+	 * @brief Local state used while buying a batch of tickets.
+	 */
 	struct BuyTickets_locals
 	{
 		GameTemplate gameTemplate;
@@ -1275,6 +1959,9 @@ public:
 		uint16 playerTicketCount;
 	};
 
+	/**
+	 * @brief Entropy input used for round settlement randomness.
+	 */
 	struct SettleRound_randomData
 	{
 		m256i prevSpectrumDigest;
@@ -1283,6 +1970,9 @@ public:
 		uint16 ticketCount;
 	};
 
+	/**
+	 * @brief Local state used while settling a non-instant round.
+	 */
 	struct SettleRound_locals
 	{
 		SettleRound_randomData randomData;
@@ -1306,6 +1996,9 @@ public:
 		bit bonusQualified;
 	};
 
+	/**
+	 * @brief Local state used while settling one instant ticket.
+	 */
 	struct SettleInstantTicket_locals
 	{
 		SettleRound_randomData randomData;
@@ -1328,6 +2021,9 @@ public:
 		bit bonusQualified;
 	};
 
+	/**
+	 * @brief Local state used while iterating shareholder asset holders.
+	 */
 	struct TransferAssetDividendToShareholders_locals
 	{
 		AssetPossessionIterator shareholdersIter;
@@ -1337,12 +2033,18 @@ public:
 		sint64 transferResult;
 	};
 
+	/**
+	 * @brief Local state used while requesting graceful template shutdown.
+	 */
 	struct RequestStop_locals
 	{
 		GameTemplate gameTemplate;
 		Round round;
 	};
 
+	/**
+	 * @brief Local state used while withdrawing creator revenue.
+	 */
 	struct WithdrawCreatorRevenue_locals
 	{
 		GameTemplate gameTemplate;
@@ -1350,6 +2052,9 @@ public:
 		sint64 transferResult;
 	};
 
+	/**
+	 * @brief Local state used while withdrawing asset-denominated platform revenue.
+	 */
 	struct WithdrawAssetPlatformRevenue_locals
 	{
 		GameTemplate gameTemplate;
@@ -1363,6 +2068,9 @@ public:
 		sint64 possessedShares;
 	};
 
+	/**
+	 * @brief Local state used while withdrawing Qubic-denominated platform revenue.
+	 */
 	struct WithdrawPlatformRevenue_locals
 	{
 		uint64 developer1Amount;
@@ -1371,12 +2079,18 @@ public:
 		uint64 dividendPerShare;
 	};
 
+	/**
+	 * @brief Local state used while opening the next automated round.
+	 */
 	struct StartNextRound_locals
 	{
 		GameTemplate gameTemplate;
 		Round round;
 	};
 
+	/**
+	 * @brief Local state used by the throttled tick automation pass.
+	 */
 	struct ProcessLifecycleAutomation_locals
 	{
 		GameTemplate gameTemplate;
@@ -1392,6 +2106,9 @@ public:
 		uint64 templatesToInspect;
 	};
 
+	/**
+	 * @brief Local state used while deleting an idle template.
+	 */
 	struct DeleteIdleTemplate_locals
 	{
 		GameTemplate gameTemplate;
@@ -1401,6 +2118,9 @@ public:
 		sint64 transferResult;
 	};
 
+	/**
+	 * @brief Local state used by `BEGIN_TICK_WITH_LOCALS`.
+	 */
 	struct BEGIN_TICK_locals
 	{
 		ProcessLifecycleAutomation_input automationInput;
@@ -1408,6 +2128,9 @@ public:
 		uint32 currentDateStamp;
 	};
 
+	/**
+	 * @brief Local state used while reading the winner-history ring buffer.
+	 */
 	struct GetWinners_locals
 	{
 		uint64 oldestCounter;
@@ -1418,6 +2141,9 @@ public:
 		uint16 i;
 	};
 
+	/**
+	 * @brief Local state used while scanning tickets for one player.
+	 */
 	struct GetPlayerTickets_locals
 	{
 		Ticket ticket;
@@ -1426,12 +2152,18 @@ public:
 		uint16 requestedLimit;
 	};
 
+	/**
+	 * @brief Local state used while evaluating template readiness.
+	 */
 	struct GetTemplateReadiness_locals
 	{
 		GameTemplate gameTemplate;
 		Round round;
 	};
 
+	/**
+	 * @brief Local state used while reading template discovery pages.
+	 */
 	struct GetTemplates_locals
 	{
 		uint64 remaining;
@@ -1986,10 +2718,7 @@ public:
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			return;
 		}
-		if (locals.gameTemplate.bonusEnabled &&
-		    ((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve < requiredBonusReserve(locals.gameTemplate)) ||
-		     (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-		      locals.gameTemplate.assetBonusReserve < requiredBonusReserve(locals.gameTemplate))))
+		if (!hasRequiredBonusReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			return;
@@ -2150,14 +2879,14 @@ public:
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 				return;
 			}
-			locals.platformFee = div<uint64>(smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(state.get().platformFeePercent)), 100ULL);
-			locals.dev1Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
-			locals.dev2Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
+			locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
+			locals.dev1Amount = platformDev1Share(locals.platformFee);
+			locals.dev2Amount = platformDev2Share(locals.platformFee);
 			locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-			locals.netRevenue = locals.gameTemplate.ticketPrice - locals.platformFee;
-			locals.creatorAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.creatorFeePercent)), 100ULL);
-			locals.burnAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.burnPercent)), 100ULL);
-			locals.prizeAmount = locals.netRevenue - locals.creatorAmount - locals.burnAmount;
+			locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
+			locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
+			locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
+			locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
 			if (locals.burnAmount > 0)
 			{
 				locals.transferResult =
@@ -2184,14 +2913,14 @@ public:
 		}
 		else
 		{
-			locals.platformFee = div<uint64>(smul(locals.reward, static_cast<uint64>(state.get().platformFeePercent)), 100ULL);
-			locals.dev1Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
-			locals.dev2Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
+			locals.platformFee = ticketPlatformFee(locals.reward, state.get().platformFeePercent);
+			locals.dev1Amount = platformDev1Share(locals.platformFee);
+			locals.dev2Amount = platformDev2Share(locals.platformFee);
 			locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-			locals.netRevenue = locals.reward - locals.platformFee;
-			locals.creatorAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.creatorFeePercent)), 100ULL);
-			locals.burnAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.burnPercent)), 100ULL);
-			locals.prizeAmount = locals.netRevenue - locals.creatorAmount - locals.burnAmount;
+			locals.netRevenue = ticketNetRevenue(locals.reward, locals.platformFee);
+			locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
+			locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
+			locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
 
 			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.dev1Amount);
 			state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.dev2Amount);
@@ -2490,14 +3219,14 @@ public:
 						return;
 					}
 				}
-				locals.platformFee = div<uint64>(smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(state.get().platformFeePercent)), 100ULL);
-				locals.dev1Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
-				locals.dev2Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
+				locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
+				locals.dev1Amount = platformDev1Share(locals.platformFee);
+				locals.dev2Amount = platformDev2Share(locals.platformFee);
 				locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-				locals.netRevenue = locals.gameTemplate.ticketPrice - locals.platformFee;
-				locals.creatorAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.creatorFeePercent)), 100ULL);
-				locals.burnAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.burnPercent)), 100ULL);
-				locals.prizeAmount = locals.netRevenue - locals.creatorAmount - locals.burnAmount;
+				locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
+				locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
+				locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
+				locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
 				if (locals.burnAmount > 0)
 				{
 					locals.transferResult =
@@ -2533,14 +3262,14 @@ public:
 			}
 			else
 			{
-				locals.platformFee = div<uint64>(smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(state.get().platformFeePercent)), 100ULL);
-				locals.dev1Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
-				locals.dev2Amount = div<uint64>(smul(locals.platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
+				locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
+				locals.dev1Amount = platformDev1Share(locals.platformFee);
+				locals.dev2Amount = platformDev2Share(locals.platformFee);
 				locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-				locals.netRevenue = locals.gameTemplate.ticketPrice - locals.platformFee;
-				locals.creatorAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.creatorFeePercent)), 100ULL);
-				locals.burnAmount = div<uint64>(smul(locals.netRevenue, static_cast<uint64>(locals.gameTemplate.burnPercent)), 100ULL);
-				locals.prizeAmount = locals.netRevenue - locals.creatorAmount - locals.burnAmount;
+				locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
+				locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
+				locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
+				locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
 
 				state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.dev1Amount);
 				state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.dev2Amount);
@@ -3125,10 +3854,7 @@ public:
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			return;
 		}
-		if (locals.gameTemplate.bonusEnabled &&
-		    ((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve < requiredBonusReserve(locals.gameTemplate)) ||
-		     (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-		      locals.gameTemplate.assetBonusReserve < requiredBonusReserve(locals.gameTemplate))))
+		if (!hasRequiredBonusReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			return;
@@ -3236,10 +3962,7 @@ public:
 			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
 			return;
 		}
-		if (locals.gameTemplate.bonusEnabled &&
-		    ((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve < requiredBonusReserve(locals.gameTemplate)) ||
-		     (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-		      locals.gameTemplate.assetBonusReserve < requiredBonusReserve(locals.gameTemplate))))
+		if (!hasRequiredBonusReserve(locals.gameTemplate))
 		{
 			output.reasonCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
@@ -3657,11 +4380,7 @@ public:
 		{
 			locals.gameTemplate.status = ETemplateStatus::STOPPED;
 		}
-		else if (hasRequiredBaseReserve(locals.gameTemplate) && (!locals.gameTemplate.bonusEnabled ||
-		                                                         (locals.gameTemplate.rewardMode == ERewardMode::QUBIC &&
-		                                                          locals.gameTemplate.bonusReserve >= requiredBonusReserve(locals.gameTemplate)) ||
-		                                                         (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-		                                                          locals.gameTemplate.assetBonusReserve >= requiredBonusReserve(locals.gameTemplate))))
+		else if (hasRequiredRoundReserves(locals.gameTemplate))
 		{
 			locals.gameTemplate.currentRoundId = sadd(locals.gameTemplate.currentRoundId, 1U);
 			setMemory(locals.round, 0);
@@ -4054,16 +4773,86 @@ public:
 	 */
 	static uint64 assetEntryPrizeContribution(const GameTemplate& gameTemplate)
 	{
-		return (gameTemplate.ticketPrice -
-		        div<uint64>(smul(gameTemplate.ticketPrice, static_cast<uint64>(PULSEEDITOR_PLATFORM_FEE_PERCENT)), 100ULL)) -
-		       div<uint64>(smul((gameTemplate.ticketPrice -
-		                         div<uint64>(smul(gameTemplate.ticketPrice, static_cast<uint64>(PULSEEDITOR_PLATFORM_FEE_PERCENT)), 100ULL)),
-		                        static_cast<uint64>(gameTemplate.creatorFeePercent)),
-		                   100ULL) -
-		       div<uint64>(smul((gameTemplate.ticketPrice -
-		                         div<uint64>(smul(gameTemplate.ticketPrice, static_cast<uint64>(PULSEEDITOR_PLATFORM_FEE_PERCENT)), 100ULL)),
-		                        static_cast<uint64>(gameTemplate.burnPercent)),
-		                   100ULL);
+		return ticketPrizeShare(ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		                        ticketCreatorShare(ticketNetRevenue(gameTemplate.ticketPrice,
+		                                                            ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		                                           gameTemplate.creatorFeePercent),
+		                        ticketBurnShare(ticketNetRevenue(gameTemplate.ticketPrice,
+		                                                         ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		                                        gameTemplate.burnPercent));
+	}
+
+	/**
+	 * @brief Computes platform fee from a gross ticket amount.
+	 * @param grossAmount Qubic amount or asset shares paid for one or more tickets.
+	 * @param platformFeePercent Platform fee percentage.
+	 * @return Fee amount rounded down by integer division.
+	 */
+	static uint64 ticketPlatformFee(const uint64 grossAmount, const uint8 platformFeePercent)
+	{
+		return div<uint64>(smul(grossAmount, static_cast<uint64>(platformFeePercent)), 100ULL);
+	}
+
+	/**
+	 * @brief Computes developer 1 share from the platform fee.
+	 * @param platformFee Platform fee amount.
+	 * @return Developer 1 amount rounded down by integer division.
+	 */
+	static uint64 platformDev1Share(const uint64 platformFee)
+	{
+		return div<uint64>(smul(platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
+	}
+
+	/**
+	 * @brief Computes developer 2 share from the platform fee.
+	 * @param platformFee Platform fee amount.
+	 * @return Developer 2 amount rounded down by integer division.
+	 */
+	static uint64 platformDev2Share(const uint64 platformFee)
+	{
+		return div<uint64>(smul(platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
+	}
+
+	/**
+	 * @brief Computes revenue remaining after the platform fee.
+	 * @param grossAmount Qubic amount or asset shares paid for tickets.
+	 * @param platformFee Platform fee deducted from the gross amount.
+	 * @return Non-platform revenue.
+	 */
+	static uint64 ticketNetRevenue(const uint64 grossAmount, const uint64 platformFee) { return grossAmount - platformFee; }
+
+	/**
+	 * @brief Computes creator share from non-platform revenue.
+	 * @param netRevenue Revenue after platform fee.
+	 * @param creatorFeePercent Creator percentage.
+	 * @return Creator amount rounded down by integer division.
+	 */
+	static uint64 ticketCreatorShare(const uint64 netRevenue, const uint8 creatorFeePercent)
+	{
+		return div<uint64>(smul(netRevenue, static_cast<uint64>(creatorFeePercent)), 100ULL);
+	}
+
+	/**
+	 * @brief Computes burn share from non-platform revenue.
+	 * @param netRevenue Revenue after platform fee.
+	 * @param burnPercent Burn percentage.
+	 * @return Burn amount rounded down by integer division.
+	 */
+	static uint64 ticketBurnShare(const uint64 netRevenue, const uint8 burnPercent)
+	{
+		return div<uint64>(smul(netRevenue, static_cast<uint64>(burnPercent)), 100ULL);
+	}
+
+	/**
+	 * @brief Computes the prize-reserve share after creator and burn shares.
+	 * @param netRevenue Revenue after platform fee.
+	 * @param creatorAmount Creator share.
+	 * @param burnAmount Burn share.
+	 * @return Amount added to the prize reserve.
+	 */
+	static uint64 ticketPrizeShare(const uint64 netRevenue, const uint64 creatorAmount, const uint64 burnAmount)
+	{
+		return netRevenue - creatorAmount - burnAmount;
 	}
 
 	/**
@@ -4075,6 +4864,28 @@ public:
 	{
 		return (gameTemplate.rewardMode == ERewardMode::QUBIC && gameTemplate.prizeReserve >= requiredBasePrizeReserve(gameTemplate)) ||
 		       (gameTemplate.rewardMode == ERewardMode::ASSET && gameTemplate.assetPrizeReserve >= requiredBasePrizeReserve(gameTemplate));
+	}
+
+	/**
+	 * @brief Checks whether the selected bonus reserve can safely open the next round.
+	 * @param gameTemplate Template whose multiplier-bonus reserve is evaluated.
+	 * @return True when bonuses are disabled or the matching reward-currency bonus reserve is funded.
+	 */
+	static bool hasRequiredBonusReserve(const GameTemplate& gameTemplate)
+	{
+		return !gameTemplate.bonusEnabled ||
+		       (gameTemplate.rewardMode == ERewardMode::QUBIC && gameTemplate.bonusReserve >= requiredBonusReserve(gameTemplate)) ||
+		       (gameTemplate.rewardMode == ERewardMode::ASSET && gameTemplate.assetBonusReserve >= requiredBonusReserve(gameTemplate));
+	}
+
+	/**
+	 * @brief Checks whether base and bonus reserves can open a round.
+	 * @param gameTemplate Template whose reserves are evaluated.
+	 * @return True when all required reserves are funded.
+	 */
+	static bool hasRequiredRoundReserves(const GameTemplate& gameTemplate)
+	{
+		return hasRequiredBaseReserve(gameTemplate) && hasRequiredBonusReserve(gameTemplate);
 	}
 
 	/**
