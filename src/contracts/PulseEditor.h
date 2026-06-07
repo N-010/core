@@ -49,12 +49,13 @@ constexpr uint8 PULSEEDITOR_DIGITS_ALIGNED = pulseEditorNextPowerOfTwo(PULSEEDIT
 constexpr uint8 PULSEEDITOR_MAX_DIGIT = PULSEEDITOR_MAX_CODE_LENGTH - 1;
 // Bucket count used for digit frequency arrays; rounded up so QPI arrays cover every supported digit.
 constexpr uint8 PULSEEDITOR_DIGIT_BUCKETS = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_DIGIT + 1);
-// Number of possible values on one payout-matrix axis: exact or misplaced matches from `0..MAX_CODE_LENGTH`.
-constexpr uint8 PULSEEDITOR_MATRIX_SIDE = PULSEEDITOR_MAX_CODE_LENGTH + 1;
-// Logical payout matrix cell count before QPI power-of-two alignment.
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SIZE = (PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 1);
-// Physical payout matrix capacity rounded up for QPI `Array` storage.
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY = pulseEditorNextPowerOfTwo(PULSEEDITOR_PAYOUT_MATRIX_SIZE);
+// Reachable `(exact, misplaced)` combinations; their sum cannot exceed the maximum code length.
+constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY =
+    div<uint16>(((PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 2)) , 2);
+// QPI arrays require power-of-two capacities, so the compact matrix is split into 64 and 2 cells.
+constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY = 64;
+constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY =
+    PULSEEDITOR_PAYOUT_MATRIX_CAPACITY - PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY;
 // Platform fee percent deducted from each gross ticket purchase.
 constexpr uint8 PULSEEDITOR_PLATFORM_FEE_PERCENT = 3;
 // Developer 1 share of the platform fee, expressed as percent of the platform fee.
@@ -85,16 +86,63 @@ constexpr uint16 PULSEEDITOR_TEMPLATE_IDLE_EPOCH_LIMIT = 5;
 /**
  * @brief Reserved secondary contract marker kept for contract registration compatibility.
  */
-struct PULSEEDITOR2
+struct PLDT2
 {
 };
 
 /**
  * @brief PulseEditor smart contract that stores game templates, ticket flows, settlement, and platform accounting.
  */
-struct PULSEEDITOR : public ContractBase
+struct PLDT : public ContractBase
 {
 public:
+	/**
+	 * @brief Compact fixed-payout table containing only reachable match combinations.
+	 * @note Rows are ordered by `exact`; each row stores `misplaced` from zero through
+	 * `PULSEEDITOR_MAX_CODE_LENGTH - exact`.
+	 */
+	struct PayoutMatrix
+	{
+		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY> prefix;
+		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY> suffix;
+
+		/**
+		 * @brief Returns a payout by compact linear index.
+		 * @param index Index in the range `0..PULSEEDITOR_PAYOUT_MATRIX_CAPACITY-1`.
+		 * @return Configured fixed payout.
+		 */
+		const uint64& get(const uint16 index) const
+		{
+			return index < prefix.capacity() ? prefix.get(index) : suffix.get(index - prefix.capacity());
+		}
+
+		/**
+		 * @brief Replaces a payout by compact linear index.
+		 * @param index Index in the range `0..PULSEEDITOR_PAYOUT_MATRIX_CAPACITY-1`.
+		 * @param value New fixed payout.
+		 */
+		void set(const uint16 index, const uint64 value)
+		{
+			if (index < prefix.capacity())
+			{
+				prefix.set(index, value);
+			}
+			else
+			{
+				suffix.set(index - prefix.capacity(), value);
+			}
+		}
+
+		/**
+		 * @brief Returns the number of reachable match combinations.
+		 * @return Compact matrix capacity.
+		 */
+		static constexpr uint16 capacity()
+		{
+			return PULSEEDITOR_PAYOUT_MATRIX_CAPACITY;
+		}
+	};
+
 	/**
 	 * @brief Compact public and internal result codes returned by PulseEditor procedures and functions.
 	 */
@@ -158,7 +206,7 @@ public:
 		/**
 		 * @brief Slot has no active template data.
 		 */
-		EMPTY,
+		EMPTY_SLOT,
 		/**
 		 * @brief Template is configurable and not yet published.
 		 */
@@ -208,7 +256,7 @@ public:
 		/**
 		 * @brief Ticket slot is unused.
 		 */
-		EMPTY,
+		UNUSED,
 		/**
 		 * @brief Ticket is accepted and waiting for settlement.
 		 */
@@ -277,7 +325,7 @@ public:
 		/**
 		 * @brief Fixed payout table indexed by `(exact, misplaced)`.
 		 */
-		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		PayoutMatrix payoutMatrix;
 		/**
 		 * @brief Assets whose possession qualifies a winner for the multiplier bonus.
 		 */
@@ -744,7 +792,7 @@ public:
 	struct CreateTemplate_input
 	{
 		// Fixed payout table indexed by `(exact, misplaced)`.
-		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		PayoutMatrix payoutMatrix;
 		// Assets whose possession qualifies a winning player for the multiplier bonus.
 		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
 		// Raw template display name bytes.
@@ -853,7 +901,7 @@ public:
 	struct UpdateTemplate_input
 	{
 		// Replacement fixed payout table indexed by `(exact, misplaced)`.
-		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_CAPACITY> payoutMatrix;
+		PayoutMatrix payoutMatrix;
 		// Replacement bonus qualifying assets.
 		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
 		// Replacement raw template display name bytes.
@@ -2343,17 +2391,13 @@ public:
 		locals.gameTemplate.status = ETemplateStatus::DRAFT;
 		locals.gameTemplate.maxSinglePayout = 0;
 
-		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_SIZE; ++locals.i)
+		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; ++locals.i)
 		{
 			locals.payout = locals.gameTemplate.payoutMatrix.get(locals.i);
 			if (locals.payout > locals.gameTemplate.maxSinglePayout)
 			{
 				locals.gameTemplate.maxSinglePayout = locals.payout;
 			}
-		}
-		for (locals.i = PULSEEDITOR_PAYOUT_MATRIX_SIZE; locals.i < locals.gameTemplate.payoutMatrix.capacity(); ++locals.i)
-		{
-			locals.gameTemplate.payoutMatrix.set(locals.i, 0);
 		}
 
 		state.mut().templates.set(locals.templateId, locals.gameTemplate);
@@ -2477,17 +2521,13 @@ public:
 		locals.gameTemplate.allowRepeatedDigits = input.allowRepeatedDigits;
 		locals.gameTemplate.maxSinglePayout = 0;
 
-		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_SIZE; ++locals.i)
+		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; ++locals.i)
 		{
 			locals.payout = locals.gameTemplate.payoutMatrix.get(locals.i);
 			if (locals.payout > locals.gameTemplate.maxSinglePayout)
 			{
 				locals.gameTemplate.maxSinglePayout = locals.payout;
 			}
-		}
-		for (locals.i = PULSEEDITOR_PAYOUT_MATRIX_SIZE; locals.i < locals.gameTemplate.payoutMatrix.capacity(); ++locals.i)
-		{
-			locals.gameTemplate.payoutMatrix.set(locals.i, 0);
 		}
 
 		state.mut().templates.set(input.templateId, locals.gameTemplate);
@@ -4479,7 +4519,7 @@ public:
 			locals.round = state.get().rounds.get(locals.templateIndex);
 			++output.inspectedTemplates;
 
-			if (locals.gameTemplate.status == ETemplateStatus::EMPTY)
+			if (locals.gameTemplate.status == ETemplateStatus::EMPTY_SLOT)
 			{
 				continue;
 			}
@@ -4597,8 +4637,11 @@ public:
 			output.misplaced += (locals.playerCount < locals.winningCount) ? locals.playerCount : locals.winningCount;
 		}
 
-		output.payoutMatrixIndex = static_cast<uint16>(
-		    sadd(smul(static_cast<uint64>(output.exact), static_cast<uint64>(PULSEEDITOR_MATRIX_SIDE)), static_cast<uint64>(output.misplaced)));
+		output.payoutMatrixIndex = static_cast<uint16>(sadd(
+		    static_cast<uint64>(output.misplaced),
+		    div(smul(static_cast<uint64>(output.exact),
+		             static_cast<uint64>((PULSEEDITOR_MAX_CODE_LENGTH * 2) + 3 - output.exact)),
+		        2ULL)));
 	}
 
 	/**
@@ -4650,7 +4693,7 @@ public:
 	 */
 	static bool isTemplateIdValid(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, const uint16 templateId)
 	{
-		return templateId < state.get().templateCount && state.get().templates.get(templateId).status != ETemplateStatus::EMPTY;
+		return templateId < state.get().templateCount && state.get().templates.get(templateId).status != ETemplateStatus::EMPTY_SLOT;
 	}
 
 	/**
