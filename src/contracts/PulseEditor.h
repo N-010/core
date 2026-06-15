@@ -50,12 +50,10 @@ constexpr uint8 PULSEEDITOR_MAX_DIGIT = PULSEEDITOR_MAX_CODE_LENGTH - 1;
 // Bucket count used for digit frequency arrays; rounded up so QPI arrays cover every supported digit.
 constexpr uint8 PULSEEDITOR_DIGIT_BUCKETS = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_DIGIT + 1);
 // Reachable `(exact, misplaced)` combinations; their sum cannot exceed the maximum code length.
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY =
-    div<uint16>(((PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 2)) , 2);
+constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY = div<uint16>(((PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 2)), 2);
 // QPI arrays require power-of-two capacities, so the compact matrix is split into 64 and 2 cells.
 constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY = 64;
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY =
-    PULSEEDITOR_PAYOUT_MATRIX_CAPACITY - PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY;
+constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY = PULSEEDITOR_PAYOUT_MATRIX_CAPACITY - PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY;
 // Platform fee percent deducted from each gross ticket purchase.
 constexpr uint8 PULSEEDITOR_PLATFORM_FEE_PERCENT = 3;
 // Developer 1 share of the platform fee, expressed as percent of the platform fee.
@@ -111,10 +109,7 @@ public:
 		 * @param index Index in the range `0..PULSEEDITOR_PAYOUT_MATRIX_CAPACITY-1`.
 		 * @return Configured fixed payout.
 		 */
-		const uint64& get(const uint16 index) const
-		{
-			return index < prefix.capacity() ? prefix.get(index) : suffix.get(index - prefix.capacity());
-		}
+		const uint64& get(const uint16 index) const { return index < prefix.capacity() ? prefix.get(index) : suffix.get(index - prefix.capacity()); }
 
 		/**
 		 * @brief Replaces a payout by compact linear index.
@@ -137,10 +132,7 @@ public:
 		 * @brief Returns the number of reachable match combinations.
 		 * @return Compact matrix capacity.
 		 */
-		static constexpr uint16 capacity()
-		{
-			return PULSEEDITOR_PAYOUT_MATRIX_CAPACITY;
-		}
+		static constexpr uint16 capacity() { return PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; }
 	};
 
 	/**
@@ -299,6 +291,193 @@ public:
 		 * @brief Players pay ticket price with managed asset shares collected from their account.
 		 */
 		ASSET
+	};
+
+	/**
+	 * @brief Stable identifier of the public procedure that emitted a diagnostic event.
+	 * @note Values match procedure registration indexes where an index exists.
+	 */
+	enum class ELogProcedure : uint16
+	{
+		CREATE_TEMPLATE = 1,
+		DEPOSIT_PRIZE_RESERVE = 2,
+		PUBLISH_TEMPLATE = 3,
+		BUY_TICKET = 4,
+		REQUEST_STOP = 6,
+		WITHDRAW_CREATOR_REVENUE = 7,
+		SET_PLATFORM_CONFIG = 8,
+		WITHDRAW_PLATFORM_REVENUE = 9,
+		TRANSFER_SHARE_MANAGEMENT_RIGHTS = 11,
+		UPDATE_TEMPLATE = 12,
+		DEPOSIT_BONUS_RESERVE = 13,
+		DEPOSIT_ASSET_RESERVE = 14,
+		BUY_TICKETS = 15,
+		WITHDRAW_ASSET_PLATFORM_REVENUE = 16
+	};
+
+	/** @brief Stable stage code within one public-procedure invocation. */
+	enum class ELogPhase : uint8
+	{
+		ENTRY = 1,
+		REFUND = 2,
+		VALIDATION = 3,
+		TRANSFER = 4,
+		STATE_CHANGE = 5,
+		SETTLEMENT = 6,
+		RESULT = 7
+	};
+
+	/**
+	 * @brief Stable reason/checkpoint code used to decode PulseEditor diagnostic events.
+	 * @note Procedure-specific ranges make every early-return branch distinguishable.
+	 */
+	enum class ELogDetail : uint16
+	{
+		ENTRY = 1,
+		REFUND = 2,
+		SUCCESS = 3,
+		CT_STORAGE_FULL = 101,
+		CT_CONFIG = 102,
+		CT_SCHEDULE = 103,
+		CT_REWARD = 104,
+		CT_ENTRY = 105,
+		CT_BONUS = 106,
+		CT_BONUS_ASSET = 107,
+		CT_UNIQUE_DIGITS = 108,
+		UT_TEMPLATE = 201,
+		UT_CONFIG = 202,
+		UT_SCHEDULE = 203,
+		UT_REWARD = 204,
+		UT_ENTRY = 205,
+		UT_BONUS = 206,
+		UT_BONUS_ASSET = 207,
+		UT_UNIQUE_DIGITS = 208,
+		UT_OWNER = 209,
+		UT_TICKET_SALES = 210,
+		UT_STATE = 211,
+		DPR_TEMPLATE = 301,
+		DPR_OWNER = 302,
+		DPR_AMOUNT = 303,
+		DBR_TEMPLATE = 401,
+		DBR_OWNER = 402,
+		DBR_MODE = 403,
+		DBR_AMOUNT = 404,
+		DAR_TEMPLATE = 501,
+		DAR_OWNER = 502,
+		DAR_MODE = 503,
+		DAR_BONUS_MODE = 504,
+		DAR_SHARES = 505,
+		DAR_TRANSFER = 506,
+		PT_TEMPLATE = 601,
+		PT_OWNER = 602,
+		PT_STATE = 603,
+		PT_BASE_RESERVE = 604,
+		PT_BONUS_RESERVE = 605,
+		PT_SCHEDULE = 606,
+		BT_TEMPLATE = 701,
+		BT_STATE = 702,
+		BT_NOT_STARTED = 703,
+		BT_ENDED = 704,
+		BT_PRICE = 705,
+		BT_SOLD_OUT = 706,
+		BT_DIGITS = 707,
+		BT_PLAYER_LIMIT = 708,
+		BT_ASSET_PRICE = 709,
+		BT_ASSET_BALANCE = 710,
+		BT_ASSET_TRANSFER = 711,
+		BT_BURN_TRANSFER = 712,
+		BT_ACCEPTED = 713,
+		BT_INSTANT_SETTLEMENT = 714,
+		BTS_TEMPLATE = 801,
+		BTS_COUNT = 802,
+		BTS_STATE = 803,
+		BTS_NOT_STARTED = 804,
+		BTS_ENDED = 805,
+		BTS_PRICE = 806,
+		BTS_ASSET_PRICE = 807,
+		BTS_STORAGE = 808,
+		BTS_ROUND_LIMIT = 809,
+		BTS_DIGITS = 810,
+		BTS_PLAYER_LIMIT = 811,
+		BTS_ASSET_BALANCE = 812,
+		BTS_ASSET_TRANSFER = 813,
+		BTS_PARTIAL_STATE = 814,
+		BTS_PARTIAL_NOT_STARTED = 815,
+		BTS_PARTIAL_ENDED = 816,
+		BTS_PARTIAL_SOLD_OUT = 817,
+		BTS_TICKET_ASSET_BALANCE = 818,
+		BTS_TICKET_ASSET_TRANSFER = 819,
+		BTS_BURN_TRANSFER = 820,
+		BTS_ACCEPTED = 821,
+		BTS_INSTANT_SETTLEMENT = 822,
+		RS_TEMPLATE = 901,
+		RS_OWNER = 902,
+		WCR_TEMPLATE = 1001,
+		WCR_OWNER = 1002,
+		WCR_ASSET_AMOUNT = 1003,
+		WCR_ASSET_TRANSFER = 1004,
+		WCR_QUBIC_AMOUNT = 1005,
+		SPC_OWNER = 1101,
+		SPC_VALUE = 1102,
+		WPR_OWNER = 1201,
+		WPR_RECIPIENTS = 1202,
+		WPR_DIVIDENDS = 1203,
+		WAPR_TEMPLATE = 1301,
+		WAPR_OWNER = 1302,
+		WAPR_RECIPIENTS = 1303,
+		WAPR_MODE = 1304,
+		WAPR_AMOUNT = 1305,
+		WAPR_BALANCE = 1306,
+		WAPR_DEV1_TRANSFER = 1307,
+		WAPR_DEV2_TRANSFER = 1308,
+		WAPR_DIVIDENDS = 1309,
+		TSMR_INVALID_COUNT = 1401,
+		TSMR_INSUFFICIENT_SHARES = 1402,
+		TSMR_RELEASE = 1403,
+		TSMR_SUCCESS = 1404,
+		TSMR_REFUND = 1405
+	};
+
+	/**
+	 * @brief Binary diagnostic event emitted by PulseEditor public procedures.
+	 * @note The structure is cleared before every emission. Fields not relevant to an event remain zero.
+	 * @note `_type` identifies this event schema; `procedure`, `phase`, and `detail` provide stable decoding keys.
+	 * @warning Keep `_terminator` last because the logger serializes only fields preceding it.
+	 */
+	struct PulseEditorLogMessage
+	{
+		// Emitting contract index required by the QPI log decoder.
+		uint32 _contractIndex;
+		// Event schema version; currently `1`.
+		uint32 _type;
+		// Identity that invoked the public procedure.
+		id invocator;
+		// Procedure-specific related identity, such as an owner, issuer, or recipient.
+		id relatedId;
+		// Procedure-specific amount, requested value, or primary output.
+		uint64 amount;
+		// Procedure-specific balance, expected value, or secondary output.
+		uint64 balance;
+		// Global ticket index when the event concerns one accepted ticket.
+		uint64 ticketIndex;
+		// Submitted ticket digits when relevant; unused bytes remain zero.
+		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		// Template-scoped round id when relevant.
+		uint32 roundId;
+		// Procedure-specific count, status, or configuration value.
+		uint32 count;
+		// `ELogProcedure` value identifying the public ABI operation.
+		uint16 procedure;
+		// Template id when the operation is template-scoped.
+		uint16 templateId;
+		// `ELogDetail` checkpoint or failure reason.
+		uint16 detail;
+		// `ELogPhase` stage within the invocation.
+		uint8 phase;
+		// Public `EReturnCode` value, or zero when the procedure has no return code.
+		uint8 returnCode;
+		// QPI log payload terminator; no fields may follow it.
+		sint8 _terminator;
 	};
 
 	/**
@@ -1689,7 +1868,9 @@ public:
 	 */
 	struct TransferShareManagementRights_locals
 	{
+		PulseEditorLogMessage logger;
 		sint64 result;
+		sint64 possessedShares;
 		sint64 reward;
 		sint64 refundAmount;
 		bit success;
@@ -1898,6 +2079,7 @@ public:
 	struct CreateTemplate_locals
 	{
 		GameTemplate gameTemplate;
+		PulseEditorLogMessage logger;
 		uint64 i;
 		uint16 templateId;
 		uint64 payout;
@@ -1910,6 +2092,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
+		PulseEditorLogMessage logger;
 		uint64 i;
 		uint64 payout;
 	};
@@ -1920,6 +2103,7 @@ public:
 	struct DepositPrizeReserve_locals
 	{
 		GameTemplate gameTemplate;
+		PulseEditorLogMessage logger;
 		uint64 depositAmount;
 	};
 
@@ -1929,6 +2113,7 @@ public:
 	struct DepositBonusReserve_locals
 	{
 		GameTemplate gameTemplate;
+		PulseEditorLogMessage logger;
 		uint64 depositAmount;
 	};
 
@@ -1938,6 +2123,7 @@ public:
 	struct DepositAssetReserve_locals
 	{
 		GameTemplate gameTemplate;
+		PulseEditorLogMessage logger;
 		sint64 transferResult;
 		sint64 possessedShares;
 	};
@@ -1949,6 +2135,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
+		PulseEditorLogMessage logger;
 	};
 
 	/**
@@ -1963,6 +2150,7 @@ public:
 		SettleInstantTicket_output settleOutput;
 		ValidateDigits_input validateInput;
 		ValidateDigits_output validateOutput;
+		PulseEditorLogMessage logger;
 		uint64 i;
 		uint64 platformFee;
 		uint64 dev1Amount;
@@ -1990,6 +2178,7 @@ public:
 		SettleInstantTicket_output settleOutput;
 		ValidateDigits_input validateInput;
 		ValidateDigits_output validateOutput;
+		PulseEditorLogMessage logger;
 		uint64 i;
 		uint64 j;
 		uint64 platformFee;
@@ -2088,6 +2277,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
+		PulseEditorLogMessage logger;
 	};
 
 	/**
@@ -2096,6 +2286,7 @@ public:
 	struct WithdrawCreatorRevenue_locals
 	{
 		GameTemplate gameTemplate;
+		PulseEditorLogMessage logger;
 		uint64 amount;
 		sint64 transferResult;
 	};
@@ -2108,6 +2299,7 @@ public:
 		GameTemplate gameTemplate;
 		TransferAssetDividendToShareholders_input transferInput;
 		TransferAssetDividendToShareholders_output transferOutput;
+		PulseEditorLogMessage logger;
 		uint64 developer1Amount;
 		uint64 developer2Amount;
 		uint64 dividendAmount;
@@ -2121,10 +2313,17 @@ public:
 	 */
 	struct WithdrawPlatformRevenue_locals
 	{
+		PulseEditorLogMessage logger;
 		uint64 developer1Amount;
 		uint64 developer2Amount;
 		uint64 dividendAmount;
 		uint64 dividendPerShare;
+	};
+
+	/** @brief Local state used while updating platform configuration. */
+	struct SetPlatformConfig_locals
+	{
+		PulseEditorLogMessage logger;
 	};
 
 	/**
@@ -2301,9 +2500,16 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateTemplate)
 	{
+		prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.amount = input.ticketPrice;
+		locals.logger.count = input.ticketLimit;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::REFUND, ELogDetail::REFUND, qpi.invocator());
+			locals.logger.amount = qpi.invocationReward();
+			LOG_DEBUG(locals.logger);
 		}
 
 		output.templateId = 0;
@@ -2313,35 +2519,53 @@ public:
 		if (state.get().templateCount >= state.get().templates.capacity())
 		{
 			output.returnCode = toReturnCode(EReturnCode::STORAGE_FULL);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_STORAGE_FULL, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isTemplateConfigValid(input.codeLength, input.maxDigit, input.ticketPrice, input.ticketLimit, input.playerTicketLimit,
 		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_CONFIG, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_SCHEDULE, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isRewardConfigValid(input.rewardMode, input.rewardAsset, input.rewardOwnershipManagingContractIndex,
 		                         input.rewardPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_REWARD, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isEntryConfigValid(input.entryMode, input.entryAsset, input.rewardMode, input.rewardAsset, input.entryOwnershipManagingContractIndex,
 		                        input.entryPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_ENTRY, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isBonusConfigValid(input.bonusEnabled, input.bonusMultiplierBps, input.bonusAssetCount, input.bonusOwnershipManagingContractIndex,
 		                        input.bonusPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_BONUS, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		for (locals.i = 0; locals.i < input.bonusAssetCount; ++locals.i)
@@ -2349,12 +2573,19 @@ public:
 			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+				prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_BONUS_ASSET, qpi.invocator());
+				locals.logger.count = static_cast<uint32>(locals.i);
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 		}
 		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_UNIQUE_DIGITS, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2407,6 +2638,12 @@ public:
 		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
 		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = output.templateId;
+		locals.logger.amount = output.requiredPrizeReserve;
+		locals.logger.balance = output.requiredBonusReserve;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2418,6 +2655,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateTemplate)
 	{
+		prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = input.ticketPrice;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -2428,35 +2669,59 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isTemplateConfigValid(input.codeLength, input.maxDigit, input.ticketPrice, input.ticketLimit, input.playerTicketLimit,
 		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_CONFIG, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_SCHEDULE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isRewardConfigValid(input.rewardMode, input.rewardAsset, input.rewardOwnershipManagingContractIndex,
 		                         input.rewardPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_REWARD, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isEntryConfigValid(input.entryMode, input.entryAsset, input.rewardMode, input.rewardAsset, input.entryOwnershipManagingContractIndex,
 		                        input.entryPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_ENTRY, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!isBonusConfigValid(input.bonusEnabled, input.bonusMultiplierBps, input.bonusAssetCount, input.bonusOwnershipManagingContractIndex,
 		                        input.bonusPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_BONUS, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		for (locals.i = 0; locals.i < input.bonusAssetCount; ++locals.i)
@@ -2464,12 +2729,21 @@ public:
 			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+				prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_BONUS_ASSET, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.count = static_cast<uint32>(locals.i);
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 		}
 		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_UNIQUE_DIGITS, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2477,18 +2751,30 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		locals.round = state.get().rounds.get(input.templateId);
 		if (locals.gameTemplate.hasTicketSales)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_TICKET_SALES, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.status != ETemplateStatus::DRAFT &&
 		    (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status == ERoundStatus::SELLING))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_STATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2535,6 +2821,12 @@ public:
 		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
 		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = output.requiredPrizeReserve;
+		locals.logger.balance = output.requiredBonusReserve;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2546,6 +2838,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositPrizeReserve)
 	{
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = qpi.invocationReward();
+		LOG_DEBUG(locals.logger);
 		output.depositedAmount = 0;
 		output.prizeReserve = 0;
 
@@ -2556,6 +2852,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2567,12 +2867,21 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (qpi.invocationReward() == 0)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.prizeReserve = locals.gameTemplate.prizeReserve;
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_AMOUNT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.balance = output.prizeReserve;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2583,6 +2892,12 @@ public:
 		output.depositedAmount = locals.depositAmount;
 		output.prizeReserve = locals.gameTemplate.prizeReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = output.depositedAmount;
+		locals.logger.balance = output.prizeReserve;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2594,6 +2909,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositBonusReserve)
 	{
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = qpi.invocationReward();
+		LOG_DEBUG(locals.logger);
 		output.depositedAmount = 0;
 		output.bonusReserve = 0;
 
@@ -2604,6 +2923,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2615,6 +2938,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!locals.gameTemplate.bonusEnabled || locals.gameTemplate.bonusMultiplierBps <= PULSEEDITOR_BONUS_MULTIPLIER_SCALE)
@@ -2625,12 +2952,22 @@ public:
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
 			output.bonusReserve = locals.gameTemplate.bonusReserve;
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_MODE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.balance = output.bonusReserve;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (qpi.invocationReward() == 0)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.bonusReserve = locals.gameTemplate.bonusReserve;
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_AMOUNT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.balance = output.bonusReserve;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2641,6 +2978,12 @@ public:
 		output.depositedAmount = locals.depositAmount;
 		output.bonusReserve = locals.gameTemplate.bonusReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = output.depositedAmount;
+		locals.logger.balance = output.bonusReserve;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2652,6 +2995,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositAssetReserve)
 	{
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = input.numberOfShares;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -2663,6 +3010,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2673,18 +3024,30 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.rewardMode != ERewardMode::ASSET || input.numberOfShares == 0 ||
 		    input.numberOfShares > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_MODE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (input.depositToBonusReserve &&
 		    (!locals.gameTemplate.bonusEnabled || locals.gameTemplate.bonusMultiplierBps <= PULSEEDITOR_BONUS_MULTIPLIER_SCALE))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_BONUS_MODE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2694,6 +3057,12 @@ public:
 		if (locals.possessedShares < static_cast<sint64>(input.numberOfShares))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_SHARES, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = input.numberOfShares;
+			locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2703,6 +3072,11 @@ public:
 		if (locals.transferResult < 0)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::TRANSFER, ELogDetail::DAR_TRANSFER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = input.numberOfShares;
+			locals.logger.returnCode = output.returnCode;
+			LOG_ERROR(locals.logger);
 			return;
 		}
 
@@ -2720,6 +3094,12 @@ public:
 		output.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve;
 		output.assetBonusReserve = locals.gameTemplate.assetBonusReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = output.depositedNumberOfShares;
+		locals.logger.balance = output.assetPrizeReserve;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2731,6 +3111,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(PublishTemplate)
 	{
+		prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -2739,6 +3122,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2746,26 +3133,48 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.status != ETemplateStatus::DRAFT)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_STATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!hasRequiredBaseReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_BASE_RESERVE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.balance = locals.gameTemplate.prizeReserve;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!hasRequiredBonusReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_BONUS_RESERVE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.balance = locals.gameTemplate.bonusReserve;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.roundEndTick > 0 && qpi.tick() > locals.gameTemplate.roundEndTick)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_SCHEDULE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2783,6 +3192,11 @@ public:
 
 		output.roundId = locals.round.roundId;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.roundId = output.roundId;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -2795,6 +3209,11 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTicket)
 	{
+		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.digits = input.digits;
+		locals.logger.amount = qpi.invocationReward();
+		LOG_DEBUG(locals.logger);
 		output.ticketIndex = 0;
 		output.roundId = 0;
 
@@ -2805,6 +3224,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2819,6 +3242,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_STATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
@@ -2828,6 +3256,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_NOT_STARTED, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
@@ -2839,6 +3272,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ENDED, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if ((locals.gameTemplate.entryMode == EEntryMode::QUBIC && locals.reward != locals.gameTemplate.ticketPrice) ||
@@ -2849,6 +3287,12 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_PRICE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.reward;
+			locals.logger.balance = locals.gameTemplate.ticketPrice;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (state.get().ticketCount >= state.get().tickets.capacity() || locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
@@ -2858,6 +3302,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_SOLD_OUT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.count = locals.round.ticketCount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2873,6 +3322,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_DIGITS, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.digits = input.digits;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2893,6 +3347,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_PLAYER_LIMIT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.count = locals.playerTicketCount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -2901,6 +3360,11 @@ public:
 			if (locals.gameTemplate.ticketPrice > static_cast<uint64>(INT64_MAX))
 			{
 				output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_PRICE, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = locals.gameTemplate.ticketPrice;
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 			locals.possessedShares = qpi.numberOfPossessedShares(
@@ -2909,6 +3373,12 @@ public:
 			if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_BALANCE, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = locals.gameTemplate.ticketPrice;
+				locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 			locals.transferResult =
@@ -2917,6 +3387,11 @@ public:
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::TRANSFER, ELogDetail::BT_ASSET_TRANSFER, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = locals.gameTemplate.ticketPrice;
+				locals.logger.returnCode = output.returnCode;
+				LOG_ERROR(locals.logger);
 				return;
 			}
 			locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
@@ -2937,6 +3412,11 @@ public:
 					qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
 					                                        SELF, static_cast<sint64>(locals.gameTemplate.ticketPrice), qpi.invocator());
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::TRANSFER, ELogDetail::BT_BURN_TRANSFER, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.amount = locals.burnAmount;
+					locals.logger.returnCode = output.returnCode;
+					LOG_ERROR(locals.logger);
 					return;
 				}
 			}
@@ -2998,6 +3478,13 @@ public:
 		state.mut().ticketCount = sadd(state.get().ticketCount, 1ULL);
 		state.mut().templates.set(input.templateId, locals.gameTemplate);
 		state.mut().rounds.set(input.templateId, locals.round);
+		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::STATE_CHANGE, ELogDetail::BT_ACCEPTED, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.roundId = output.roundId;
+		locals.logger.ticketIndex = output.ticketIndex;
+		locals.logger.amount = locals.gameTemplate.ticketPrice;
+		locals.logger.digits = input.digits;
+		LOG_DEBUG(locals.logger);
 
 		if (locals.gameTemplate.instantSettlement)
 		{
@@ -3007,11 +3494,27 @@ public:
 			if (locals.settleOutput.returnCode != toReturnCode(EReturnCode::SUCCESS))
 			{
 				output.returnCode = locals.settleOutput.returnCode;
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.ticketIndex = output.ticketIndex;
+				locals.logger.returnCode = output.returnCode;
+				LOG_ERROR(locals.logger);
 				return;
 			}
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.ticketIndex = output.ticketIndex;
+			locals.logger.returnCode = locals.settleOutput.returnCode;
+			LOG_DEBUG(locals.logger);
 		}
 
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.roundId = output.roundId;
+		locals.logger.ticketIndex = output.ticketIndex;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3024,6 +3527,11 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTickets)
 	{
+		prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.count = input.ticketCount;
+		locals.logger.amount = qpi.invocationReward();
+		LOG_DEBUG(locals.logger);
 		setMemory(output.ticketIndexes, 0);
 		output.roundId = 0;
 		output.acceptedCount = 0;
@@ -3035,6 +3543,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (input.ticketCount == 0 || input.ticketCount > PULSEEDITOR_MAX_BATCH_TICKETS)
@@ -3044,6 +3556,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_COUNT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.count = input.ticketCount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3059,6 +3576,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_STATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
@@ -3068,6 +3590,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_NOT_STARTED, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
@@ -3079,6 +3606,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ENDED, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if ((locals.gameTemplate.entryMode == EEntryMode::QUBIC && locals.reward != locals.totalPrice) ||
@@ -3089,11 +3621,22 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PRICE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.reward;
+			locals.logger.balance = locals.totalPrice;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.entryMode == EEntryMode::ASSET && locals.totalPrice > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_PRICE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.totalPrice;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (sadd(state.get().ticketCount, static_cast<uint64>(input.ticketCount)) > state.get().tickets.capacity())
@@ -3103,6 +3646,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_STORAGE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.count = input.ticketCount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (!locals.gameTemplate.instantSettlement &&
@@ -3113,6 +3661,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ROUND_LIMIT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.count = input.ticketCount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3130,6 +3683,12 @@ public:
 					qpi.transfer(qpi.invocator(), qpi.invocationReward());
 				}
 				output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_DIGITS, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.count = static_cast<uint32>(locals.i);
+				locals.logger.digits = input.tickets.get(locals.i).digits;
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 		}
@@ -3153,6 +3712,11 @@ public:
 					qpi.transfer(qpi.invocator(), qpi.invocationReward());
 				}
 				output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PLAYER_LIMIT, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.count = locals.playerTicketCount;
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 			if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
@@ -3163,6 +3727,12 @@ public:
 				if (locals.possessedShares < static_cast<sint64>(locals.totalPrice))
 				{
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_BALANCE, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.amount = locals.totalPrice;
+					locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+					locals.logger.returnCode = output.returnCode;
+					LOG_WARNING(locals.logger);
 					return;
 				}
 				locals.transferResult =
@@ -3171,6 +3741,11 @@ public:
 				if (locals.transferResult < 0)
 				{
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_ASSET_TRANSFER, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.amount = locals.totalPrice;
+					locals.logger.returnCode = output.returnCode;
+					LOG_ERROR(locals.logger);
 					return;
 				}
 			}
@@ -3193,6 +3768,18 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_STATE, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.count = output.acceptedCount;
+					locals.logger.returnCode = output.returnCode;
+					if (output.acceptedCount > 0)
+					{
+						LOG_ERROR(locals.logger);
+					}
+					else
+					{
+						LOG_WARNING(locals.logger);
+					}
 					return;
 				}
 				if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
@@ -3206,6 +3793,19 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_NOT_STARTED,
+					           qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.count = output.acceptedCount;
+					locals.logger.returnCode = output.returnCode;
+					if (output.acceptedCount > 0)
+					{
+						LOG_ERROR(locals.logger);
+					}
+					else
+					{
+						LOG_WARNING(locals.logger);
+					}
 					return;
 				}
 				if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
@@ -3221,6 +3821,18 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_ENDED, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.count = output.acceptedCount;
+					locals.logger.returnCode = output.returnCode;
+					if (output.acceptedCount > 0)
+					{
+						LOG_ERROR(locals.logger);
+					}
+					else
+					{
+						LOG_WARNING(locals.logger);
+					}
 					return;
 				}
 				if (state.get().ticketCount >= state.get().tickets.capacity() || locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
@@ -3234,6 +3846,18 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_SOLD_OUT, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.count = output.acceptedCount;
+					locals.logger.returnCode = output.returnCode;
+					if (output.acceptedCount > 0)
+					{
+						LOG_ERROR(locals.logger);
+					}
+					else
+					{
+						LOG_WARNING(locals.logger);
+					}
 					return;
 				}
 			}
@@ -3248,6 +3872,21 @@ public:
 					if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
 					{
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_TICKET_ASSET_BALANCE,
+						           qpi.invocator());
+						locals.logger.templateId = input.templateId;
+						locals.logger.count = output.acceptedCount;
+						locals.logger.amount = locals.gameTemplate.ticketPrice;
+						locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+						locals.logger.returnCode = output.returnCode;
+						if (output.acceptedCount > 0)
+						{
+							LOG_ERROR(locals.logger);
+						}
+						else
+						{
+							LOG_WARNING(locals.logger);
+						}
 						return;
 					}
 					locals.transferResult = qpi.transferShareOwnershipAndPossession(
@@ -3256,6 +3895,13 @@ public:
 					if (locals.transferResult < 0)
 					{
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_TICKET_ASSET_TRANSFER,
+						           qpi.invocator());
+						locals.logger.templateId = input.templateId;
+						locals.logger.count = output.acceptedCount;
+						locals.logger.amount = locals.gameTemplate.ticketPrice;
+						locals.logger.returnCode = output.returnCode;
+						LOG_ERROR(locals.logger);
 						return;
 					}
 				}
@@ -3286,6 +3932,12 @@ public:
 							                                        SELF, SELF, static_cast<sint64>(locals.totalPrice), qpi.invocator());
 						}
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_BURN_TRANSFER, qpi.invocator());
+						locals.logger.templateId = input.templateId;
+						locals.logger.count = output.acceptedCount;
+						locals.logger.amount = locals.burnAmount;
+						locals.logger.returnCode = output.returnCode;
+						LOG_ERROR(locals.logger);
 						return;
 					}
 				}
@@ -3351,6 +4003,14 @@ public:
 			}
 			state.mut().templates.set(input.templateId, locals.gameTemplate);
 			state.mut().rounds.set(input.templateId, locals.round);
+			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::STATE_CHANGE, ELogDetail::BTS_ACCEPTED, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.roundId = locals.round.roundId;
+			locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
+			locals.logger.count = output.acceptedCount;
+			locals.logger.amount = locals.gameTemplate.ticketPrice;
+			locals.logger.digits = input.tickets.get(locals.i).digits;
+			LOG_DEBUG(locals.logger);
 
 			if (locals.gameTemplate.instantSettlement)
 			{
@@ -3368,12 +4028,30 @@ public:
 						}
 					}
 					output.returnCode = locals.settleOutput.returnCode;
+					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
+					locals.logger.templateId = input.templateId;
+					locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
+					locals.logger.count = output.acceptedCount;
+					locals.logger.returnCode = output.returnCode;
+					LOG_ERROR(locals.logger);
 					return;
 				}
+				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
+				locals.logger.count = output.acceptedCount;
+				locals.logger.returnCode = locals.settleOutput.returnCode;
+				LOG_DEBUG(locals.logger);
 			}
 		}
 
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.roundId = output.roundId;
+		locals.logger.count = output.acceptedCount;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3461,10 +4139,9 @@ public:
 						}
 					}
 					locals.bonusPayout = bonusExtraPayout(locals.payout, locals.gameTemplate.bonusMultiplierBps);
-					if (!locals.bonusQualified || !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC &&
-					                                 locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
-					                                (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-					                                 locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
+					if (!locals.bonusQualified ||
+					    !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
+					      (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
 					{
 						locals.bonusPayout = 0;
 					}
@@ -3568,6 +4245,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(RequestStop)
 	{
+		prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3576,6 +4256,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::VALIDATION, ELogDetail::RS_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3584,6 +4268,10 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::VALIDATION, ELogDetail::RS_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.round.status == ERoundStatus::SELLING || locals.round.status == ERoundStatus::CLOSED)
@@ -3597,6 +4285,12 @@ public:
 
 		state.mut().templates.set(input.templateId, locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.roundId = locals.round.roundId;
+		locals.logger.count = static_cast<uint32>(locals.gameTemplate.status);
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3608,6 +4302,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawCreatorRevenue)
 	{
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = input.amount;
+		LOG_DEBUG(locals.logger);
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			if (qpi.invocationReward() > 0)
@@ -3615,6 +4313,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_TEMPLATE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (qpi.invocationReward() > 0)
@@ -3626,6 +4328,10 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
@@ -3634,6 +4340,13 @@ public:
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
+				prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_ASSET_AMOUNT,
+				           qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = input.amount;
+				locals.logger.balance = output.remainingRevenue;
+				locals.logger.returnCode = output.returnCode;
+				LOG_WARNING(locals.logger);
 				return;
 			}
 
@@ -3645,6 +4358,13 @@ public:
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
+				prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::TRANSFER, ELogDetail::WCR_ASSET_TRANSFER,
+				           qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = input.amount;
+				locals.logger.balance = output.remainingRevenue;
+				locals.logger.returnCode = output.returnCode;
+				LOG_ERROR(locals.logger);
 				return;
 			}
 			locals.gameTemplate.assetCreatorRevenue = locals.gameTemplate.assetCreatorRevenue - locals.amount;
@@ -3653,6 +4373,12 @@ public:
 			output.withdrawnAmount = locals.amount;
 			output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
 			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = output.withdrawnAmount;
+			locals.logger.balance = output.remainingRevenue;
+			locals.logger.returnCode = output.returnCode;
+			LOG_INFO(locals.logger);
 			return;
 		}
 
@@ -3660,6 +4386,12 @@ public:
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.remainingRevenue = locals.gameTemplate.creatorRevenue;
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_QUBIC_AMOUNT, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = input.amount;
+			locals.logger.balance = output.remainingRevenue;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3671,6 +4403,12 @@ public:
 		output.withdrawnAmount = locals.amount;
 		output.remainingRevenue = locals.gameTemplate.creatorRevenue;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = output.withdrawnAmount;
+		locals.logger.balance = output.remainingRevenue;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3680,8 +4418,12 @@ public:
 	 * @return `SUCCESS`, `ACCESS_DENIED`, or `INVALID_VALUE`.
 	 * @note The first successful call may bootstrap the platform owner when no owner is configured.
 	 */
-	PUBLIC_PROCEDURE(SetPlatformConfig)
+	PUBLIC_PROCEDURE_WITH_LOCALS(SetPlatformConfig)
 	{
+		prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.relatedId = input.platformOwner;
+		locals.logger.count = input.maxCreatorFeePercent;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3690,11 +4432,18 @@ public:
 		if (state.get().platformOwner != NULL_ID && qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::VALIDATION, ELogDetail::SPC_OWNER, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID || input.maxCreatorFeePercent > 100)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::VALIDATION, ELogDetail::SPC_VALUE, qpi.invocator());
+			locals.logger.count = input.maxCreatorFeePercent;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3703,6 +4452,11 @@ public:
 		state.mut().developer2 = input.developer2;
 		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.relatedId = input.platformOwner;
+		locals.logger.count = input.maxCreatorFeePercent;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3714,6 +4468,8 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
 	{
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3722,11 +4478,17 @@ public:
 		if (qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WPR_OWNER, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WPR_RECIPIENTS, qpi.invocator());
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3738,16 +4500,28 @@ public:
 		if (locals.dividendPerShare > 0 && !qpi.distributeDividends(static_cast<sint64>(locals.dividendPerShare)))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WPR_DIVIDENDS, qpi.invocator());
+			locals.logger.amount = locals.dividendAmount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_ERROR(locals.logger);
 			return;
 		}
 
 		if (locals.developer1Amount > 0)
 		{
 			qpi.transfer(state.get().developer1, locals.developer1Amount);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
+			locals.logger.relatedId = state.get().developer1;
+			locals.logger.amount = locals.developer1Amount;
+			LOG_DEBUG(locals.logger);
 		}
 		if (locals.developer2Amount > 0)
 		{
 			qpi.transfer(state.get().developer2, locals.developer2Amount);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
+			locals.logger.relatedId = state.get().developer2;
+			locals.logger.amount = locals.developer2Amount;
+			LOG_DEBUG(locals.logger);
 		}
 
 		state.mut().developer1Accrued = 0;
@@ -3758,6 +4532,11 @@ public:
 		output.developer2Amount = locals.developer2Amount;
 		output.dividendAmount = locals.dividendAmount;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.amount = sadd(output.developer1Amount, output.developer2Amount);
+		locals.logger.balance = output.dividendAmount;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -3769,6 +4548,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
 	{
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3781,16 +4563,30 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_TEMPLATE,
+			           qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_OWNER, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_RECIPIENTS,
+			           qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3799,6 +4595,10 @@ public:
 		if (locals.gameTemplate.entryMode != EEntryMode::ASSET || locals.gameTemplate.rewardMode != ERewardMode::ASSET)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_MODE, qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3810,6 +4610,12 @@ public:
 		if (locals.totalAmount > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_AMOUNT,
+			           qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.totalAmount;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 		locals.possessedShares = qpi.numberOfPossessedShares(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
@@ -3818,6 +4624,13 @@ public:
 		if (locals.possessedShares < static_cast<sint64>(locals.totalAmount))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_BALANCE,
+			           qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.totalAmount;
+			locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+			locals.logger.returnCode = output.returnCode;
+			LOG_WARNING(locals.logger);
 			return;
 		}
 
@@ -3829,6 +4642,12 @@ public:
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV1_TRANSFER,
+				           qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = locals.developer1Amount;
+				locals.logger.returnCode = output.returnCode;
+				LOG_ERROR(locals.logger);
 				return;
 			}
 			locals.gameTemplate.assetDeveloper1Accrued = 0;
@@ -3842,6 +4661,12 @@ public:
 			{
 				state.mut().templates.set(input.templateId, locals.gameTemplate);
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV2_TRANSFER,
+				           qpi.invocator());
+				locals.logger.templateId = input.templateId;
+				locals.logger.amount = locals.developer2Amount;
+				locals.logger.returnCode = output.returnCode;
+				LOG_ERROR(locals.logger);
 				return;
 			}
 			locals.gameTemplate.assetDeveloper2Accrued = 0;
@@ -3855,6 +4680,19 @@ public:
 			locals.transferInput.dividendAmount = static_cast<sint64>(locals.dividendAmount);
 			locals.transferInput.shareholdersTotalShares = NUMBER_OF_COMPUTORS;
 			CALL(TransferAssetDividendToShareholders, locals.transferInput, locals.transferOutput);
+			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DIVIDENDS,
+			           qpi.invocator());
+			locals.logger.templateId = input.templateId;
+			locals.logger.amount = locals.dividendAmount;
+			locals.logger.balance = locals.transferOutput.distributedAmount;
+			if (locals.transferOutput.distributedAmount < locals.dividendAmount)
+			{
+				LOG_ERROR(locals.logger);
+			}
+			else
+			{
+				LOG_DEBUG(locals.logger);
+			}
 		}
 
 		locals.gameTemplate.assetDividendAccrued = locals.gameTemplate.assetDividendAccrued - locals.transferOutput.distributedAmount;
@@ -3865,6 +4703,12 @@ public:
 		output.dividendAmount = locals.transferOutput.distributedAmount;
 		output.dividendAccrued = locals.gameTemplate.assetDividendAccrued;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.templateId = input.templateId;
+		locals.logger.amount = sadd(output.developer1Amount, output.developer2Amount);
+		locals.logger.balance = output.dividendAccrued;
+		locals.logger.returnCode = output.returnCode;
+		LOG_INFO(locals.logger);
 	}
 
 	/**
@@ -4247,27 +5091,64 @@ public:
 		locals.refundAmount = locals.reward;
 		locals.success = false;
 		output.transferredNumberOfShares = 0;
+		prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.amount = input.numberOfShares > 0 ? static_cast<uint64>(input.numberOfShares) : 0;
+		locals.logger.count = input.newManagingContractIndex;
+		locals.logger.relatedId = input.asset.issuer;
+		LOG_DEBUG(locals.logger);
 
-		if (input.numberOfShares > 0 && qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(),
-		                                                            SELF_INDEX, SELF_INDEX) >= input.numberOfShares)
+		if (input.numberOfShares <= 0)
 		{
-			locals.result = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
-			                                  input.newManagingContractIndex, locals.reward);
-			if (locals.result != INVALID_AMOUNT && locals.result >= 0)
+			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::VALIDATION, ELogDetail::TSMR_INVALID_COUNT,
+			           qpi.invocator());
+			LOG_WARNING(locals.logger);
+		}
+		else
+		{
+			locals.possessedShares =
+			    qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
+			if (locals.possessedShares < input.numberOfShares)
 			{
-				locals.success = true;
-				locals.refundAmount = locals.reward - locals.result;
+				prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::VALIDATION,
+				           ELogDetail::TSMR_INSUFFICIENT_SHARES, qpi.invocator());
+				locals.logger.amount = static_cast<uint64>(input.numberOfShares);
+				locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+				LOG_WARNING(locals.logger);
+			}
+			else
+			{
+				locals.result = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
+				                                  input.newManagingContractIndex, locals.reward);
+				if (locals.result != INVALID_AMOUNT && locals.result >= 0)
+				{
+					locals.success = true;
+					locals.refundAmount = locals.reward - locals.result;
+				}
+				else
+				{
+					prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::TRANSFER, ELogDetail::TSMR_RELEASE,
+					           qpi.invocator());
+					locals.logger.amount = static_cast<uint64>(input.numberOfShares);
+					LOG_ERROR(locals.logger);
+				}
 			}
 		}
 
 		if (locals.success)
 		{
 			output.transferredNumberOfShares = input.numberOfShares;
+			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::RESULT, ELogDetail::TSMR_SUCCESS, qpi.invocator());
+			locals.logger.amount = static_cast<uint64>(output.transferredNumberOfShares);
+			locals.logger.balance = static_cast<uint64>(locals.result);
+			LOG_INFO(locals.logger);
 		}
 
 		if (locals.refundAmount > 0)
 		{
 			qpi.transfer(qpi.invocator(), locals.refundAmount);
+			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::REFUND, ELogDetail::TSMR_REFUND, qpi.invocator());
+			locals.logger.amount = static_cast<uint64>(locals.refundAmount);
+			LOG_DEBUG(locals.logger);
 		}
 	}
 
@@ -4338,10 +5219,9 @@ public:
 					}
 				}
 				locals.bonusPayout = bonusExtraPayout(locals.payout, locals.gameTemplate.bonusMultiplierBps);
-				if (!locals.bonusQualified || !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC &&
-				                                 locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
-				                                (locals.gameTemplate.rewardMode == ERewardMode::ASSET &&
-				                                 locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
+				if (!locals.bonusQualified ||
+				    !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
+				      (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
 				{
 					locals.bonusPayout = 0;
 				}
@@ -4454,14 +5334,12 @@ public:
 
 		locals.gameTemplate = state.get().templates.get(input.templateId);
 		locals.round = state.get().rounds.get(input.templateId);
-		locals.qubicRefund =
-		    sadd(sadd(locals.gameTemplate.prizeReserve, locals.gameTemplate.bonusReserve),
-		         sadd(locals.gameTemplate.creatorRevenue, locals.gameTemplate.burnAccrued));
-		locals.assetRefund =
-		    sadd(sadd(locals.gameTemplate.assetPrizeReserve, locals.gameTemplate.assetBonusReserve),
-		         sadd(sadd(locals.gameTemplate.assetCreatorRevenue, locals.gameTemplate.assetBurnAccrued),
-		              sadd(locals.gameTemplate.assetDeveloper1Accrued,
-		                   sadd(locals.gameTemplate.assetDeveloper2Accrued, locals.gameTemplate.assetDividendAccrued))));
+		locals.qubicRefund = sadd(sadd(locals.gameTemplate.prizeReserve, locals.gameTemplate.bonusReserve),
+		                          sadd(locals.gameTemplate.creatorRevenue, locals.gameTemplate.burnAccrued));
+		locals.assetRefund = sadd(sadd(locals.gameTemplate.assetPrizeReserve, locals.gameTemplate.assetBonusReserve),
+		                          sadd(sadd(locals.gameTemplate.assetCreatorRevenue, locals.gameTemplate.assetBurnAccrued),
+		                               sadd(locals.gameTemplate.assetDeveloper1Accrued,
+		                                    sadd(locals.gameTemplate.assetDeveloper2Accrued, locals.gameTemplate.assetDividendAccrued))));
 
 		if (locals.assetRefund > 0)
 		{
@@ -4509,9 +5387,8 @@ public:
 			return;
 		}
 
-		locals.templatesToInspect = state.get().templateCount < PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK
-		                                ? state.get().templateCount
-		                                : PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK;
+		locals.templatesToInspect = state.get().templateCount < PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK ? state.get().templateCount
+		                                                                                                  : PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK;
 		for (locals.i = 0; locals.i < locals.templatesToInspect; ++locals.i)
 		{
 			locals.templateIndex = mod(sadd(static_cast<uint64>(state.get().automationCursor), locals.i), state.get().templateCount);
@@ -4637,11 +5514,9 @@ public:
 			output.misplaced += (locals.playerCount < locals.winningCount) ? locals.playerCount : locals.winningCount;
 		}
 
-		output.payoutMatrixIndex = static_cast<uint16>(sadd(
-		    static_cast<uint64>(output.misplaced),
-		    div(smul(static_cast<uint64>(output.exact),
-		             static_cast<uint64>((PULSEEDITOR_MAX_CODE_LENGTH * 2) + 3 - output.exact)),
-		        2ULL)));
+		output.payoutMatrixIndex = static_cast<uint16>(
+		    sadd(static_cast<uint64>(output.misplaced),
+		         div(smul(static_cast<uint64>(output.exact), static_cast<uint64>((PULSEEDITOR_MAX_CODE_LENGTH * 2) + 3 - output.exact)), 2ULL)));
 	}
 
 	/**
@@ -4697,6 +5572,26 @@ public:
 	}
 
 	/**
+	 * @brief Clears and initializes one public-procedure diagnostic event.
+	 * @param logger Event storage to reset.
+	 * @param procedure Emitting public procedure.
+	 * @param phase Current invocation stage.
+	 * @param detail Stable checkpoint or failure reason.
+	 * @param invocator Invocation identity.
+	 */
+	static void prepareLog(PulseEditorLogMessage& logger, const ELogProcedure procedure, const ELogPhase phase, const ELogDetail detail,
+	                       const id& invocator)
+	{
+		setMemory(logger, 0);
+		logger._contractIndex = CONTRACT_INDEX;
+		logger._type = 1;
+		logger.invocator = invocator;
+		logger.procedure = static_cast<uint16>(procedure);
+		logger.phase = static_cast<uint8>(phase);
+		logger.detail = static_cast<uint16>(detail);
+	}
+
+	/**
 	 * @brief Validates the optional scheduled selling window.
 	 * @param startTick First tick that accepts purchases; zero means no lower bound.
 	 * @param endTick Last tick that accepts purchases; zero disables time-based auto-close.
@@ -4729,9 +5624,8 @@ public:
 	                               const uint16 ownershipManagingContractIndex, const uint16 possessionManagingContractIndex)
 	{
 		return !bonusEnabled ||
-		       (bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE &&
-		        bonusMultiplierBps <= PULSEEDITOR_MAX_BONUS_MULTIPLIER_BPS && bonusAssetCount > 0 &&
-		        bonusAssetCount <= PULSEEDITOR_MAX_BONUS_ASSETS && ownershipManagingContractIndex > 0 &&
+		       (bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE && bonusMultiplierBps <= PULSEEDITOR_MAX_BONUS_MULTIPLIER_BPS &&
+		        bonusAssetCount > 0 && bonusAssetCount <= PULSEEDITOR_MAX_BONUS_ASSETS && ownershipManagingContractIndex > 0 &&
 		        possessionManagingContractIndex > 0);
 	}
 
@@ -4816,13 +5710,13 @@ public:
 	 */
 	static uint64 assetEntryPrizeContribution(const GameTemplate& gameTemplate)
 	{
-		return ticketPrizeShare(ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		                        ticketCreatorShare(ticketNetRevenue(gameTemplate.ticketPrice,
-		                                                            ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		                                           gameTemplate.creatorFeePercent),
-		                        ticketBurnShare(ticketNetRevenue(gameTemplate.ticketPrice,
-		                                                         ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		                                        gameTemplate.burnPercent));
+		return ticketPrizeShare(
+		    ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		    ticketCreatorShare(
+		        ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		        gameTemplate.creatorFeePercent),
+		    ticketBurnShare(ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
+		                    gameTemplate.burnPercent));
 	}
 
 	/**
