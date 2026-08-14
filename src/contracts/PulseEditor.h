@@ -439,46 +439,318 @@ public:
 	};
 
 	/**
-	 * @brief Binary diagnostic event emitted by PulseEditor public procedures.
-	 * @note The structure is cleared before every emission. Fields not relevant to an event remain zero.
-	 * @note `_type` identifies this event schema; `procedure`, `phase`, and `detail` provide stable decoding keys.
-	 * @warning Keep `_terminator` last because the logger serializes only fields preceding it.
+	 * @brief Shared binary diagnostic header used by PulseEditor public-procedure logs.
+	 * @note `_type` stores the `ELogProcedure` value. `detail` selects the meaning of each procedure-specific payload.
+	 * @warning Keep `_terminator` last in every concrete log struct because the logger serializes only fields preceding it.
 	 */
-	struct PulseEditorLogMessage
+#define PULSEEDITOR_LOG_COMMON_FIELDS                                                                                                      \
+	uint32 _contractIndex;                                                                                                                  \
+	uint32 _type;                                                                                                                           \
+	id invocator;                                                                                                                           \
+	uint16 detail;                                                                                                                          \
+	uint8 phase;                                                                                                                            \
+	uint8 returnCode
+
+	struct CreateTemplateLog
 	{
-		// Emitting contract index required by the QPI log decoder.
-		uint32 _contractIndex;
-		// Event schema version; currently `1`.
-		uint32 _type;
-		// Identity that invoked the public procedure.
-		id invocator;
-		// Procedure-specific related identity, such as an owner, issuer, or recipient.
-		id relatedId;
-		// Procedure-specific amount, requested value, or primary output.
-		uint64 amount;
-		// Procedure-specific balance, expected value, or secondary output.
-		uint64 balance;
-		// Global ticket index when the event concerns one accepted ticket.
-		uint64 ticketIndex;
-		// Submitted ticket digits when relevant; unused bytes remain zero.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		// Template-scoped round id when relevant.
-		uint32 roundId;
-		// Procedure-specific count, status, or configuration value.
-		uint32 count;
-		// `ELogProcedure` value identifying the public ABI operation.
-		uint16 procedure;
-		// Template id when the operation is template-scoped.
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		uint64 ticketPrice;
+		uint64 requiredPrizeReserve;
+		uint64 requiredBonusReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 roundStartTick;
+		uint32 roundEndTick;
+		uint32 bonusMultiplierBps;
+		uint32 ticketLimit;
+		uint32 playerTicketLimit;
+		uint16 rewardOwnershipManagingContractIndex;
+		uint16 rewardPossessionManagingContractIndex;
+		uint16 bonusOwnershipManagingContractIndex;
+		uint16 bonusPossessionManagingContractIndex;
+		uint16 entryOwnershipManagingContractIndex;
+		uint16 entryPossessionManagingContractIndex;
+		uint16 bonusAssetIndex;
+		uint16 bonusAssetCount;
 		uint16 templateId;
-		// `ELogDetail` checkpoint or failure reason.
-		uint16 detail;
-		// `ELogPhase` stage within the invocation.
-		uint8 phase;
-		// Public `EReturnCode` value, or zero when the procedure has no return code.
-		uint8 returnCode;
-		// QPI log payload terminator; no fields may follow it.
+		uint8 codeLength;
+		uint8 maxDigit;
+		uint8 creatorFeePercent;
+		uint8 maxCreatorFeePercent;
+		uint8 burnPercent;
+		uint8 rewardMode;
+		uint8 entryMode;
+		bit bonusEnabled;
+		bit allowRepeatedDigits;
 		sint8 _terminator;
 	};
+
+	struct UpdateTemplateLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 ticketPrice;
+		uint64 requiredPrizeReserve;
+		uint64 requiredBonusReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 roundStartTick;
+		uint32 roundEndTick;
+		uint32 bonusMultiplierBps;
+		uint32 ticketLimit;
+		uint32 playerTicketLimit;
+		uint16 rewardOwnershipManagingContractIndex;
+		uint16 rewardPossessionManagingContractIndex;
+		uint16 bonusOwnershipManagingContractIndex;
+		uint16 bonusPossessionManagingContractIndex;
+		uint16 entryOwnershipManagingContractIndex;
+		uint16 entryPossessionManagingContractIndex;
+		uint16 bonusAssetIndex;
+		uint16 bonusAssetCount;
+		uint16 templateId;
+		uint8 codeLength;
+		uint8 maxDigit;
+		uint8 creatorFeePercent;
+		uint8 maxCreatorFeePercent;
+		uint8 burnPercent;
+		uint8 rewardMode;
+		uint8 entryMode;
+		uint8 templateStatus;
+		uint8 roundStatus;
+		bit hasTicketSales;
+		bit bonusEnabled;
+		bit allowRepeatedDigits;
+		sint8 _terminator;
+	};
+
+	struct DepositPrizeReserveLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 depositAmount;
+		uint64 prizeReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint16 templateId;
+		sint8 _terminator;
+	};
+
+	struct DepositBonusReserveLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 depositAmount;
+		uint64 bonusReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 bonusMultiplierBps;
+		uint16 templateId;
+		bit bonusEnabled;
+		sint8 _terminator;
+	};
+
+	struct DepositAssetReserveLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		sint64 possessedShares;
+		sint64 transferResult;
+		uint64 requestedShares;
+		uint64 assetPrizeReserve;
+		uint64 assetBonusReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 bonusMultiplierBps;
+		uint16 templateId;
+		uint8 rewardMode;
+		bit depositToBonusReserve;
+		bit bonusEnabled;
+		sint8 _terminator;
+	};
+
+	struct PublishTemplateLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 prizeReserve;
+		uint64 requiredPrizeReserve;
+		uint64 bonusReserve;
+		uint64 requiredBonusReserve;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 roundId;
+		uint32 currentTick;
+		uint32 roundEndTick;
+		uint32 bonusMultiplierBps;
+		uint16 templateId;
+		uint8 templateStatus;
+		uint8 roundStatus;
+		uint8 rewardMode;
+		uint8 entryMode;
+		bit bonusEnabled;
+		sint8 _terminator;
+	};
+
+	struct BuyTicketLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		sint64 possessedShares;
+		sint64 transferResult;
+		uint64 ticketIndex;
+		uint64 ticketPrice;
+		uint64 invocationReward;
+		uint64 storageTicketCount;
+		uint64 storageTicketCapacity;
+		uint32 ticketLimit;
+		uint32 roundTicketCount;
+		uint32 currentTick;
+		uint32 startTick;
+		uint32 endTick;
+		uint32 roundId;
+		uint16 playerTicketCount;
+		uint16 playerTicketLimit;
+		uint16 templateId;
+		uint8 templateStatus;
+		uint8 roundStatus;
+		uint8 codeLength;
+		uint8 maxDigit;
+		uint8 entryMode;
+		uint8 settlementReturnCode;
+		bit allowRepeatedDigits;
+		sint8 _terminator;
+	};
+
+	struct BuyTicketsLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
+		sint64 possessedShares;
+		sint64 transferResult;
+		uint64 ticketIndex;
+		uint64 ticketPrice;
+		uint64 invocationReward;
+		uint64 totalPrice;
+		uint64 storageTicketCount;
+		uint64 storageTicketCapacity;
+		uint32 ticketLimit;
+		uint32 roundTicketCount;
+		uint32 currentTick;
+		uint32 startTick;
+		uint32 endTick;
+		uint32 roundId;
+		uint32 requestedCount;
+		uint32 acceptedCount;
+		uint32 loopIndex;
+		uint16 playerTicketCount;
+		uint16 playerTicketLimit;
+		uint16 templateId;
+		uint8 templateStatus;
+		uint8 roundStatus;
+		uint8 codeLength;
+		uint8 maxDigit;
+		uint8 entryMode;
+		uint8 settlementReturnCode;
+		bit allowRepeatedDigits;
+		sint8 _terminator;
+	};
+
+	struct RequestStopLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint32 roundId;
+		uint16 templateId;
+		uint8 templateStatus;
+		uint8 roundStatus;
+		sint8 _terminator;
+	};
+
+	struct WithdrawCreatorRevenueLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id owner;
+		uint64 requestedAmount;
+		uint64 remainingRevenue;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		sint64 transferResult;
+		uint16 templateId;
+		uint8 entryMode;
+		sint8 _terminator;
+	};
+
+	struct SetPlatformConfigLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id platformOwner;
+		id currentPlatformOwner;
+		id developer1;
+		id developer2;
+		uint8 maxCreatorFeePercent;
+		bit developer1Configured;
+		bit developer2Configured;
+		sint8 _terminator;
+	};
+
+	struct WithdrawPlatformRevenueLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id platformOwner;
+		id developer1;
+		id developer2;
+		uint64 developer1Amount;
+		uint64 developer2Amount;
+		uint64 dividendPerShare;
+		uint64 dividendAmount;
+		uint64 retainedDeveloper1Accrued;
+		uint64 retainedDeveloper2Accrued;
+		uint64 retainedDividendAccrued;
+		sint64 dividendResult;
+		bit developer1Configured;
+		bit developer2Configured;
+		sint8 _terminator;
+	};
+
+	struct WithdrawAssetPlatformRevenueLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		id platformOwner;
+		id developer1;
+		id developer2;
+		sint64 possessedShares;
+		sint64 transferResult;
+		uint64 developer1Amount;
+		uint64 developer2Amount;
+		uint64 dividendAmount;
+		uint64 distributedAmount;
+		uint64 retainedDividendAccrued;
+		uint64 totalAmount;
+		uint64 templateCount;
+		uint64 templateCapacity;
+		uint16 templateId;
+		uint8 entryMode;
+		uint8 rewardMode;
+		bit developer1Configured;
+		bit developer2Configured;
+		sint8 _terminator;
+	};
+
+	struct TransferShareManagementRightsLog
+	{
+		PULSEEDITOR_LOG_COMMON_FIELDS;
+		Asset asset;
+		sint64 requestedShares;
+		sint64 possessedShares;
+		sint64 releaseResult;
+		sint64 refundAmount;
+		uint32 newManagingContractIndex;
+		sint8 _terminator;
+	};
+
+#undef PULSEEDITOR_LOG_COMMON_FIELDS
 
 	/**
 	 * @brief Converts a typed return code into the compact public ABI representation.
@@ -1868,7 +2140,7 @@ public:
 	 */
 	struct TransferShareManagementRights_locals
 	{
-		PulseEditorLogMessage logger;
+		TransferShareManagementRightsLog logger;
 		sint64 result;
 		sint64 possessedShares;
 		sint64 reward;
@@ -2079,7 +2351,7 @@ public:
 	struct CreateTemplate_locals
 	{
 		GameTemplate gameTemplate;
-		PulseEditorLogMessage logger;
+		CreateTemplateLog logger;
 		uint64 i;
 		uint16 templateId;
 		uint64 payout;
@@ -2092,7 +2364,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
-		PulseEditorLogMessage logger;
+		UpdateTemplateLog logger;
 		uint64 i;
 		uint64 payout;
 	};
@@ -2103,7 +2375,7 @@ public:
 	struct DepositPrizeReserve_locals
 	{
 		GameTemplate gameTemplate;
-		PulseEditorLogMessage logger;
+		DepositPrizeReserveLog logger;
 		uint64 depositAmount;
 	};
 
@@ -2113,7 +2385,7 @@ public:
 	struct DepositBonusReserve_locals
 	{
 		GameTemplate gameTemplate;
-		PulseEditorLogMessage logger;
+		DepositBonusReserveLog logger;
 		uint64 depositAmount;
 	};
 
@@ -2123,7 +2395,7 @@ public:
 	struct DepositAssetReserve_locals
 	{
 		GameTemplate gameTemplate;
-		PulseEditorLogMessage logger;
+		DepositAssetReserveLog logger;
 		sint64 transferResult;
 		sint64 possessedShares;
 	};
@@ -2135,7 +2407,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
-		PulseEditorLogMessage logger;
+		PublishTemplateLog logger;
 	};
 
 	/**
@@ -2150,7 +2422,7 @@ public:
 		SettleInstantTicket_output settleOutput;
 		ValidateDigits_input validateInput;
 		ValidateDigits_output validateOutput;
-		PulseEditorLogMessage logger;
+		BuyTicketLog logger;
 		uint64 i;
 		uint64 platformFee;
 		uint64 dev1Amount;
@@ -2178,7 +2450,7 @@ public:
 		SettleInstantTicket_output settleOutput;
 		ValidateDigits_input validateInput;
 		ValidateDigits_output validateOutput;
-		PulseEditorLogMessage logger;
+		BuyTicketsLog logger;
 		uint64 i;
 		uint64 j;
 		uint64 platformFee;
@@ -2277,7 +2549,7 @@ public:
 	{
 		GameTemplate gameTemplate;
 		Round round;
-		PulseEditorLogMessage logger;
+		RequestStopLog logger;
 	};
 
 	/**
@@ -2286,7 +2558,7 @@ public:
 	struct WithdrawCreatorRevenue_locals
 	{
 		GameTemplate gameTemplate;
-		PulseEditorLogMessage logger;
+		WithdrawCreatorRevenueLog logger;
 		uint64 amount;
 		sint64 transferResult;
 	};
@@ -2299,7 +2571,7 @@ public:
 		GameTemplate gameTemplate;
 		TransferAssetDividendToShareholders_input transferInput;
 		TransferAssetDividendToShareholders_output transferOutput;
-		PulseEditorLogMessage logger;
+		WithdrawAssetPlatformRevenueLog logger;
 		uint64 developer1Amount;
 		uint64 developer2Amount;
 		uint64 dividendAmount;
@@ -2313,7 +2585,7 @@ public:
 	 */
 	struct WithdrawPlatformRevenue_locals
 	{
-		PulseEditorLogMessage logger;
+		WithdrawPlatformRevenueLog logger;
 		uint64 developer1Amount;
 		uint64 developer2Amount;
 		uint64 dividendAmount;
@@ -2323,7 +2595,7 @@ public:
 	/** @brief Local state used while updating platform configuration. */
 	struct SetPlatformConfig_locals
 	{
-		PulseEditorLogMessage logger;
+		SetPlatformConfigLog logger;
 	};
 
 	/**
@@ -2500,15 +2772,14 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateTemplate)
 	{
-		prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.amount = input.ticketPrice;
-		locals.logger.count = input.ticketLimit;
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.ticketPrice = input.ticketPrice;
+		locals.logger.ticketLimit = input.ticketLimit;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
 			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::REFUND, ELogDetail::REFUND, qpi.invocator());
-			locals.logger.amount = qpi.invocationReward();
+			prepareLog(locals.logger, ELogPhase::REFUND, ELogDetail::REFUND, qpi.invocator());
 			LOG_DEBUG(locals.logger);
 		}
 
@@ -2519,7 +2790,9 @@ public:
 		if (state.get().templateCount >= state.get().templates.capacity())
 		{
 			output.returnCode = toReturnCode(EReturnCode::STORAGE_FULL);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_STORAGE_FULL, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_STORAGE_FULL, qpi.invocator());
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2528,7 +2801,15 @@ public:
 		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_CONFIG, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_CONFIG, qpi.invocator());
+			locals.logger.ticketPrice = input.ticketPrice;
+			locals.logger.ticketLimit = input.ticketLimit;
+			locals.logger.playerTicketLimit = input.playerTicketLimit;
+			locals.logger.codeLength = input.codeLength;
+			locals.logger.maxDigit = input.maxDigit;
+			locals.logger.creatorFeePercent = input.creatorFeePercent;
+			locals.logger.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
+			locals.logger.burnPercent = input.burnPercent;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2536,7 +2817,9 @@ public:
 		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_SCHEDULE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_SCHEDULE, qpi.invocator());
+			locals.logger.roundStartTick = input.roundStartTick;
+			locals.logger.roundEndTick = input.roundEndTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2545,7 +2828,10 @@ public:
 		                         input.rewardPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_REWARD, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_REWARD, qpi.invocator());
+			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
+			locals.logger.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
+			locals.logger.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2554,7 +2840,11 @@ public:
 		                        input.entryPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_ENTRY, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_ENTRY, qpi.invocator());
+			locals.logger.entryMode = static_cast<uint8>(input.entryMode);
+			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
+			locals.logger.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
+			locals.logger.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2563,7 +2853,12 @@ public:
 		                        input.bonusPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_BONUS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_BONUS, qpi.invocator());
+			locals.logger.bonusEnabled = input.bonusEnabled;
+			locals.logger.bonusMultiplierBps = input.bonusMultiplierBps;
+			locals.logger.bonusAssetCount = input.bonusAssetCount;
+			locals.logger.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
+			locals.logger.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2573,8 +2868,9 @@ public:
 			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-				prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_BONUS_ASSET, qpi.invocator());
-				locals.logger.count = static_cast<uint32>(locals.i);
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_BONUS_ASSET, qpi.invocator());
+				locals.logger.bonusAssetIndex = static_cast<uint16>(locals.i);
+				locals.logger.bonusAssetCount = input.bonusAssetCount;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -2583,7 +2879,10 @@ public:
 		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::CT_UNIQUE_DIGITS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_UNIQUE_DIGITS, qpi.invocator());
+			locals.logger.codeLength = input.codeLength;
+			locals.logger.maxDigit = input.maxDigit;
+			locals.logger.allowRepeatedDigits = input.allowRepeatedDigits;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2638,10 +2937,10 @@ public:
 		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
 		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::CREATE_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = output.templateId;
-		locals.logger.amount = output.requiredPrizeReserve;
-		locals.logger.balance = output.requiredBonusReserve;
+		locals.logger.requiredPrizeReserve = output.requiredPrizeReserve;
+		locals.logger.requiredBonusReserve = output.requiredBonusReserve;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -2655,9 +2954,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateTemplate)
 	{
-		prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = input.ticketPrice;
+		locals.logger.ticketPrice = input.ticketPrice;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
@@ -2669,8 +2968,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2679,8 +2980,16 @@ public:
 		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_CONFIG, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_CONFIG, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.ticketPrice = input.ticketPrice;
+			locals.logger.ticketLimit = input.ticketLimit;
+			locals.logger.playerTicketLimit = input.playerTicketLimit;
+			locals.logger.codeLength = input.codeLength;
+			locals.logger.maxDigit = input.maxDigit;
+			locals.logger.creatorFeePercent = input.creatorFeePercent;
+			locals.logger.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
+			locals.logger.burnPercent = input.burnPercent;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2688,8 +2997,10 @@ public:
 		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_SCHEDULE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_SCHEDULE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.roundStartTick = input.roundStartTick;
+			locals.logger.roundEndTick = input.roundEndTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2698,8 +3009,11 @@ public:
 		                         input.rewardPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_REWARD, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_REWARD, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
+			locals.logger.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
+			locals.logger.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2708,8 +3022,12 @@ public:
 		                        input.entryPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_ENTRY, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_ENTRY, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.entryMode = static_cast<uint8>(input.entryMode);
+			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
+			locals.logger.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
+			locals.logger.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2718,8 +3036,13 @@ public:
 		                        input.bonusPossessionManagingContractIndex))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_BONUS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_BONUS, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.bonusEnabled = input.bonusEnabled;
+			locals.logger.bonusMultiplierBps = input.bonusMultiplierBps;
+			locals.logger.bonusAssetCount = input.bonusAssetCount;
+			locals.logger.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
+			locals.logger.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2729,9 +3052,10 @@ public:
 			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-				prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_BONUS_ASSET, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_BONUS_ASSET, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.count = static_cast<uint32>(locals.i);
+				locals.logger.bonusAssetIndex = static_cast<uint16>(locals.i);
+				locals.logger.bonusAssetCount = input.bonusAssetCount;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -2740,8 +3064,11 @@ public:
 		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_UNIQUE_DIGITS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_UNIQUE_DIGITS, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.codeLength = input.codeLength;
+			locals.logger.maxDigit = input.maxDigit;
+			locals.logger.allowRepeatedDigits = input.allowRepeatedDigits;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2751,8 +3078,9 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2761,8 +3089,9 @@ public:
 		if (locals.gameTemplate.hasTicketSales)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_TICKET_SALES, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_TICKET_SALES, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.hasTicketSales = locals.gameTemplate.hasTicketSales;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2771,8 +3100,10 @@ public:
 		    (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status == ERoundStatus::SELLING))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::UT_STATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_STATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
+			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2821,10 +3152,10 @@ public:
 		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
 		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::UPDATE_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = output.requiredPrizeReserve;
-		locals.logger.balance = output.requiredBonusReserve;
+		locals.logger.requiredPrizeReserve = output.requiredPrizeReserve;
+		locals.logger.requiredBonusReserve = output.requiredBonusReserve;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -2838,9 +3169,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositPrizeReserve)
 	{
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = qpi.invocationReward();
+		locals.logger.depositAmount = qpi.invocationReward();
 		LOG_DEBUG(locals.logger);
 		output.depositedAmount = 0;
 		output.prizeReserve = 0;
@@ -2852,8 +3183,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2867,8 +3200,9 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2877,9 +3211,10 @@ public:
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.prizeReserve = locals.gameTemplate.prizeReserve;
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::VALIDATION, ELogDetail::DPR_AMOUNT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_AMOUNT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.balance = output.prizeReserve;
+			locals.logger.depositAmount = qpi.invocationReward();
+			locals.logger.prizeReserve = output.prizeReserve;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2892,10 +3227,10 @@ public:
 		output.depositedAmount = locals.depositAmount;
 		output.prizeReserve = locals.gameTemplate.prizeReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_PRIZE_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = output.depositedAmount;
-		locals.logger.balance = output.prizeReserve;
+		locals.logger.depositAmount = output.depositedAmount;
+		locals.logger.prizeReserve = output.prizeReserve;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -2909,9 +3244,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositBonusReserve)
 	{
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = qpi.invocationReward();
+		locals.logger.depositAmount = qpi.invocationReward();
 		LOG_DEBUG(locals.logger);
 		output.depositedAmount = 0;
 		output.bonusReserve = 0;
@@ -2923,8 +3258,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2938,8 +3275,9 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2952,9 +3290,11 @@ public:
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
 			output.bonusReserve = locals.gameTemplate.bonusReserve;
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_MODE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_MODE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.balance = output.bonusReserve;
+			locals.logger.bonusReserve = output.bonusReserve;
+			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
+			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2963,9 +3303,10 @@ public:
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.bonusReserve = locals.gameTemplate.bonusReserve;
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::VALIDATION, ELogDetail::DBR_AMOUNT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_AMOUNT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.balance = output.bonusReserve;
+			locals.logger.depositAmount = qpi.invocationReward();
+			locals.logger.bonusReserve = output.bonusReserve;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -2978,10 +3319,10 @@ public:
 		output.depositedAmount = locals.depositAmount;
 		output.bonusReserve = locals.gameTemplate.bonusReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_BONUS_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = output.depositedAmount;
-		locals.logger.balance = output.bonusReserve;
+		locals.logger.depositAmount = output.depositedAmount;
+		locals.logger.bonusReserve = output.bonusReserve;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -2995,9 +3336,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositAssetReserve)
 	{
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = input.numberOfShares;
+		locals.logger.requestedShares = input.numberOfShares;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
@@ -3010,8 +3351,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3024,8 +3367,9 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3034,8 +3378,10 @@ public:
 		    input.numberOfShares > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_MODE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_MODE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.requestedShares = input.numberOfShares;
+			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3044,8 +3390,11 @@ public:
 		    (!locals.gameTemplate.bonusEnabled || locals.gameTemplate.bonusMultiplierBps <= PULSEEDITOR_BONUS_MULTIPLIER_SCALE))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_BONUS_MODE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_BONUS_MODE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.depositToBonusReserve = input.depositToBonusReserve;
+			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
+			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3057,10 +3406,10 @@ public:
 		if (locals.possessedShares < static_cast<sint64>(input.numberOfShares))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::VALIDATION, ELogDetail::DAR_SHARES, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_SHARES, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = input.numberOfShares;
-			locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+			locals.logger.requestedShares = input.numberOfShares;
+			locals.logger.possessedShares = locals.possessedShares;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3072,9 +3421,10 @@ public:
 		if (locals.transferResult < 0)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::TRANSFER, ELogDetail::DAR_TRANSFER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::DAR_TRANSFER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = input.numberOfShares;
+			locals.logger.requestedShares = input.numberOfShares;
+			locals.logger.transferResult = locals.transferResult;
 			locals.logger.returnCode = output.returnCode;
 			LOG_ERROR(locals.logger);
 			return;
@@ -3094,10 +3444,10 @@ public:
 		output.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve;
 		output.assetBonusReserve = locals.gameTemplate.assetBonusReserve;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::DEPOSIT_ASSET_RESERVE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = output.depositedNumberOfShares;
-		locals.logger.balance = output.assetPrizeReserve;
+		locals.logger.requestedShares = output.depositedNumberOfShares;
+		locals.logger.assetPrizeReserve = output.assetPrizeReserve;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -3111,7 +3461,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(PublishTemplate)
 	{
-		prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
@@ -3122,8 +3472,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3133,8 +3485,9 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3142,8 +3495,9 @@ public:
 		if (locals.gameTemplate.status != ETemplateStatus::DRAFT)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_STATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_STATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3151,9 +3505,11 @@ public:
 		if (!hasRequiredBaseReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_BASE_RESERVE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_BASE_RESERVE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.balance = locals.gameTemplate.prizeReserve;
+			locals.logger.prizeReserve = locals.gameTemplate.prizeReserve;
+			locals.logger.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
+			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3161,9 +3517,12 @@ public:
 		if (!hasRequiredBonusReserve(locals.gameTemplate))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_BONUS_RESERVE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_BONUS_RESERVE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.balance = locals.gameTemplate.bonusReserve;
+			locals.logger.bonusReserve = locals.gameTemplate.bonusReserve;
+			locals.logger.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
+			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
+			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3171,8 +3530,10 @@ public:
 		if (locals.gameTemplate.roundEndTick > 0 && qpi.tick() > locals.gameTemplate.roundEndTick)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::VALIDATION, ELogDetail::PT_SCHEDULE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_SCHEDULE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.currentTick = qpi.tick();
+			locals.logger.roundEndTick = locals.gameTemplate.roundEndTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3192,7 +3553,7 @@ public:
 
 		output.roundId = locals.round.roundId;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::PUBLISH_TEMPLATE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.roundId = output.roundId;
 		locals.logger.returnCode = output.returnCode;
@@ -3209,10 +3570,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTicket)
 	{
-		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.digits = input.digits;
-		locals.logger.amount = qpi.invocationReward();
+		locals.logger.invocationReward = qpi.invocationReward();
 		LOG_DEBUG(locals.logger);
 		output.ticketIndex = 0;
 		output.roundId = 0;
@@ -3224,8 +3585,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.storageTicketCount = state.get().ticketCount;
+			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3242,9 +3605,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_STATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_STATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
+			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3256,9 +3621,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_NOT_STARTED, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_NOT_STARTED, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.currentTick = qpi.tick();
+			locals.logger.startTick = locals.round.startTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3272,9 +3639,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ENDED, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ENDED, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.currentTick = qpi.tick();
+			locals.logger.endTick = locals.round.endTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3287,10 +3656,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_PRICE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_PRICE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.reward;
-			locals.logger.balance = locals.gameTemplate.ticketPrice;
+			locals.logger.invocationReward = locals.reward;
+			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3302,9 +3672,12 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_SOLD_OUT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_SOLD_OUT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.count = locals.round.ticketCount;
+			locals.logger.storageTicketCount = state.get().ticketCount;
+			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
+			locals.logger.roundTicketCount = locals.round.ticketCount;
+			locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3322,9 +3695,12 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_DIGITS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_DIGITS, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.digits = input.digits;
+			locals.logger.codeLength = locals.gameTemplate.codeLength;
+			locals.logger.maxDigit = locals.gameTemplate.maxDigit;
+			locals.logger.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3347,9 +3723,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_PLAYER_LIMIT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_PLAYER_LIMIT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.count = locals.playerTicketCount;
+			locals.logger.playerTicketCount = locals.playerTicketCount;
+			locals.logger.playerTicketLimit = locals.gameTemplate.playerTicketLimit;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3360,9 +3737,9 @@ public:
 			if (locals.gameTemplate.ticketPrice > static_cast<uint64>(INT64_MAX))
 			{
 				output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_PRICE, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_PRICE, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = locals.gameTemplate.ticketPrice;
+				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -3373,10 +3750,10 @@ public:
 			if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_BALANCE, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_BALANCE, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = locals.gameTemplate.ticketPrice;
-				locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+				locals.logger.possessedShares = locals.possessedShares;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -3387,9 +3764,10 @@ public:
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::TRANSFER, ELogDetail::BT_ASSET_TRANSFER, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BT_ASSET_TRANSFER, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = locals.gameTemplate.ticketPrice;
+				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+				locals.logger.transferResult = locals.transferResult;
 				locals.logger.returnCode = output.returnCode;
 				LOG_ERROR(locals.logger);
 				return;
@@ -3412,9 +3790,10 @@ public:
 					qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
 					                                        SELF, static_cast<sint64>(locals.gameTemplate.ticketPrice), qpi.invocator());
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::TRANSFER, ELogDetail::BT_BURN_TRANSFER, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BT_BURN_TRANSFER, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.amount = locals.burnAmount;
+					locals.logger.ticketPrice = locals.burnAmount;
+					locals.logger.transferResult = locals.transferResult;
 					locals.logger.returnCode = output.returnCode;
 					LOG_ERROR(locals.logger);
 					return;
@@ -3478,11 +3857,11 @@ public:
 		state.mut().ticketCount = sadd(state.get().ticketCount, 1ULL);
 		state.mut().templates.set(input.templateId, locals.gameTemplate);
 		state.mut().rounds.set(input.templateId, locals.round);
-		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::STATE_CHANGE, ELogDetail::BT_ACCEPTED, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::STATE_CHANGE, ELogDetail::BT_ACCEPTED, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.roundId = output.roundId;
 		locals.logger.ticketIndex = output.ticketIndex;
-		locals.logger.amount = locals.gameTemplate.ticketPrice;
+		locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
 		locals.logger.digits = input.digits;
 		LOG_DEBUG(locals.logger);
 
@@ -3494,14 +3873,15 @@ public:
 			if (locals.settleOutput.returnCode != toReturnCode(EReturnCode::SUCCESS))
 			{
 				output.returnCode = locals.settleOutput.returnCode;
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
 				locals.logger.templateId = input.templateId;
 				locals.logger.ticketIndex = output.ticketIndex;
+				locals.logger.settlementReturnCode = locals.settleOutput.returnCode;
 				locals.logger.returnCode = output.returnCode;
 				LOG_ERROR(locals.logger);
 				return;
 			}
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.ticketIndex = output.ticketIndex;
 			locals.logger.returnCode = locals.settleOutput.returnCode;
@@ -3509,7 +3889,7 @@ public:
 		}
 
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::BUY_TICKET, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.roundId = output.roundId;
 		locals.logger.ticketIndex = output.ticketIndex;
@@ -3527,10 +3907,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTickets)
 	{
-		prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.count = input.ticketCount;
-		locals.logger.amount = qpi.invocationReward();
+		locals.logger.requestedCount = input.ticketCount;
+		locals.logger.invocationReward = qpi.invocationReward();
 		LOG_DEBUG(locals.logger);
 		setMemory(output.ticketIndexes, 0);
 		output.roundId = 0;
@@ -3543,8 +3923,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.storageTicketCount = state.get().ticketCount;
+			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3556,9 +3938,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_COUNT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_COUNT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.count = input.ticketCount;
+			locals.logger.requestedCount = input.ticketCount;
+			locals.logger.ticketLimit = PULSEEDITOR_MAX_BATCH_TICKETS;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3576,9 +3959,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_STATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_STATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
+			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3590,9 +3975,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_NOT_STARTED, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_NOT_STARTED, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.currentTick = qpi.tick();
+			locals.logger.startTick = locals.round.startTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3606,9 +3993,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ENDED, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ENDED, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
+			locals.logger.currentTick = qpi.tick();
+			locals.logger.endTick = locals.round.endTick;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3621,10 +4010,13 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PRICE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PRICE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.reward;
-			locals.logger.balance = locals.totalPrice;
+			locals.logger.invocationReward = locals.reward;
+			locals.logger.totalPrice = locals.totalPrice;
+			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
+			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+			locals.logger.requestedCount = input.ticketCount;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3632,9 +4024,12 @@ public:
 		if (locals.gameTemplate.entryMode == EEntryMode::ASSET && locals.totalPrice > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_PRICE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_PRICE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.totalPrice;
+			locals.logger.totalPrice = locals.totalPrice;
+			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+			locals.logger.requestedCount = input.ticketCount;
+			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3646,9 +4041,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_STORAGE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_STORAGE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.count = input.ticketCount;
+			locals.logger.requestedCount = input.ticketCount;
+			locals.logger.storageTicketCount = state.get().ticketCount;
+			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3661,9 +4058,11 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ROUND_LIMIT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ROUND_LIMIT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.count = input.ticketCount;
+			locals.logger.requestedCount = input.ticketCount;
+			locals.logger.roundTicketCount = locals.round.ticketCount;
+			locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -3683,10 +4082,13 @@ public:
 					qpi.transfer(qpi.invocator(), qpi.invocationReward());
 				}
 				output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_DIGITS, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_DIGITS, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.count = static_cast<uint32>(locals.i);
+				locals.logger.loopIndex = static_cast<uint32>(locals.i);
 				locals.logger.digits = input.tickets.get(locals.i).digits;
+				locals.logger.codeLength = locals.gameTemplate.codeLength;
+				locals.logger.maxDigit = locals.gameTemplate.maxDigit;
+				locals.logger.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -3712,9 +4114,11 @@ public:
 					qpi.transfer(qpi.invocator(), qpi.invocationReward());
 				}
 				output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PLAYER_LIMIT, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PLAYER_LIMIT, qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.count = locals.playerTicketCount;
+				locals.logger.requestedCount = input.ticketCount;
+				locals.logger.playerTicketCount = locals.playerTicketCount;
+				locals.logger.playerTicketLimit = locals.gameTemplate.playerTicketLimit;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -3727,10 +4131,10 @@ public:
 				if (locals.possessedShares < static_cast<sint64>(locals.totalPrice))
 				{
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_BALANCE, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_BALANCE, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.amount = locals.totalPrice;
-					locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+					locals.logger.totalPrice = locals.totalPrice;
+					locals.logger.possessedShares = locals.possessedShares;
 					locals.logger.returnCode = output.returnCode;
 					LOG_WARNING(locals.logger);
 					return;
@@ -3741,9 +4145,10 @@ public:
 				if (locals.transferResult < 0)
 				{
 					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_ASSET_TRANSFER, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_ASSET_TRANSFER, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.amount = locals.totalPrice;
+					locals.logger.totalPrice = locals.totalPrice;
+					locals.logger.transferResult = locals.transferResult;
 					locals.logger.returnCode = output.returnCode;
 					LOG_ERROR(locals.logger);
 					return;
@@ -3768,9 +4173,12 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_STATE, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_STATE, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.count = output.acceptedCount;
+					locals.logger.acceptedCount = output.acceptedCount;
+					locals.logger.roundId = locals.round.roundId;
+					locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
+					locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
 					locals.logger.returnCode = output.returnCode;
 					if (output.acceptedCount > 0)
 					{
@@ -3793,10 +4201,12 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_NOT_STARTED,
+					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_NOT_STARTED,
 					           qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.count = output.acceptedCount;
+					locals.logger.acceptedCount = output.acceptedCount;
+					locals.logger.currentTick = qpi.tick();
+					locals.logger.startTick = locals.round.startTick;
 					locals.logger.returnCode = output.returnCode;
 					if (output.acceptedCount > 0)
 					{
@@ -3821,9 +4231,11 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_ENDED, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_ENDED, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.count = output.acceptedCount;
+					locals.logger.acceptedCount = output.acceptedCount;
+					locals.logger.currentTick = qpi.tick();
+					locals.logger.endTick = locals.round.endTick;
 					locals.logger.returnCode = output.returnCode;
 					if (output.acceptedCount > 0)
 					{
@@ -3846,9 +4258,13 @@ public:
 						}
 					}
 					output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_SOLD_OUT, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_SOLD_OUT, qpi.invocator());
 					locals.logger.templateId = input.templateId;
-					locals.logger.count = output.acceptedCount;
+					locals.logger.acceptedCount = output.acceptedCount;
+					locals.logger.storageTicketCount = state.get().ticketCount;
+					locals.logger.storageTicketCapacity = state.get().tickets.capacity();
+					locals.logger.roundTicketCount = locals.round.ticketCount;
+					locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
 					locals.logger.returnCode = output.returnCode;
 					if (output.acceptedCount > 0)
 					{
@@ -3872,12 +4288,12 @@ public:
 					if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
 					{
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::VALIDATION, ELogDetail::BTS_TICKET_ASSET_BALANCE,
+						prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_TICKET_ASSET_BALANCE,
 						           qpi.invocator());
 						locals.logger.templateId = input.templateId;
-						locals.logger.count = output.acceptedCount;
-						locals.logger.amount = locals.gameTemplate.ticketPrice;
-						locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+						locals.logger.acceptedCount = output.acceptedCount;
+						locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+						locals.logger.possessedShares = locals.possessedShares;
 						locals.logger.returnCode = output.returnCode;
 						if (output.acceptedCount > 0)
 						{
@@ -3895,11 +4311,12 @@ public:
 					if (locals.transferResult < 0)
 					{
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_TICKET_ASSET_TRANSFER,
+						prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_TICKET_ASSET_TRANSFER,
 						           qpi.invocator());
 						locals.logger.templateId = input.templateId;
-						locals.logger.count = output.acceptedCount;
-						locals.logger.amount = locals.gameTemplate.ticketPrice;
+						locals.logger.acceptedCount = output.acceptedCount;
+						locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
+						locals.logger.transferResult = locals.transferResult;
 						locals.logger.returnCode = output.returnCode;
 						LOG_ERROR(locals.logger);
 						return;
@@ -3932,10 +4349,11 @@ public:
 							                                        SELF, SELF, static_cast<sint64>(locals.totalPrice), qpi.invocator());
 						}
 						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::TRANSFER, ELogDetail::BTS_BURN_TRANSFER, qpi.invocator());
+						prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_BURN_TRANSFER, qpi.invocator());
 						locals.logger.templateId = input.templateId;
-						locals.logger.count = output.acceptedCount;
-						locals.logger.amount = locals.burnAmount;
+						locals.logger.acceptedCount = output.acceptedCount;
+						locals.logger.ticketPrice = locals.burnAmount;
+						locals.logger.transferResult = locals.transferResult;
 						locals.logger.returnCode = output.returnCode;
 						LOG_ERROR(locals.logger);
 						return;
@@ -4003,12 +4421,12 @@ public:
 			}
 			state.mut().templates.set(input.templateId, locals.gameTemplate);
 			state.mut().rounds.set(input.templateId, locals.round);
-			prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::STATE_CHANGE, ELogDetail::BTS_ACCEPTED, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::STATE_CHANGE, ELogDetail::BTS_ACCEPTED, qpi.invocator());
 			locals.logger.templateId = input.templateId;
 			locals.logger.roundId = locals.round.roundId;
 			locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-			locals.logger.count = output.acceptedCount;
-			locals.logger.amount = locals.gameTemplate.ticketPrice;
+			locals.logger.acceptedCount = output.acceptedCount;
+			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
 			locals.logger.digits = input.tickets.get(locals.i).digits;
 			LOG_DEBUG(locals.logger);
 
@@ -4028,28 +4446,29 @@ public:
 						}
 					}
 					output.returnCode = locals.settleOutput.returnCode;
-					prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
+					prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
 					locals.logger.templateId = input.templateId;
 					locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-					locals.logger.count = output.acceptedCount;
+					locals.logger.acceptedCount = output.acceptedCount;
+					locals.logger.settlementReturnCode = locals.settleOutput.returnCode;
 					locals.logger.returnCode = output.returnCode;
 					LOG_ERROR(locals.logger);
 					return;
 				}
-				prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
+				prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
 				locals.logger.templateId = input.templateId;
 				locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-				locals.logger.count = output.acceptedCount;
+				locals.logger.acceptedCount = output.acceptedCount;
 				locals.logger.returnCode = locals.settleOutput.returnCode;
 				LOG_DEBUG(locals.logger);
 			}
 		}
 
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::BUY_TICKETS, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.roundId = output.roundId;
-		locals.logger.count = output.acceptedCount;
+		locals.logger.acceptedCount = output.acceptedCount;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -4245,7 +4664,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(RequestStop)
 	{
-		prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
@@ -4256,8 +4675,10 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::VALIDATION, ELogDetail::RS_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::RS_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4268,8 +4689,9 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::VALIDATION, ELogDetail::RS_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::RS_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4285,10 +4707,10 @@ public:
 
 		state.mut().templates.set(input.templateId, locals.gameTemplate);
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::REQUEST_STOP, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		locals.logger.roundId = locals.round.roundId;
-		locals.logger.count = static_cast<uint32>(locals.gameTemplate.status);
+		locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -4302,9 +4724,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawCreatorRevenue)
 	{
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = input.amount;
+		locals.logger.requestedAmount = input.amount;
 		LOG_DEBUG(locals.logger);
 		if (!isTemplateIdValid(state, input.templateId))
 		{
@@ -4313,8 +4735,10 @@ public:
 				qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			}
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_TEMPLATE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_TEMPLATE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4328,8 +4752,9 @@ public:
 		if (qpi.invocator() != locals.gameTemplate.owner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.owner = locals.gameTemplate.owner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4340,11 +4765,11 @@ public:
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
-				prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_ASSET_AMOUNT,
+				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_ASSET_AMOUNT,
 				           qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = input.amount;
-				locals.logger.balance = output.remainingRevenue;
+				locals.logger.requestedAmount = input.amount;
+				locals.logger.remainingRevenue = output.remainingRevenue;
 				locals.logger.returnCode = output.returnCode;
 				LOG_WARNING(locals.logger);
 				return;
@@ -4358,11 +4783,12 @@ public:
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
-				prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::TRANSFER, ELogDetail::WCR_ASSET_TRANSFER,
+				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WCR_ASSET_TRANSFER,
 				           qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = input.amount;
-				locals.logger.balance = output.remainingRevenue;
+				locals.logger.requestedAmount = input.amount;
+				locals.logger.remainingRevenue = output.remainingRevenue;
+				locals.logger.transferResult = locals.transferResult;
 				locals.logger.returnCode = output.returnCode;
 				LOG_ERROR(locals.logger);
 				return;
@@ -4373,10 +4799,10 @@ public:
 			output.withdrawnAmount = locals.amount;
 			output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
 			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = output.withdrawnAmount;
-			locals.logger.balance = output.remainingRevenue;
+			locals.logger.requestedAmount = output.withdrawnAmount;
+			locals.logger.remainingRevenue = output.remainingRevenue;
 			locals.logger.returnCode = output.returnCode;
 			LOG_INFO(locals.logger);
 			return;
@@ -4386,10 +4812,10 @@ public:
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
 			output.remainingRevenue = locals.gameTemplate.creatorRevenue;
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::VALIDATION, ELogDetail::WCR_QUBIC_AMOUNT, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_QUBIC_AMOUNT, qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = input.amount;
-			locals.logger.balance = output.remainingRevenue;
+			locals.logger.requestedAmount = input.amount;
+			locals.logger.remainingRevenue = output.remainingRevenue;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4403,10 +4829,10 @@ public:
 		output.withdrawnAmount = locals.amount;
 		output.remainingRevenue = locals.gameTemplate.creatorRevenue;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_CREATOR_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = output.withdrawnAmount;
-		locals.logger.balance = output.remainingRevenue;
+		locals.logger.requestedAmount = output.withdrawnAmount;
+		locals.logger.remainingRevenue = output.remainingRevenue;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -4420,9 +4846,9 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(SetPlatformConfig)
 	{
-		prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.relatedId = input.platformOwner;
-		locals.logger.count = input.maxCreatorFeePercent;
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.platformOwner = input.platformOwner;
+		locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
@@ -4432,7 +4858,9 @@ public:
 		if (state.get().platformOwner != NULL_ID && qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::VALIDATION, ELogDetail::SPC_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::SPC_OWNER, qpi.invocator());
+			locals.logger.platformOwner = state.get().platformOwner;
+			locals.logger.currentPlatformOwner = state.get().platformOwner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4440,8 +4868,13 @@ public:
 		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID || input.maxCreatorFeePercent > 100)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::VALIDATION, ELogDetail::SPC_VALUE, qpi.invocator());
-			locals.logger.count = input.maxCreatorFeePercent;
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::SPC_VALUE, qpi.invocator());
+			locals.logger.platformOwner = input.platformOwner;
+			locals.logger.developer1 = input.developer1;
+			locals.logger.developer2 = input.developer2;
+			locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
+			locals.logger.developer1Configured = input.developer1 != NULL_ID;
+			locals.logger.developer2Configured = input.developer2 != NULL_ID;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4452,9 +4885,9 @@ public:
 		state.mut().developer2 = input.developer2;
 		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::SET_PLATFORM_CONFIG, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.relatedId = input.platformOwner;
-		locals.logger.count = input.maxCreatorFeePercent;
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.platformOwner = input.platformOwner;
+		locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -4468,7 +4901,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
 	{
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
 		{
@@ -4478,7 +4911,8 @@ public:
 		if (qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WPR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WPR_OWNER, qpi.invocator());
+			locals.logger.platformOwner = state.get().platformOwner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4486,7 +4920,11 @@ public:
 		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WPR_RECIPIENTS, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WPR_RECIPIENTS, qpi.invocator());
+			locals.logger.developer1 = state.get().developer1;
+			locals.logger.developer2 = state.get().developer2;
+			locals.logger.developer1Configured = state.get().developer1 != NULL_ID;
+			locals.logger.developer2Configured = state.get().developer2 != NULL_ID;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4500,8 +4938,11 @@ public:
 		if (locals.dividendPerShare > 0 && !qpi.distributeDividends(static_cast<sint64>(locals.dividendPerShare)))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WPR_DIVIDENDS, qpi.invocator());
-			locals.logger.amount = locals.dividendAmount;
+			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WPR_DIVIDENDS, qpi.invocator());
+			locals.logger.dividendPerShare = locals.dividendPerShare;
+			locals.logger.dividendAmount = locals.dividendAmount;
+			locals.logger.dividendResult = 0;
+			locals.logger.retainedDividendAccrued = state.get().dividendAccrued;
 			locals.logger.returnCode = output.returnCode;
 			LOG_ERROR(locals.logger);
 			return;
@@ -4510,17 +4951,17 @@ public:
 		if (locals.developer1Amount > 0)
 		{
 			qpi.transfer(state.get().developer1, locals.developer1Amount);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
-			locals.logger.relatedId = state.get().developer1;
-			locals.logger.amount = locals.developer1Amount;
+			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
+			locals.logger.developer1 = state.get().developer1;
+			locals.logger.developer1Amount = locals.developer1Amount;
 			LOG_DEBUG(locals.logger);
 		}
 		if (locals.developer2Amount > 0)
 		{
 			qpi.transfer(state.get().developer2, locals.developer2Amount);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
-			locals.logger.relatedId = state.get().developer2;
-			locals.logger.amount = locals.developer2Amount;
+			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
+			locals.logger.developer2 = state.get().developer2;
+			locals.logger.developer2Amount = locals.developer2Amount;
 			LOG_DEBUG(locals.logger);
 		}
 
@@ -4532,9 +4973,10 @@ public:
 		output.developer2Amount = locals.developer2Amount;
 		output.dividendAmount = locals.dividendAmount;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_PLATFORM_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.amount = sadd(output.developer1Amount, output.developer2Amount);
-		locals.logger.balance = output.dividendAmount;
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		locals.logger.developer1Amount = output.developer1Amount;
+		locals.logger.developer2Amount = output.developer2Amount;
+		locals.logger.dividendAmount = output.dividendAmount;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -4548,7 +4990,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
 	{
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
 		locals.logger.templateId = input.templateId;
 		LOG_DEBUG(locals.logger);
 		if (qpi.invocationReward() > 0)
@@ -4563,9 +5005,11 @@ public:
 		if (!isTemplateIdValid(state, input.templateId))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_TEMPLATE,
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_TEMPLATE,
 			           qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.templateCount = state.get().templateCount;
+			locals.logger.templateCapacity = state.get().templates.capacity();
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4573,8 +5017,9 @@ public:
 		if (qpi.invocator() != state.get().platformOwner)
 		{
 			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_OWNER, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_OWNER, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.platformOwner = state.get().platformOwner;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4582,9 +5027,13 @@ public:
 		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_RECIPIENTS,
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_RECIPIENTS,
 			           qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.developer1 = state.get().developer1;
+			locals.logger.developer2 = state.get().developer2;
+			locals.logger.developer1Configured = state.get().developer1 != NULL_ID;
+			locals.logger.developer2Configured = state.get().developer2 != NULL_ID;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4595,8 +5044,10 @@ public:
 		if (locals.gameTemplate.entryMode != EEntryMode::ASSET || locals.gameTemplate.rewardMode != ERewardMode::ASSET)
 		{
 			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_MODE, qpi.invocator());
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_MODE, qpi.invocator());
 			locals.logger.templateId = input.templateId;
+			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
+			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4610,10 +5061,10 @@ public:
 		if (locals.totalAmount > static_cast<uint64>(INT64_MAX))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_AMOUNT,
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_AMOUNT,
 			           qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.totalAmount;
+			locals.logger.totalAmount = locals.totalAmount;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4624,11 +5075,11 @@ public:
 		if (locals.possessedShares < static_cast<sint64>(locals.totalAmount))
 		{
 			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::VALIDATION, ELogDetail::WAPR_BALANCE,
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_BALANCE,
 			           qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.totalAmount;
-			locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+			locals.logger.totalAmount = locals.totalAmount;
+			locals.logger.possessedShares = locals.possessedShares;
 			locals.logger.returnCode = output.returnCode;
 			LOG_WARNING(locals.logger);
 			return;
@@ -4642,10 +5093,12 @@ public:
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV1_TRANSFER,
+				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV1_TRANSFER,
 				           qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = locals.developer1Amount;
+				locals.logger.developer1Amount = locals.developer1Amount;
+				locals.logger.developer1 = state.get().developer1;
+				locals.logger.transferResult = locals.transferResult;
 				locals.logger.returnCode = output.returnCode;
 				LOG_ERROR(locals.logger);
 				return;
@@ -4661,10 +5114,12 @@ public:
 			{
 				state.mut().templates.set(input.templateId, locals.gameTemplate);
 				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV2_TRANSFER,
+				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV2_TRANSFER,
 				           qpi.invocator());
 				locals.logger.templateId = input.templateId;
-				locals.logger.amount = locals.developer2Amount;
+				locals.logger.developer2Amount = locals.developer2Amount;
+				locals.logger.developer2 = state.get().developer2;
+				locals.logger.transferResult = locals.transferResult;
 				locals.logger.returnCode = output.returnCode;
 				LOG_ERROR(locals.logger);
 				return;
@@ -4680,11 +5135,12 @@ public:
 			locals.transferInput.dividendAmount = static_cast<sint64>(locals.dividendAmount);
 			locals.transferInput.shareholdersTotalShares = NUMBER_OF_COMPUTORS;
 			CALL(TransferAssetDividendToShareholders, locals.transferInput, locals.transferOutput);
-			prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::TRANSFER, ELogDetail::WAPR_DIVIDENDS,
+			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DIVIDENDS,
 			           qpi.invocator());
 			locals.logger.templateId = input.templateId;
-			locals.logger.amount = locals.dividendAmount;
-			locals.logger.balance = locals.transferOutput.distributedAmount;
+			locals.logger.dividendAmount = locals.dividendAmount;
+			locals.logger.distributedAmount = locals.transferOutput.distributedAmount;
+			locals.logger.transferResult = static_cast<sint64>(locals.transferOutput.distributedAmount);
 			if (locals.transferOutput.distributedAmount < locals.dividendAmount)
 			{
 				LOG_ERROR(locals.logger);
@@ -4703,10 +5159,11 @@ public:
 		output.dividendAmount = locals.transferOutput.distributedAmount;
 		output.dividendAccrued = locals.gameTemplate.assetDividendAccrued;
 		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogProcedure::WITHDRAW_ASSET_PLATFORM_REVENUE, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
+		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
 		locals.logger.templateId = input.templateId;
-		locals.logger.amount = sadd(output.developer1Amount, output.developer2Amount);
-		locals.logger.balance = output.dividendAccrued;
+		locals.logger.developer1Amount = output.developer1Amount;
+		locals.logger.developer2Amount = output.developer2Amount;
+		locals.logger.retainedDividendAccrued = output.dividendAccrued;
 		locals.logger.returnCode = output.returnCode;
 		LOG_INFO(locals.logger);
 	}
@@ -5091,16 +5548,19 @@ public:
 		locals.refundAmount = locals.reward;
 		locals.success = false;
 		output.transferredNumberOfShares = 0;
-		prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.amount = input.numberOfShares > 0 ? static_cast<uint64>(input.numberOfShares) : 0;
-		locals.logger.count = input.newManagingContractIndex;
-		locals.logger.relatedId = input.asset.issuer;
+		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
+		locals.logger.requestedShares = input.numberOfShares;
+		locals.logger.newManagingContractIndex = input.newManagingContractIndex;
+		locals.logger.asset = input.asset;
 		LOG_DEBUG(locals.logger);
 
 		if (input.numberOfShares <= 0)
 		{
-			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::VALIDATION, ELogDetail::TSMR_INVALID_COUNT,
+			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::TSMR_INVALID_COUNT,
 			           qpi.invocator());
+			locals.logger.requestedShares = input.numberOfShares;
+			locals.logger.newManagingContractIndex = input.newManagingContractIndex;
+			locals.logger.asset = input.asset;
 			LOG_WARNING(locals.logger);
 		}
 		else
@@ -5109,10 +5569,10 @@ public:
 			    qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
 			if (locals.possessedShares < input.numberOfShares)
 			{
-				prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::VALIDATION,
+				prepareLog(locals.logger, ELogPhase::VALIDATION,
 				           ELogDetail::TSMR_INSUFFICIENT_SHARES, qpi.invocator());
-				locals.logger.amount = static_cast<uint64>(input.numberOfShares);
-				locals.logger.balance = locals.possessedShares > 0 ? static_cast<uint64>(locals.possessedShares) : 0;
+				locals.logger.requestedShares = input.numberOfShares;
+				locals.logger.possessedShares = locals.possessedShares;
 				LOG_WARNING(locals.logger);
 			}
 			else
@@ -5126,9 +5586,10 @@ public:
 				}
 				else
 				{
-					prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::TRANSFER, ELogDetail::TSMR_RELEASE,
+					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::TSMR_RELEASE,
 					           qpi.invocator());
-					locals.logger.amount = static_cast<uint64>(input.numberOfShares);
+					locals.logger.requestedShares = input.numberOfShares;
+					locals.logger.releaseResult = locals.result;
 					LOG_ERROR(locals.logger);
 				}
 			}
@@ -5137,17 +5598,17 @@ public:
 		if (locals.success)
 		{
 			output.transferredNumberOfShares = input.numberOfShares;
-			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::RESULT, ELogDetail::TSMR_SUCCESS, qpi.invocator());
-			locals.logger.amount = static_cast<uint64>(output.transferredNumberOfShares);
-			locals.logger.balance = static_cast<uint64>(locals.result);
+			prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::TSMR_SUCCESS, qpi.invocator());
+			locals.logger.requestedShares = output.transferredNumberOfShares;
+			locals.logger.releaseResult = locals.result;
 			LOG_INFO(locals.logger);
 		}
 
 		if (locals.refundAmount > 0)
 		{
 			qpi.transfer(qpi.invocator(), locals.refundAmount);
-			prepareLog(locals.logger, ELogProcedure::TRANSFER_SHARE_MANAGEMENT_RIGHTS, ELogPhase::REFUND, ELogDetail::TSMR_REFUND, qpi.invocator());
-			locals.logger.amount = static_cast<uint64>(locals.refundAmount);
+			prepareLog(locals.logger, ELogPhase::REFUND, ELogDetail::TSMR_REFUND, qpi.invocator());
+			locals.logger.refundAmount = locals.refundAmount;
 			LOG_DEBUG(locals.logger);
 		}
 	}
@@ -5574,22 +6035,38 @@ public:
 	/**
 	 * @brief Clears and initializes one public-procedure diagnostic event.
 	 * @param logger Event storage to reset.
-	 * @param procedure Emitting public procedure.
 	 * @param phase Current invocation stage.
 	 * @param detail Stable checkpoint or failure reason.
 	 * @param invocator Invocation identity.
+	 * @note `_type` stores the `ELogProcedure` value assigned by the concrete overload.
 	 */
-	static void prepareLog(PulseEditorLogMessage& logger, const ELogProcedure procedure, const ELogPhase phase, const ELogDetail detail,
-	                       const id& invocator)
-	{
-		setMemory(logger, 0);
-		logger._contractIndex = CONTRACT_INDEX;
-		logger._type = 1;
-		logger.invocator = invocator;
-		logger.procedure = static_cast<uint16>(procedure);
-		logger.phase = static_cast<uint8>(phase);
-		logger.detail = static_cast<uint16>(detail);
+#define PULSEEDITOR_PREPARE_LOG_OVERLOAD(LogStruct, ProcedureValue)                                                                        \
+	static void prepareLog(LogStruct& logger, const ELogPhase phase, const ELogDetail detail, const id& invocator)                         \
+	{                                                                                                                                       \
+		setMemory(logger, 0);                                                                                                                \
+		logger._contractIndex = CONTRACT_INDEX;                                                                                              \
+		logger._type = static_cast<uint32>(ELogProcedure::ProcedureValue);                                                                   \
+		logger.invocator = invocator;                                                                                                        \
+		logger.phase = static_cast<uint8>(phase);                                                                                            \
+		logger.detail = static_cast<uint16>(detail);                                                                                         \
 	}
+
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(CreateTemplateLog, CREATE_TEMPLATE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(UpdateTemplateLog, UPDATE_TEMPLATE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositPrizeReserveLog, DEPOSIT_PRIZE_RESERVE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositBonusReserveLog, DEPOSIT_BONUS_RESERVE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositAssetReserveLog, DEPOSIT_ASSET_RESERVE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(PublishTemplateLog, PUBLISH_TEMPLATE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(BuyTicketLog, BUY_TICKET)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(BuyTicketsLog, BUY_TICKETS)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(RequestStopLog, REQUEST_STOP)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawCreatorRevenueLog, WITHDRAW_CREATOR_REVENUE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(SetPlatformConfigLog, SET_PLATFORM_CONFIG)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawPlatformRevenueLog, WITHDRAW_PLATFORM_REVENUE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawAssetPlatformRevenueLog, WITHDRAW_ASSET_PLATFORM_REVENUE)
+	PULSEEDITOR_PREPARE_LOG_OVERLOAD(TransferShareManagementRightsLog, TRANSFER_SHARE_MANAGEMENT_RIGHTS)
+
+#undef PULSEEDITOR_PREPARE_LOG_OVERLOAD
 
 	/**
 	 * @brief Validates the optional scheduled selling window.
