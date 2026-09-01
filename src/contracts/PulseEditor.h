@@ -1,5482 +1,3066 @@
 /**
  * @file PulseEditor.h
- * @brief MVP constructor for on-chain code-guessing games.
+ * @brief Paid one-shot and permanent code-guessing games with tiered pool sharing.
  *
- * PulseEditor supports same-currency fixed payouts for Qubic tickets or managed
- * asset-share tickets. Each template has one active round at a time.
+ * A permanent game retains immutable rules and advances one non-overlapping
+ * current round at a time. There are no templates, fixed payouts, or
+ * minimum-player thresholds.
  */
 
 using namespace QPI;
 
-/**
- * @brief Returns the smallest power-of-two value that is greater than or equal to `value`.
- * @param value Logical element count that must fit into a QPI `Array`.
- * @param power Current recursive candidate; callers should use the default value.
- * @return Power-of-two capacity suitable for QPI arrays.
- * @note QPI `Array` capacity must be 2^N, while product-level matrix sizes are often not powers of two.
- */
-constexpr uint16 pulseEditorNextPowerOfTwo(const uint16 value, const uint16 power = 1)
-{
-	return power >= value ? power : pulseEditorNextPowerOfTwo(value, power << 1);
-}
+/** Maximum number of game slots retained in contract state. */
+constexpr uint16 PLDT_MAX_GAMES = 1024;
+/** Maximum concurrently active games owned by one creator. */
+constexpr uint16 PLDT_MAX_ACTIVE_GAMES_PER_CREATOR = 16;
+/** Longest permitted interval between game creation and draw, in UTC days. */
+constexpr sint64 PLDT_MAX_SCHEDULE_DAYS = 366;
+/** Capacity of the shared generation-aware ticket store. */
+constexpr uint32 PLDT_MAX_TICKETS = 1024 * PLDT_MAX_GAMES;
+/** Number of recent round results guaranteed to remain queryable. */
+constexpr uint16 PLDT_RESULT_HISTORY_SIZE = 1024;
+/** Result slots retained so ticket reclamation can lag behind public history. */
+constexpr uint16 PLDT_RESULT_STORAGE_SIZE = PLDT_RESULT_HISTORY_SIZE * 2;
+/** Maximum tickets accepted by one round. */
+constexpr uint16 PLDT_MAX_TICKETS_PER_GAME = 1024;
+/** Maximum tickets accepted atomically by one batch purchase. */
+constexpr uint16 PLDT_MAX_BATCH_TICKETS = 16;
+/** Maximum asset holdings that may qualify a player for the bonus multiplier. */
+constexpr uint16 PLDT_MAX_BONUS_ASSETS = 8;
+/** Maximum count of digits in a submitted or winning code. */
+constexpr uint8 PLDT_MAX_CODE_LENGTH = 10;
+/** Power-of-two digit-array capacity required by QPI Array. */
+constexpr uint8 PLDT_DIGITS_ALIGNED = 16;
+/** Largest digit value supported by the fixed uniqueness workspace. */
+constexpr uint8 PLDT_MAX_DIGIT = PLDT_MAX_CODE_LENGTH - 1;
+/** Power-of-two capacity of the digit-presence workspace. */
+constexpr uint8 PLDT_DIGIT_BUCKETS = 16;
+/** Number of possible exact/misplaced match tiers for the maximum code length. */
+constexpr uint16 PLDT_TIER_CAPACITY = div<uint16>(((PLDT_MAX_CODE_LENGTH + 1) * (PLDT_MAX_CODE_LENGTH + 2)), 2);
+/** First tier-matrix segment sized within QPI Array limits. */
+constexpr uint16 PLDT_TIER_PREFIX_CAPACITY = 64;
+/** Second tier-matrix segment containing the remaining match tiers. */
+constexpr uint16 PLDT_TIER_SUFFIX_CAPACITY = PLDT_TIER_CAPACITY - PLDT_TIER_PREFIX_CAPACITY;
+/** Basis-point denominator used for prize-tier weights. */
+constexpr uint32 PLDT_TIER_BPS_SCALE = 10000;
+/** Basis-point denominator representing a 1x winner weight. */
+constexpr uint32 PLDT_BONUS_MULTIPLIER_SCALE = 10000;
+/** Largest supported bonus winner weight, in basis points. */
+constexpr uint32 PLDT_MAX_BONUS_MULTIPLIER_BPS = 100000;
+/** Ticket-price percentage accrued to platform recipients. */
+constexpr uint8 PLDT_PLATFORM_FEE_PERCENT = 3;
+/** Ticket-price percentage removed from circulation. */
+constexpr uint8 PLDT_BURN_PERCENT = 5;
+/** Absolute creator-fee ceiling after reserving the burn share. */
+constexpr uint8 PLDT_MAX_CREATOR_FEE_PERCENT = 100 - PLDT_BURN_PERCENT;
+/** Developer-one share of the platform fee, in percent. */
+constexpr uint8 PLDT_PLATFORM_DEV1_SHARE_PERCENT = 25;
+/** Developer-two share of the platform fee, in percent. */
+constexpr uint8 PLDT_PLATFORM_DEV2_SHARE_PERCENT = 25;
+/** Initial owner-configurable ceiling for creator fees. */
+constexpr uint8 PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
+/** Default Qubic automation fee reserved per game round. */
+constexpr uint64 PLDT_DEFAULT_ROUND_FEE = 10000;
+/** Tick interval between automated lifecycle scans. */
+constexpr uint32 PLDT_TICK_UPDATE_PERIOD = 100;
+/** Number of game slots inspected during one automation pass. */
+constexpr uint16 PLDT_AUTOMATION_GAMES_PER_TICK = 32;
+/** Maximum settlement or reclamation actions executed per scan. */
+constexpr uint16 PLDT_SETTLEMENT_ACTION_BUDGET = 64;
+/** Maximum collision retries while generating unique winning digits. */
+constexpr uint8 PLDT_RANDOM_RETRY_LIMIT = 32;
+/** Little-endian asset name PLDT used for shareholder accounting. */
+constexpr uint64 PLDT_CONTRACT_ASSET_NAME = 0x54444c50ULL; // "PLDT"
+/** Largest ledger or transfer value accepted by QPI. */
+constexpr uint64 PLDT_MAX_TRANSFER_AMOUNT = MAX_AMOUNT;
+/** Out-of-band unsigned value used when no slot or result exists. */
+constexpr uint64 PLDT_UINT64_SENTINEL = 0xffffffffffffffffULL;
+/** Bit width reserved for the ticket slot inside a ticket id. */
+constexpr uint8 PLDT_TICKET_SLOT_BITS = 20;
+/** Mask that extracts a ticket slot from a generation-aware ticket id. */
+constexpr uint64 PLDT_TICKET_SLOT_MASK = (1ULL << PLDT_TICKET_SLOT_BITS) - 1;
 
-// Maximum number of game templates stored by the MVP contract.
-constexpr uint32 PULSEEDITOR_MAX_TEMPLATES = 1024;
-// Maximum number of tickets retained globally across stored rounds.
-constexpr uint32 PULSEEDITOR_MAX_TICKETS = 1024 * PULSEEDITOR_MAX_TEMPLATES;
-// Maximum number of winner history entries retained in the ring buffer.
-constexpr uint32 PULSEEDITOR_MAX_WINNERS = 1024 * PULSEEDITOR_MAX_TEMPLATES;
-// Maximum number of winner history entries returned by one `GetWinners` call.
-constexpr uint16 PULSEEDITOR_WINNERS_PAGE_SIZE = 512;
-static_assert((PULSEEDITOR_WINNERS_PAGE_SIZE & (PULSEEDITOR_WINNERS_PAGE_SIZE - 1)) == 0);
-// Maximum number of player tickets returned by one `GetPlayerTickets` call.
-constexpr uint16 PULSEEDITOR_TICKETS_PAGE_SIZE = 256;
-static_assert((PULSEEDITOR_TICKETS_PAGE_SIZE & (PULSEEDITOR_TICKETS_PAGE_SIZE - 1)) == 0);
-// Maximum number of templates returned by one discovery query.
-constexpr uint16 PULSEEDITOR_TEMPLATES_PAGE_SIZE = 64;
-static_assert((PULSEEDITOR_TEMPLATES_PAGE_SIZE & (PULSEEDITOR_TEMPLATES_PAGE_SIZE - 1)) == 0);
-// Maximum number of tickets accepted by one batched purchase call.
-constexpr uint16 PULSEEDITOR_MAX_BATCH_TICKETS = 16;
-static_assert((PULSEEDITOR_MAX_BATCH_TICKETS & (PULSEEDITOR_MAX_BATCH_TICKETS - 1)) == 0);
-// Maximum number of assets that can qualify a winner for the multiplier bonus.
-constexpr uint16 PULSEEDITOR_MAX_BONUS_ASSETS = 8;
-static_assert((PULSEEDITOR_MAX_BONUS_ASSETS & (PULSEEDITOR_MAX_BONUS_ASSETS - 1)) == 0);
-// Maximum supported code length; each ticket uses at most this many digits.
-constexpr uint8 PULSEEDITOR_MAX_CODE_LENGTH = 10;
-// QPI-aligned digit storage capacity for ticket and result arrays.
-constexpr uint8 PULSEEDITOR_DIGITS_ALIGNED = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_CODE_LENGTH);
-// Maximum allowed digit value; derived from code length so the default unique-code alphabet is `0..MAX_CODE_LENGTH-1`.
-constexpr uint8 PULSEEDITOR_MAX_DIGIT = PULSEEDITOR_MAX_CODE_LENGTH - 1;
-// Bucket count used for digit frequency arrays; rounded up so QPI arrays cover every supported digit.
-constexpr uint8 PULSEEDITOR_DIGIT_BUCKETS = pulseEditorNextPowerOfTwo(PULSEEDITOR_MAX_DIGIT + 1);
-// Reachable `(exact, misplaced)` combinations; their sum cannot exceed the maximum code length.
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_CAPACITY = div<uint16>(((PULSEEDITOR_MAX_CODE_LENGTH + 1) * (PULSEEDITOR_MAX_CODE_LENGTH + 2)), 2);
-// QPI arrays require power-of-two capacities, so the compact matrix is split into 64 and 2 cells.
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY = 64;
-constexpr uint16 PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY = PULSEEDITOR_PAYOUT_MATRIX_CAPACITY - PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY;
-// Platform fee percent deducted from each gross ticket purchase.
-constexpr uint8 PULSEEDITOR_PLATFORM_FEE_PERCENT = 3;
-// Developer 1 share of the platform fee, expressed as percent of the platform fee.
-constexpr uint8 PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT = 25;
-// Developer 2 share of the platform fee, expressed as percent of the platform fee.
-constexpr uint8 PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT = 25;
-// Default upper bound for creator fee percent from non-platform ticket revenue.
-constexpr uint8 PULSEEDITOR_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
-// Hard upper bound for burn percent from non-platform ticket revenue.
-constexpr uint8 PULSEEDITOR_MAX_BURN_PERCENT = 20;
-// Maximum retry count when generating unique random digits before deterministic fallback.
-constexpr uint8 PULSEEDITOR_RANDOM_RETRY_LIMIT = 32;
-// Contract-share asset name used to distribute asset-entry dividends to PulseEditor shareholders.
-constexpr uint64 PULSEEDITOR_CONTRACT_ASSET_NAME = 90500669654352ULL; // "PEDTOR"
-// Fixed-point scale for bonus multipliers; `12000` means `1.2x`.
-constexpr uint32 PULSEEDITOR_BONUS_MULTIPLIER_SCALE = 10000;
-// Safety cap for configured bonus multipliers; `100000` means `10x`.
-constexpr uint32 PULSEEDITOR_MAX_BONUS_MULTIPLIER_BPS = 100000;
-// Tick cadence for lifecycle automation; throttling avoids scanning template storage on every tick.
-constexpr uint32 PULSEEDITOR_TICK_UPDATE_PERIOD = 100;
-// Bootstrap date sentinel used by QPI before calendar time is initialized.
-constexpr uint32 PULSEEDITOR_DEFAULT_INIT_TIME = 22 << 9 | 4 << 5 | 13;
-// Maximum template slots inspected by the lifecycle automation during one throttled tick.
-constexpr uint16 PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK = 32;
-// Templates with no draws for this many epochs are deleted and their template-local funds are returned.
-constexpr uint16 PULSEEDITOR_TEMPLATE_IDLE_EPOCH_LIMIT = 5;
-
-/**
- * @brief Reserved secondary contract marker kept for contract registration compatibility.
- */
+/** Compatibility marker used by the contract registration machinery. */
 struct PLDT2
 {
 };
 
 /**
- * @brief PulseEditor smart contract that stores game templates, ticket flows, settlement, and platform accounting.
+ * @brief PulseEditor scheduled game contract.
+ * @note All dates are interpreted as UTC `DateAndTime` values supplied by QPI.
  */
 struct PLDT : public ContractBase
 {
 public:
-	/**
-	 * @brief Compact fixed-payout table containing only reachable match combinations.
-	 * @note Rows are ordered by `exact`; each row stores `misplaced` from zero through
-	 * `PULSEEDITOR_MAX_CODE_LENGTH - exact`.
-	 */
-	struct PayoutMatrix
+	template<typename T>
+	/** Split fixed-capacity matrix that stores every exact/misplaced payout tier. */
+	struct TierMatrix
 	{
-		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_PREFIX_CAPACITY> prefix;
-		Array<uint64, PULSEEDITOR_PAYOUT_MATRIX_SUFFIX_CAPACITY> suffix;
+		/** First fixed segment of the tier matrix. */
+		Array<T, PLDT_TIER_PREFIX_CAPACITY> prefix;
+		/** Remaining fixed segment of the tier matrix. */
+		Array<T, PLDT_TIER_SUFFIX_CAPACITY> suffix;
 
-		/**
-		 * @brief Returns a payout by compact linear index.
-		 * @param index Index in the range `0..PULSEEDITOR_PAYOUT_MATRIX_CAPACITY-1`.
-		 * @return Configured fixed payout.
-		 */
-		const uint64& get(const uint16 index) const { return index < prefix.capacity() ? prefix.get(index) : suffix.get(index - prefix.capacity()); }
-
-		/**
-		 * @brief Replaces a payout by compact linear index.
-		 * @param index Index in the range `0..PULSEEDITOR_PAYOUT_MATRIX_CAPACITY-1`.
-		 * @param value New fixed payout.
-		 */
-		void set(const uint16 index, const uint64 value)
+		/** Returns the tier value at a stable compact payout-matrix index. */
+		const T& get(const uint16 index) const
 		{
-			if (index < prefix.capacity())
+			return index < PLDT_TIER_PREFIX_CAPACITY ? prefix.get(index) : suffix.get(index - PLDT_TIER_PREFIX_CAPACITY);
+		}
+
+		/** Replaces the tier value while hiding the two-array storage split. */
+		void set(const uint16 index, const T value)
+		{
+			if (index < PLDT_TIER_PREFIX_CAPACITY)
 			{
 				prefix.set(index, value);
 			}
 			else
 			{
-				suffix.set(index - prefix.capacity(), value);
+				suffix.set(index - PLDT_TIER_PREFIX_CAPACITY, value);
 			}
 		}
 
-		/**
-		 * @brief Returns the number of reachable match combinations.
-		 * @return Compact matrix capacity.
-		 */
-		static constexpr uint16 capacity() { return PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; }
+		/** Returns the total number of addressable exact/misplaced tiers. */
+		static constexpr uint16 capacity() { return PLDT_TIER_CAPACITY; }
 	};
 
-	/**
-	 * @brief Compact public and internal result codes returned by PulseEditor procedures and functions.
-	 */
+	using TierWeightMatrix = TierMatrix<uint16>;
+	using TierAmountMatrix = TierMatrix<uint64>;
+
+	/** Stable outcomes returned by PulseEditor public functions and procedures. */
 	enum class EReturnCode : uint8
 	{
-		/**
-		 * @brief Operation completed successfully.
-		 */
+		/** The request completed successfully. */
 		SUCCESS,
-		/**
-		 * @brief Invocator is not allowed to perform the requested action.
-		 */
+		/** The invocator is not authorized for the requested operation. */
 		ACCESS_DENIED,
-		/**
-		 * @brief Template id is outside the created range or points to an empty slot.
-		 */
-		INVALID_TEMPLATE,
-		/**
-		 * @brief Template, round, or lifecycle status blocks the requested action.
-		 */
+		/** The game id does not identify the active generation in its slot. */
+		INVALID_GAME,
+		/** The operation is not permitted in the current lifecycle phase. */
 		INVALID_STATE,
-		/**
-		 * @brief Input value is outside supported bounds.
-		 */
+		/** One or more configuration values violate supported bounds. */
 		INVALID_VALUE,
-		/**
-		 * @brief Submitted digits violate length, range, or duplicate rules.
-		 */
+		/** The submitted code violates length, range, or uniqueness rules. */
 		INVALID_DIGITS,
-		/**
-		 * @brief Required Qubic or asset balance/reserve is not available.
-		 */
+		/** The caller lacks the Qubic or asset balance required. */
 		INSUFFICIENT_FUNDS,
-		/**
-		 * @brief Invocation reward or asset ticket payment does not match the ticket price.
-		 */
+		/** The attached invocation reward does not equal the ticket price. */
 		TICKET_INVALID_PRICE,
-		/**
-		 * @brief Global or per-round ticket capacity has been reached.
-		 */
+		/** The round or global ticket store has no remaining capacity. */
 		TICKET_SOLD_OUT,
-		/**
-		 * @brief Player has reached the per-round ticket limit.
-		 */
+		/** The player has reached the per-round ticket allowance. */
 		PLAYER_TICKET_LIMIT,
-		/**
-		 * @brief Contract storage capacity for the requested entity is full.
-		 */
+		/** Ticket sales have not opened yet. */
+		GAME_NOT_STARTED,
+		/** Ticket sales have ended for the round. */
+		GAME_CLOSED,
+		/** A bounded state ledger cannot accept the operation atomically. */
 		STORAGE_FULL,
-		/**
-		 * @brief Fallback error for unexpected internal failures.
-		 */
-		UNKNOWN_ERROR = UINT8_MAX
+		/** A Qubic or asset custody transfer failed. */
+		TRANSFER_FAILED,
+		/** The requested round does not exist for the game. */
+		INVALID_ROUND,
+		/** The ticket id is absent or belongs to an obsolete slot generation. */
+		INVALID_TICKET,
+		/** The result exists conceptually but its details were reclaimed. */
+		HISTORY_EXPIRED,
+		/** An internal invariant failed without a more specific public code. */
+		UNKNOWN_ERROR,
 	};
 
-	/**
-	 * @brief Stored lifecycle state of a game template.
-	 */
-	enum class ETemplateStatus : uint8
+	/** Determines whether a game ends once or schedules successive rounds. */
+	enum class EGameMode : uint8
 	{
-		/**
-		 * @brief Slot has no active template data.
-		 */
-		EMPTY_SLOT,
-		/**
-		 * @brief Template is configurable and not yet published.
-		 */
-		DRAFT,
-		/**
-		 * @brief Template is active and may have an open or settled round.
-		 */
-		PUBLISHED,
-		/**
-		 * @brief Owner requested graceful shutdown after the active round settles.
-		 */
-		STOP_REQUESTED,
-		/**
-		 * @brief Template is stopped and no new rounds should open.
-		 */
-		STOPPED
+		/** A single funded round that clears its slot after finalization. */
+		ONE_SHOT,
+		/** A creator-funded game that may schedule successive rounds. */
+		PERMANENT,
 	};
 
-	/**
-	 * @brief Stored lifecycle state of the current round slot for a template.
-	 */
-	enum class ERoundStatus : uint8
+	/** Determines whether creator fees are paid out or reinvested. */
+	enum class ECreatorRevenueMode : uint8
 	{
-		/**
-		 * @brief Round slot is empty.
-		 */
+		/** Creator fees are transferred to the owner after the round. */
+		PAYOUT,
+		/** Creator fees replenish the game's unreserved creator balance. */
+		REINVEST,
+	};
+
+	/** Reason a game stops instead of scheduling another round. */
+	enum class EGameStopReason : uint8
+	{
+		/** No stop reason or lifecycle action is currently selected. */
 		NONE,
-		/**
-		 * @brief Round accepts ticket purchases.
-		 */
-		SELLING,
-		/**
-		 * @brief Round no longer accepts tickets and is waiting for settlement.
-		 */
-		CLOSED,
-		/**
-		 * @brief Round result and ticket payouts have been finalized.
-		 */
-		SETTLED
+		/** The one-shot round reached its terminal outcome. */
+		ONE_SHOT_COMPLETE,
+		/** The owner requested a stop after the active round. */
+		OWNER_REQUESTED,
+		/** The permanent game cannot fund its next round. */
+		OUT_OF_FUNDS,
+		/** The next round would exceed DateAndTime limits. */
+		SCHEDULE_EXHAUSTED,
 	};
 
-	/**
-	 * @brief Stored settlement state of a ticket.
-	 */
+	/** Currency custody mechanism used for tickets and payouts. */
+	enum class ECurrencyMode : uint8
+	{
+		/** Ticket payments and payouts use native Qubic units. */
+		QUBIC,
+		/** Ticket payments and payouts use managed asset shares. */
+		ASSET,
+	};
+
+	/** Persisted lifecycle phase of a game round. */
+	enum class EGameStatus : uint8
+	{
+		/** The slot is free and contains no active game generation. */
+		EMPTY_SLOT,
+		/** The game exists but its sales window has not opened. */
+		SCHEDULED,
+		/** The current UTC time is inside the ticket-sales window. */
+		SELLING,
+		/** Sales ended and the round awaits settlement startup. */
+		CLOSED,
+		/** Tickets are being classified into winning tiers. */
+		COUNTING,
+		/** Winner payouts are being transferred incrementally. */
+		PAYING,
+		/** Terminal transfers and result publication are in progress. */
+		FINALIZING,
+	};
+
+	/** Outcome recorded when a round reaches finalization. */
+	enum class EGameTerminalReason : uint8
+	{
+		/** No stop reason or lifecycle action is currently selected. */
+		NONE,
+		/** All winner payouts for the round were completed. */
+		SETTLED,
+		/** The round closed without an accepted ticket. */
+		NO_TICKETS,
+		/** No ticket qualified for a configured payout tier. */
+		NO_WINNERS,
+		/** The owner cancelled before the first sales window. */
+		OWNER_CANCELLED,
+	};
+
+	/** Settlement state of a stored ticket. */
 	enum class ETicketStatus : uint8
 	{
-		/**
-		 * @brief Ticket slot is unused.
-		 */
-		UNUSED,
-		/**
-		 * @brief Ticket is accepted and waiting for settlement.
-		 */
+		/** The ticket awaits round classification. */
 		ACTIVE,
-		/**
-		 * @brief Ticket has been settled, including zero-payout outcomes.
-		 */
+		/** The ticket did not qualify for a payout. */
+		LOST,
+		/** The ticket payout was transferred successfully. */
 		PAID,
-		/**
-		 * @brief Ticket had a positive payout that could not be transferred.
-		 */
-		UNPAID
+	};
+
+	/** Transition requested by time-based lifecycle evaluation. */
+	enum class EGameLifecycleAction : uint8
+	{
+		/** No stop reason or lifecycle action is currently selected. */
+		NONE,
+		/** Persist the transition into the selling phase. */
+		OPEN_SALES,
+		/** Finalize immediately because no tickets were sold. */
+		FINALIZE_NO_TICKETS,
+		/** Derive winning digits and begin incremental settlement. */
+		BEGIN_SETTLEMENT,
 	};
 
 	/**
-	 * @brief Reward currency used when paying base and bonus winnings.
+	 * @brief Returns the compact tier index for an `(exact, misplaced)` match pair.
+	 * @param exact Digits matched in the correct position.
+	 * @param misplaced Correct digits found in another position.
+	 * @return Stable matrix index in `0..65`.
 	 */
-	enum class ERewardMode : uint8
+	static constexpr uint16 payoutMatrixIndex(const uint8 exact, const uint8 misplaced)
 	{
-		/**
-		 * @brief Winners are paid in Qubic from the template's Qubic reserves.
-		 */
-		QUBIC,
-		/**
-		 * @brief Winners are paid in managed asset shares from the template's asset reserves.
-		 */
-		ASSET
-	};
+		return static_cast<uint16>(misplaced + div<uint16>(exact * ((PLDT_MAX_CODE_LENGTH * 2) + 3 - exact), 2));
+	}
 
-	/**
-	 * @brief Currency source used when collecting ticket payments from players.
-	 */
-	enum class EEntryMode : uint8
+	/** Complete replace-on-write economics queued for a future permanent round. */
+	struct GameEconomics
 	{
-		/**
-		 * @brief Players pay ticket price with the Qubic invocation reward.
-		 */
-		QUBIC,
-		/**
-		 * @brief Players pay ticket price with managed asset shares collected from their account.
-		 */
-		ASSET
-	};
-
-	/**
-	 * @brief Stable identifier of the public procedure that emitted a diagnostic event.
-	 * @note Values match procedure registration indexes where an index exists.
-	 */
-	enum class ELogProcedure : uint16
-	{
-		CREATE_TEMPLATE = 1,
-		DEPOSIT_PRIZE_RESERVE = 2,
-		PUBLISH_TEMPLATE = 3,
-		BUY_TICKET = 4,
-		REQUEST_STOP = 6,
-		WITHDRAW_CREATOR_REVENUE = 7,
-		SET_PLATFORM_CONFIG = 8,
-		WITHDRAW_PLATFORM_REVENUE = 9,
-		TRANSFER_SHARE_MANAGEMENT_RIGHTS = 11,
-		UPDATE_TEMPLATE = 12,
-		DEPOSIT_BONUS_RESERVE = 13,
-		DEPOSIT_ASSET_RESERVE = 14,
-		BUY_TICKETS = 15,
-		WITHDRAW_ASSET_PLATFORM_REVENUE = 16
-	};
-
-	/** @brief Stable stage code within one public-procedure invocation. */
-	enum class ELogPhase : uint8
-	{
-		ENTRY = 1,
-		REFUND = 2,
-		VALIDATION = 3,
-		TRANSFER = 4,
-		STATE_CHANGE = 5,
-		SETTLEMENT = 6,
-		RESULT = 7
-	};
-
-	/**
-	 * @brief Stable reason/checkpoint code used to decode PulseEditor diagnostic events.
-	 * @note Procedure-specific ranges make every early-return branch distinguishable.
-	 */
-	enum class ELogDetail : uint16
-	{
-		ENTRY = 1,
-		REFUND = 2,
-		SUCCESS = 3,
-		CT_STORAGE_FULL = 101,
-		CT_CONFIG = 102,
-		CT_SCHEDULE = 103,
-		CT_REWARD = 104,
-		CT_ENTRY = 105,
-		CT_BONUS = 106,
-		CT_BONUS_ASSET = 107,
-		CT_UNIQUE_DIGITS = 108,
-		UT_TEMPLATE = 201,
-		UT_CONFIG = 202,
-		UT_SCHEDULE = 203,
-		UT_REWARD = 204,
-		UT_ENTRY = 205,
-		UT_BONUS = 206,
-		UT_BONUS_ASSET = 207,
-		UT_UNIQUE_DIGITS = 208,
-		UT_OWNER = 209,
-		UT_TICKET_SALES = 210,
-		UT_STATE = 211,
-		DPR_TEMPLATE = 301,
-		DPR_OWNER = 302,
-		DPR_AMOUNT = 303,
-		DBR_TEMPLATE = 401,
-		DBR_OWNER = 402,
-		DBR_MODE = 403,
-		DBR_AMOUNT = 404,
-		DAR_TEMPLATE = 501,
-		DAR_OWNER = 502,
-		DAR_MODE = 503,
-		DAR_BONUS_MODE = 504,
-		DAR_SHARES = 505,
-		DAR_TRANSFER = 506,
-		PT_TEMPLATE = 601,
-		PT_OWNER = 602,
-		PT_STATE = 603,
-		PT_BASE_RESERVE = 604,
-		PT_BONUS_RESERVE = 605,
-		PT_SCHEDULE = 606,
-		BT_TEMPLATE = 701,
-		BT_STATE = 702,
-		BT_NOT_STARTED = 703,
-		BT_ENDED = 704,
-		BT_PRICE = 705,
-		BT_SOLD_OUT = 706,
-		BT_DIGITS = 707,
-		BT_PLAYER_LIMIT = 708,
-		BT_ASSET_PRICE = 709,
-		BT_ASSET_BALANCE = 710,
-		BT_ASSET_TRANSFER = 711,
-		BT_BURN_TRANSFER = 712,
-		BT_ACCEPTED = 713,
-		BT_INSTANT_SETTLEMENT = 714,
-		BTS_TEMPLATE = 801,
-		BTS_COUNT = 802,
-		BTS_STATE = 803,
-		BTS_NOT_STARTED = 804,
-		BTS_ENDED = 805,
-		BTS_PRICE = 806,
-		BTS_ASSET_PRICE = 807,
-		BTS_STORAGE = 808,
-		BTS_ROUND_LIMIT = 809,
-		BTS_DIGITS = 810,
-		BTS_PLAYER_LIMIT = 811,
-		BTS_ASSET_BALANCE = 812,
-		BTS_ASSET_TRANSFER = 813,
-		BTS_PARTIAL_STATE = 814,
-		BTS_PARTIAL_NOT_STARTED = 815,
-		BTS_PARTIAL_ENDED = 816,
-		BTS_PARTIAL_SOLD_OUT = 817,
-		BTS_TICKET_ASSET_BALANCE = 818,
-		BTS_TICKET_ASSET_TRANSFER = 819,
-		BTS_BURN_TRANSFER = 820,
-		BTS_ACCEPTED = 821,
-		BTS_INSTANT_SETTLEMENT = 822,
-		RS_TEMPLATE = 901,
-		RS_OWNER = 902,
-		WCR_TEMPLATE = 1001,
-		WCR_OWNER = 1002,
-		WCR_ASSET_AMOUNT = 1003,
-		WCR_ASSET_TRANSFER = 1004,
-		WCR_QUBIC_AMOUNT = 1005,
-		SPC_OWNER = 1101,
-		SPC_VALUE = 1102,
-		WPR_OWNER = 1201,
-		WPR_RECIPIENTS = 1202,
-		WPR_DIVIDENDS = 1203,
-		WAPR_TEMPLATE = 1301,
-		WAPR_OWNER = 1302,
-		WAPR_RECIPIENTS = 1303,
-		WAPR_MODE = 1304,
-		WAPR_AMOUNT = 1305,
-		WAPR_BALANCE = 1306,
-		WAPR_DEV1_TRANSFER = 1307,
-		WAPR_DEV2_TRANSFER = 1308,
-		WAPR_DIVIDENDS = 1309,
-		TSMR_INVALID_COUNT = 1401,
-		TSMR_INSUFFICIENT_SHARES = 1402,
-		TSMR_RELEASE = 1403,
-		TSMR_SUCCESS = 1404,
-		TSMR_REFUND = 1405
-	};
-
-	/**
-	 * @brief Shared binary diagnostic header used by PulseEditor public-procedure logs.
-	 * @note `_type` stores the `ELogProcedure` value. `detail` selects the meaning of each procedure-specific payload.
-	 * @warning Keep `_terminator` last in every concrete log struct because the logger serializes only fields preceding it.
-	 */
-#define PULSEEDITOR_LOG_COMMON_FIELDS                                                                                                      \
-	uint32 _contractIndex;                                                                                                                  \
-	uint32 _type;                                                                                                                           \
-	id invocator;                                                                                                                           \
-	uint16 detail;                                                                                                                          \
-	uint8 phase;                                                                                                                            \
-	uint8 returnCode
-
-	struct CreateTemplateLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
+		/** Price of one ticket in Qubic or configured asset shares. */
 		uint64 ticketPrice;
-		uint64 requiredPrizeReserve;
-		uint64 requiredBonusReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 roundStartTick;
-		uint32 roundEndTick;
-		uint32 bonusMultiplierBps;
-		uint32 ticketLimit;
-		uint32 playerTicketLimit;
-		uint16 rewardOwnershipManagingContractIndex;
-		uint16 rewardPossessionManagingContractIndex;
-		uint16 bonusOwnershipManagingContractIndex;
-		uint16 bonusPossessionManagingContractIndex;
-		uint16 entryOwnershipManagingContractIndex;
-		uint16 entryPossessionManagingContractIndex;
-		uint16 bonusAssetIndex;
-		uint16 bonusAssetCount;
-		uint16 templateId;
-		uint8 codeLength;
-		uint8 maxDigit;
-		uint8 creatorFeePercent;
-		uint8 maxCreatorFeePercent;
-		uint8 burnPercent;
-		uint8 rewardMode;
-		uint8 entryMode;
-		bit bonusEnabled;
-		bit allowRepeatedDigits;
-		sint8 _terminator;
-	};
-
-	struct UpdateTemplateLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 ticketPrice;
-		uint64 requiredPrizeReserve;
-		uint64 requiredBonusReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 roundStartTick;
-		uint32 roundEndTick;
-		uint32 bonusMultiplierBps;
-		uint32 ticketLimit;
-		uint32 playerTicketLimit;
-		uint16 rewardOwnershipManagingContractIndex;
-		uint16 rewardPossessionManagingContractIndex;
-		uint16 bonusOwnershipManagingContractIndex;
-		uint16 bonusPossessionManagingContractIndex;
-		uint16 entryOwnershipManagingContractIndex;
-		uint16 entryPossessionManagingContractIndex;
-		uint16 bonusAssetIndex;
-		uint16 bonusAssetCount;
-		uint16 templateId;
-		uint8 codeLength;
-		uint8 maxDigit;
-		uint8 creatorFeePercent;
-		uint8 maxCreatorFeePercent;
-		uint8 burnPercent;
-		uint8 rewardMode;
-		uint8 entryMode;
-		uint8 templateStatus;
-		uint8 roundStatus;
-		bit hasTicketSales;
-		bit bonusEnabled;
-		bit allowRepeatedDigits;
-		sint8 _terminator;
-	};
-
-	struct DepositPrizeReserveLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 depositAmount;
-		uint64 prizeReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint16 templateId;
-		sint8 _terminator;
-	};
-
-	struct DepositBonusReserveLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 depositAmount;
-		uint64 bonusReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 bonusMultiplierBps;
-		uint16 templateId;
-		bit bonusEnabled;
-		sint8 _terminator;
-	};
-
-	struct DepositAssetReserveLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		sint64 possessedShares;
-		sint64 transferResult;
-		uint64 requestedShares;
-		uint64 assetPrizeReserve;
-		uint64 assetBonusReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 bonusMultiplierBps;
-		uint16 templateId;
-		uint8 rewardMode;
-		bit depositToBonusReserve;
-		bit bonusEnabled;
-		sint8 _terminator;
-	};
-
-	struct PublishTemplateLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 prizeReserve;
-		uint64 requiredPrizeReserve;
-		uint64 bonusReserve;
-		uint64 requiredBonusReserve;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 roundId;
-		uint32 currentTick;
-		uint32 roundEndTick;
-		uint32 bonusMultiplierBps;
-		uint16 templateId;
-		uint8 templateStatus;
-		uint8 roundStatus;
-		uint8 rewardMode;
-		uint8 entryMode;
-		bit bonusEnabled;
-		sint8 _terminator;
-	};
-
-	struct BuyTicketLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		sint64 possessedShares;
-		sint64 transferResult;
-		uint64 ticketIndex;
-		uint64 ticketPrice;
-		uint64 invocationReward;
-		uint64 storageTicketCount;
-		uint64 storageTicketCapacity;
-		uint32 ticketLimit;
-		uint32 roundTicketCount;
-		uint32 currentTick;
-		uint32 startTick;
-		uint32 endTick;
-		uint32 roundId;
-		uint16 playerTicketCount;
-		uint16 playerTicketLimit;
-		uint16 templateId;
-		uint8 templateStatus;
-		uint8 roundStatus;
-		uint8 codeLength;
-		uint8 maxDigit;
-		uint8 entryMode;
-		uint8 settlementReturnCode;
-		bit allowRepeatedDigits;
-		sint8 _terminator;
-	};
-
-	struct BuyTicketsLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		sint64 possessedShares;
-		sint64 transferResult;
-		uint64 ticketIndex;
-		uint64 ticketPrice;
-		uint64 invocationReward;
-		uint64 totalPrice;
-		uint64 storageTicketCount;
-		uint64 storageTicketCapacity;
-		uint32 ticketLimit;
-		uint32 roundTicketCount;
-		uint32 currentTick;
-		uint32 startTick;
-		uint32 endTick;
-		uint32 roundId;
-		uint32 requestedCount;
-		uint32 acceptedCount;
-		uint32 loopIndex;
-		uint16 playerTicketCount;
-		uint16 playerTicketLimit;
-		uint16 templateId;
-		uint8 templateStatus;
-		uint8 roundStatus;
-		uint8 codeLength;
-		uint8 maxDigit;
-		uint8 entryMode;
-		uint8 settlementReturnCode;
-		bit allowRepeatedDigits;
-		sint8 _terminator;
-	};
-
-	struct RequestStopLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint32 roundId;
-		uint16 templateId;
-		uint8 templateStatus;
-		uint8 roundStatus;
-		sint8 _terminator;
-	};
-
-	struct WithdrawCreatorRevenueLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id owner;
-		uint64 requestedAmount;
-		uint64 remainingRevenue;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		sint64 transferResult;
-		uint16 templateId;
-		uint8 entryMode;
-		sint8 _terminator;
-	};
-
-	struct SetPlatformConfigLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id platformOwner;
-		id currentPlatformOwner;
-		id developer1;
-		id developer2;
-		uint8 maxCreatorFeePercent;
-		bit developer1Configured;
-		bit developer2Configured;
-		sint8 _terminator;
-	};
-
-	struct WithdrawPlatformRevenueLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id platformOwner;
-		id developer1;
-		id developer2;
-		uint64 developer1Amount;
-		uint64 developer2Amount;
-		uint64 dividendPerShare;
-		uint64 dividendAmount;
-		uint64 retainedDeveloper1Accrued;
-		uint64 retainedDeveloper2Accrued;
-		uint64 retainedDividendAccrued;
-		sint64 dividendResult;
-		bit developer1Configured;
-		bit developer2Configured;
-		sint8 _terminator;
-	};
-
-	struct WithdrawAssetPlatformRevenueLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		id platformOwner;
-		id developer1;
-		id developer2;
-		sint64 possessedShares;
-		sint64 transferResult;
-		uint64 developer1Amount;
-		uint64 developer2Amount;
-		uint64 dividendAmount;
-		uint64 distributedAmount;
-		uint64 retainedDividendAccrued;
-		uint64 totalAmount;
-		uint64 templateCount;
-		uint64 templateCapacity;
-		uint16 templateId;
-		uint8 entryMode;
-		uint8 rewardMode;
-		bit developer1Configured;
-		bit developer2Configured;
-		sint8 _terminator;
-	};
-
-	struct TransferShareManagementRightsLog
-	{
-		PULSEEDITOR_LOG_COMMON_FIELDS;
-		Asset asset;
-		sint64 requestedShares;
-		sint64 possessedShares;
-		sint64 releaseResult;
-		sint64 refundAmount;
-		uint32 newManagingContractIndex;
-		sint8 _terminator;
-	};
-
-#undef PULSEEDITOR_LOG_COMMON_FIELDS
-
-	/**
-	 * @brief Converts a typed return code into the compact public ABI representation.
-	 * @param code Internal enum value.
-	 * @return `uint8` value returned by public procedures and functions.
-	 */
-	static constexpr uint8 toReturnCode(const EReturnCode& code) { return static_cast<uint8>(code); }
-
-	/**
-	 * @brief Persistent template configuration, accounting, and lifecycle state.
-	 *
-	 * Invariants:
-	 * - Each template owns exactly one round slot; `currentRoundId` disambiguates tickets from previous rounds.
-	 * - Ticket storage is append-only; global ticket indexes returned to clients remain stable.
-	 * - Winner history is a ring buffer keyed by monotonic `winnerCounter`.
-	 * - `prizeReserve` backs base fixed payouts, while `bonusReserve` backs multiplier bonus extras.
-	 * - Asset-entry fee buckets are tracked per template because each template may use a different asset.
-	 * - `lastDrawEpoch` stores the most recent draw epoch and acts as the idle-deletion baseline before the first draw.
-	 * - Template mechanics and economy may not change while the active round is selling.
-	 */
-	struct GameTemplate
-	{
-		/**
-		 * @brief Fixed payout table indexed by `(exact, misplaced)`.
-		 */
-		PayoutMatrix payoutMatrix;
-		/**
-		 * @brief Assets whose possession qualifies a winner for the multiplier bonus.
-		 */
-		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
-		/**
-		 * @brief Raw display name bytes supplied by the creator.
-		 */
-		Array<uint8, 32> name;
-		/**
-		 * @brief Asset paid to winners when `rewardMode == ASSET`.
-		 */
-		Asset rewardAsset;
-		/**
-		 * @brief Asset collected from players when `entryMode == ASSET`.
-		 */
-		Asset entryAsset;
-		/**
-		 * @brief Template owner allowed to fund, edit, stop, and withdraw creator revenue.
-		 */
-		id owner;
-		/**
-		 * @brief Ticket price in Qubic or managed asset shares.
-		 */
-		uint64 ticketPrice;
-		/**
-		 * @brief Qubic reserve used for base payouts.
-		 */
-		uint64 prizeReserve;
-		/**
-		 * @brief Qubic reserve used for multiplier-bonus extra payouts.
-		 */
-		uint64 bonusReserve;
-		/**
-		 * @brief Asset reserve used for base payouts.
-		 */
-		uint64 assetPrizeReserve;
-		/**
-		 * @brief Asset reserve used for multiplier-bonus extra payouts.
-		 */
-		uint64 assetBonusReserve;
-		/**
-		 * @brief Gross asset ticket revenue collected by this template.
-		 */
-		uint64 assetEntryRevenue;
-		/**
-		 * @brief Asset creator revenue available for owner withdrawal.
-		 */
-		uint64 assetCreatorRevenue;
-		/**
-		 * @brief Asset shares burned or accounted as burn for this template.
-		 */
-		uint64 assetBurnAccrued;
-		/**
-		 * @brief Asset developer 1 fee balance accrued for this template.
-		 */
-		uint64 assetDeveloper1Accrued;
-		/**
-		 * @brief Asset developer 2 fee balance accrued for this template.
-		 */
-		uint64 assetDeveloper2Accrued;
-		/**
-		 * @brief Asset dividend balance accrued for PulseEditor shareholders.
-		 */
-		uint64 assetDividendAccrued;
-		/**
-		 * @brief Qubic creator revenue available for owner withdrawal.
-		 */
-		uint64 creatorRevenue;
-		/**
-		 * @brief Qubic burn amount accounted by this template.
-		 */
-		uint64 burnAccrued;
-		/**
-		 * @brief Gross Qubic ticket revenue collected by this template.
-		 */
-		uint64 totalRevenue;
-		/**
-		 * @brief Total Qubic amount paid to winners.
-		 */
-		uint64 totalPaid;
-		/**
-		 * @brief Total multiplier-bonus extra payout paid in Qubic or asset shares.
-		 */
-		uint64 totalBonusPaid;
-		/**
-		 * @brief Total asset shares paid to winners.
-		 */
-		uint64 totalAssetPaid;
-		/**
-		 * @brief Maximum base payout in the payout matrix.
-		 */
-		uint64 maxSinglePayout;
-		/**
-		 * @brief Current round id for this template.
-		 */
-		uint32 currentRoundId;
-		/**
-		 * @brief First tick that accepts purchases; zero means no lower bound.
-		 */
-		uint32 roundStartTick;
-		/**
-		 * @brief Last selling tick; zero disables time-based auto-close.
-		 */
-		uint32 roundEndTick;
-		/**
-		 * @brief Bonus multiplier in fixed-point basis points.
-		 */
-		uint32 bonusMultiplierBps;
-		/**
-		 * @brief Maximum tickets accepted by each round.
-		 */
+		/** Creator-funded amount placed into each round's prize pool. */
+		uint64 creatorPrizeSeed;
+		/** Maximum tickets accepted by the round. */
 		uint16 ticketLimit;
-		/**
-		 * @brief Maximum tickets one player may buy in a round.
-		 */
+		/** Maximum tickets one entity may hold in the round. */
 		uint16 playerTicketLimit;
-		/**
-		 * @brief Number of valid entries in `bonusAssets`.
-		 */
-		uint16 bonusAssetCount;
-		/**
-		 * @brief Most recent draw epoch, or the idle-deletion baseline before the first draw.
-		 */
-		uint16 lastDrawEpoch;
-		/**
-		 * @brief Ownership managing contract used for reward asset reserve and payout.
-		 */
-		uint16 rewardOwnershipManagingContractIndex;
-		/**
-		 * @brief Possession managing contract used for reward asset reserve and payout.
-		 */
-		uint16 rewardPossessionManagingContractIndex;
-		/**
-		 * @brief Ownership managing contract used for bonus asset checks.
-		 */
-		uint16 bonusOwnershipManagingContractIndex;
-		/**
-		 * @brief Possession managing contract used for bonus asset checks.
-		 */
-		uint16 bonusPossessionManagingContractIndex;
-		/**
-		 * @brief Ownership managing contract used for asset ticket payments.
-		 */
-		uint16 entryOwnershipManagingContractIndex;
-		/**
-		 * @brief Possession managing contract used for asset ticket payments.
-		 */
-		uint16 entryPossessionManagingContractIndex;
-		/**
-		 * @brief Number of digits in submitted and generated codes.
-		 */
-		uint8 codeLength;
-		/**
-		 * @brief Maximum allowed digit value.
-		 */
-		uint8 maxDigit;
-		/**
-		 * @brief Creator share percent of non-platform ticket revenue.
-		 */
+		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
-		/**
-		 * @brief Burn share percent of non-platform ticket revenue.
-		 */
-		uint8 burnPercent;
-		/**
-		 * @brief Reward payout mode.
-		 */
-		ERewardMode rewardMode;
-		/**
-		 * @brief Ticket payment mode.
-		 */
-		EEntryMode entryMode;
-		/**
-		 * @brief Enables multiplier-bonus ownership checks and reserve accounting.
-		 */
-		bit bonusEnabled;
-		/**
-		 * @brief Enables immediate settlement after each accepted ticket.
-		 */
-		bit instantSettlement;
-		/**
-		 * @brief Allows duplicate digits in submitted and generated codes.
-		 */
-		bit allowRepeatedDigits;
-		/**
-		 * @brief Prevents settings updates after the first accepted ticket.
-		 */
-		bit hasTicketSales;
-		/**
-		 * @brief Template lifecycle status.
-		 */
-		ETemplateStatus status;
+		/** Selects payout or reinvestment of creator fees. */
+		ECreatorRevenueMode creatorRevenueMode;
+		/** Whether pending economics contain a complete validated replacement. */
+		bit isSet;
 	};
 
 	/**
-	 * @brief Current round slot for one template.
+	 * @brief Immutable rules, funding ledgers, and mutable current-round state.
+	 * @note A permanent slot is cleared only when the game itself stops.
 	 */
-	struct Round
+	struct Game
 	{
-		/**
-		 * @brief Generated winning digits for a settled round.
-		 */
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
-		/**
-		 * @brief Gross revenue collected in this round.
-		 */
-		uint64 revenue;
-		/**
-		 * @brief Amount added to the prize reserve by ticket purchases in this round.
-		 */
-		uint64 prizeAdded;
-		/**
-		 * @brief Amount paid to winners in this round.
-		 */
-		uint64 paid;
-		/**
-		 * @brief Round id scoped to the owning template.
-		 */
-		uint32 roundId;
-		/**
-		 * @brief First tick that accepts purchases.
-		 */
-		uint32 startTick;
-		/**
-		 * @brief Last selling tick.
-		 */
-		uint32 endTick;
-		/**
-		 * @brief Tick at which settlement completed.
-		 */
-		uint32 settledTick;
-		/**
-		 * @brief Number of accepted tickets in this round.
-		 */
+		/** Entity authorized to administer the game or referenced asset position. */
+		id owner;
+		/** Asset issuances of which holding any one grants bonus weighting. */
+		Array<Asset, PLDT_MAX_BONUS_ASSETS> bonusAssets;
+		/** Asset used as game currency when currencyMode is ASSET. */
+		Asset currencyAsset;
+		/** Validated economics applied only when the next permanent round starts. */
+		GameEconomics pendingEconomics;
+		/** UTC instant at which ticket sales open. */
+		DateAndTime startAt;
+		/** UTC instant at which sales close and drawing may begin. */
+		DateAndTime drawAt;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Price of one ticket in Qubic or configured asset shares. */
+		uint64 ticketPrice;
+		/** Creator-funded amount placed into each round's prize pool. */
+		uint64 creatorPrizeSeed;
+		/** Current round amount reserved exclusively for winner payouts or return. */
+		uint64 prizePool;
+		/** Creator-fee amount accrued during the current round. */
+		uint64 creatorRevenue;
+		/** Gross accepted ticket payments for the current round. */
+		uint64 totalRevenue;
+		/** Winner payouts successfully transferred in the current round. */
+		uint64 totalPaid;
+		/** Qubic automation fee charged for the current round. */
+		uint64 roundFeeSnapshot;
+		/** Qubic ledger left after the current round fee; permanent games may spend it on later rounds. */
+		uint64 runCredit;
+		/** Unreserved game currency available for later seeds or terminal return. */
+		uint64 creatorBalance;
+		/** Creator-fee currency waiting for resumable owner transfer. */
+		uint64 pendingCreatorCurrencyPayout;
+		/** Unused creator-balance currency waiting for stop transfer. */
+		uint64 pendingCreatorBalancePayout;
+		/** Unused Qubic run credit waiting for stop transfer. */
+		uint64 pendingRunCreditPayout;
+		/** Fixed start-to-draw interval reused by permanent rounds. */
+		uint64 roundDurationMicroseconds;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
+		/** One-based link to the first ticket in this round's chain. */
+		uint64 firstTicketLink;
+		/** One-based link to the last ticket in this round's chain. */
+		uint64 lastTicketLink;
+		/** Winner weight applied to bonus-qualified tickets, in basis points. */
+		uint32 bonusMultiplierBps;
+		/** Prize-pool weights for every exact/misplaced tier, in basis points. */
+		TierWeightMatrix tierWeightsBps;
+		/** Maximum tickets accepted by the round. */
+		uint16 ticketLimit;
+		/** Maximum tickets one entity may hold in the round. */
+		uint16 playerTicketLimit;
+		/** Number of tickets accepted for the current request or round. */
 		uint16 ticketCount;
-		/**
-		 * @brief Number of positive-payout tickets in this round.
-		 */
+		/** Number of tickets assigned a non-zero payout. */
 		uint16 winnerCount;
-		/**
-		 * @brief Number of positive-payout tickets that could not be paid.
-		 */
-		uint16 unpaidWinnerCount;
-		/**
-		 * @brief Round lifecycle status.
-		 */
-		ERoundStatus status;
+		/** Number of configured entries in bonusAssets. */
+		uint16 bonusAssetCount;
+		/** Contract index required to manage currency-asset ownership records. */
+		uint16 ownershipManagingContractIndex;
+		/** Contract index required to manage currency-asset possession records. */
+		uint16 possessionManagingContractIndex;
+		/** Ownership manager used when checking bonus-asset holdings. */
+		uint16 bonusOwnershipManagingContractIndex;
+		/** Possession manager used when checking bonus-asset holdings. */
+		uint16 bonusPossessionManagingContractIndex;
+		/** One-based link to the matching asset accrual bucket. */
+		uint16 assetAccountingLink;
+		/** Human-readable game name stored as fixed bytes. */
+		Array<uint8, 32> name;
+		/** Number of meaningful digits in every code for this game. */
+		uint8 codeLength;
+		/** Largest permitted digit value, inclusive. */
+		uint8 maxDigit;
+		/** Ticket-price percentage reserved for the game creator. */
+		uint8 creatorFeePercent;
+		/** Selects native Qubic custody or managed asset-share custody. */
+		ECurrencyMode currencyMode;
+		/** Game lifetime model: one-shot or permanent. */
+		EGameMode mode;
+		/** Selects payout or reinvestment of creator fees. */
+		ECreatorRevenueMode creatorRevenueMode;
+		/** Round outcome being processed by resumable finalization. */
+		EGameTerminalReason finalizingRoundReason;
+		/** Stop outcome being processed by resumable finalization. */
+		EGameStopReason finalizingStopReason;
+		/** Whether a code may contain the same digit more than once. */
+		bit allowRepeatedDigits;
+		/** Whether the owner requested stopping after the active round. */
+		bit stopRequested;
+		/** Current persisted lifecycle or oracle status. */
+		EGameStatus status;
 	};
 
-	/**
-	 * @brief Stored ticket snapshot retained in the global ticket array.
-	 */
+	/** Generation-aware player entry and its eventual settlement result. */
 	struct Ticket
 	{
-		/**
-		 * @brief Player-submitted code digits.
-		 */
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		/**
-		 * @brief Player who bought the ticket.
-		 */
+		/** Entity that owns the ticket or is evaluated for bonus eligibility. */
 		id player;
-		/**
-		 * @brief Qubic payout amount, including bonus when applicable.
-		 */
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Generation-aware identifier of a ticket slot. */
+		uint64 ticketId;
+		/** One-based link to the next ticket or zero at the chain end. */
+		uint64 nextLink;
+		/** Currency amount assigned or transferred to the current ticket. */
 		uint64 payout;
-		/**
-		 * @brief Qubic multiplier-bonus extra payout.
-		 */
-		uint64 bonusPayout;
-		/**
-		 * @brief Asset payout amount, including bonus when applicable.
-		 */
-		uint64 assetPayout;
-		/**
-		 * @brief Asset multiplier-bonus extra payout.
-		 */
-		uint64 assetBonusPayout;
-		/**
-		 * @brief Round id this ticket belongs to.
-		 */
-		uint32 roundId;
-		/**
-		 * @brief Template id this ticket belongs to.
-		 */
-		uint16 templateId;
-		/**
-		 * @brief Exact-position match count after settlement.
-		 */
+		/** Basis-point weight of the current winner within its tier. */
+		uint32 winnerWeight;
+		/** Compact exact/misplaced match-tier index for a ticket. */
+		uint16 tierIndex;
+		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+		/** Digits that match the winning code in both value and position. */
 		uint8 exact;
-		/**
-		 * @brief Misplaced match count after settlement.
-		 */
+		/** Winning digit values found in a different position. */
 		uint8 misplaced;
-		/**
-		 * @brief Ticket settlement status.
-		 */
+		/** Whether this ticket receives the configured bonus winner weight. */
+		bit bonusQualified;
+		/** Current persisted lifecycle or oracle status. */
 		ETicketStatus status;
 	};
 
-	/**
-	 * @brief Winner-history entry stored in the global ring buffer.
-	 */
-	struct WinnerInfo
+	/** Published round summary retained in the bounded result history. */
+	struct GameResult
 	{
-		/**
-		 * @brief Winning player id.
-		 */
-		id player;
-		/**
-		 * @brief Qubic payout amount.
-		 */
-		uint64 payout;
-		/**
-		 * @brief Qubic multiplier-bonus extra payout.
-		 */
-		uint64 bonusPayout;
-		/**
-		 * @brief Asset payout amount.
-		 */
-		uint64 assetPayout;
-		/**
-		 * @brief Asset multiplier-bonus extra payout.
-		 */
-		uint64 assetBonusPayout;
-		/**
-		 * @brief Round id that produced the win.
-		 */
-		uint32 roundId;
-		/**
-		 * @brief Tick at which the win was recorded.
-		 */
-		uint32 tick;
-		/**
-		 * @brief Template id that produced the win.
-		 */
-		uint16 templateId;
-		/**
-		 * @brief Epoch at which the win was recorded.
-		 */
-		uint16 epoch;
-		/**
-		 * @brief Exact-position match count.
-		 */
-		uint8 exact;
-		/**
-		 * @brief Misplaced match count.
-		 */
-		uint8 misplaced;
+		/** Entity authorized to administer the game or referenced asset position. */
+		id owner;
+		/** Asset used as game currency when currencyMode is ASSET. */
+		Asset currencyAsset;
+		/** UTC instant at which ticket sales open. */
+		DateAndTime startAt;
+		/** UTC instant at which sales close and drawing may begin. */
+		DateAndTime drawAt;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Current round amount reserved exclusively for winner payouts or return. */
+		uint64 prizePool;
+		/** Winner payouts successfully transferred in the current round. */
+		uint64 totalPaid;
+		/** One-based link to the first ticket in this round's chain. */
+		uint64 firstTicketLink;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
+		/** Monotonic publication sequence assigned to this result. */
+		uint64 resultSequence;
+		/** Tick at which the round result was finalized. */
+		uint32 settledTick;
+		/** Prize-pool weights for every exact/misplaced tier, in basis points. */
+		TierWeightMatrix tierWeightsBps;
+		/** Number of tickets accepted for the current request or round. */
+		uint16 ticketCount;
+		/** Number of tickets assigned a non-zero payout. */
+		uint16 winnerCount;
+		/** Deterministically generated code used to settle the round. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> winningDigits;
+		/** Number of meaningful digits in every code for this game. */
+		uint8 codeLength;
+		/** Selects native Qubic custody or managed asset-share custody. */
+		ECurrencyMode currencyMode;
+		/** Game lifetime model: one-shot or permanent. */
+		EGameMode mode;
+		/** Published reason the game stopped after this round. */
+		EGameStopReason gameStopReason;
+		/** Terminal outcome published for the round. */
+		EGameTerminalReason terminalReason;
+		/** Whether ticket links and full result details remain queryable. */
+		bit detailsAvailable;
 	};
 
-	/**
-	 * @brief Full persistent contract state.
-	 */
+	/** Persistent cursors and aggregates for budgeted multi-tick settlement. */
+	struct SettlementProgress
+	{
+		/** Number of winning tickets classified into each tier. */
+		TierAmountMatrix tierWinnerCount;
+		/** Number of bonus-qualified winners classified into each tier. */
+		TierAmountMatrix tierBonusCount;
+		/** Prize amount assigned to each winning tier. */
+		TierAmountMatrix tierPools;
+		/** Fractional remainders used to allocate rounding units deterministically. */
+		TierAmountMatrix tierFractions;
+		/** Winner share before applying bonus weighting. */
+		TierAmountMatrix normalPayout;
+		/** Additional winner share caused by bonus qualification. */
+		TierAmountMatrix bonusPayout;
+		/** Undistributed integer units assigned one-by-one to tier winners. */
+		TierAmountMatrix tierRemainder;
+		/** Next ticket link to process in resumable settlement. */
+		uint64 cursorLink;
+		/** Immutable pool amount captured when settlement begins. */
+		uint64 prizePoolSnapshot;
+		/** Prize amount already assigned across winning tiers. */
+		uint64 allocatedPool;
+		/** Sum of configured weights for tiers that actually have winners. */
+		uint32 activeTierBps;
+		/** Number of tickets assigned a non-zero payout. */
+		uint16 winnerCount;
+		/** Deterministically generated code used to settle the round. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> winningDigits;
+	};
+
+	/** Platform accrual bucket for one asset and management-index tuple. */
+	struct AssetPlatformAccounting
+	{
+		/** Asset issuance whose shares are inspected or transferred. */
+		Asset asset;
+		/** Unwithdrawn amount owed to the first platform developer. */
+		uint64 developer1Accrued;
+		/** Unwithdrawn amount owed to the second platform developer. */
+		uint64 developer2Accrued;
+		/** Unwithdrawn amount reserved for shareholder distribution. */
+		uint64 dividendAccrued;
+		/** Total game slots currently occupied. */
+		uint16 activeGameCount;
+		/** Contract index required to manage currency-asset ownership records. */
+		uint16 ownershipManagingContractIndex;
+		/** Contract index required to manage currency-asset possession records. */
+		uint16 possessionManagingContractIndex;
+		/** Whether this accounting bucket is allocated to an asset tuple. */
+		bit isActive;
+	};
+
+	/** All consensus-persistent PulseEditor state; field order is ABI-sensitive. */
 	struct StateData
 	{
-		/**
-		 * @brief Template storage indexed by template id.
-		 */
-		Array<GameTemplate, PULSEEDITOR_MAX_TEMPLATES> templates;
-		/**
-		 * @brief One current round slot per template id.
-		 */
-		Array<Round, PULSEEDITOR_MAX_TEMPLATES> rounds;
-		/**
-		 * @brief Global append-only ticket storage.
-		 */
-		Array<Ticket, PULSEEDITOR_MAX_TICKETS> tickets;
-		/**
-		 * @brief Global winner-history ring buffer.
-		 */
-		Array<WinnerInfo, PULSEEDITOR_MAX_WINNERS> winners;
-		/**
-		 * @brief Platform owner allowed to configure and withdraw platform revenue.
-		 */
+		/** Generation-aware game records indexed by game slot. */
+		Array<Game, PLDT_MAX_GAMES> games;
+		/** Per-game resumable settlement progress. */
+		Array<SettlementProgress, PLDT_MAX_GAMES> settlements;
+		/** Per-slot generation counters used to create fresh game ids. */
+		Array<uint64, PLDT_MAX_GAMES> generations;
+		/** Generation-aware ticket records shared by all games. */
+		Array<Ticket, PLDT_MAX_TICKETS> tickets;
+		/** Bounded ring of published round results. */
+		Array<GameResult, PLDT_RESULT_STORAGE_SIZE> results;
+		/** Working copy of the game currency asset's accrual bucket. */
+		Array<AssetPlatformAccounting, PLDT_MAX_GAMES> assetAccounting;
+		/** Entity authorized to change platform configuration and withdraw accruals. */
 		id platformOwner;
-		/**
-		 * @brief First developer fee recipient.
-		 */
+		/** First configured recipient of platform developer fees. */
 		id developer1;
-		/**
-		 * @brief Second developer fee recipient.
-		 */
+		/** Second configured recipient of platform developer fees. */
 		id developer2;
-		/**
-		 * @brief Pending Qubic amount owed to developer 1.
-		 */
+		/** Unwithdrawn amount owed to the first platform developer. */
 		uint64 developer1Accrued;
-		/**
-		 * @brief Pending Qubic amount owed to developer 2.
-		 */
+		/** Unwithdrawn amount owed to the second platform developer. */
 		uint64 developer2Accrued;
-		/**
-		 * @brief Pending Qubic amount reserved for shareholder dividends.
-		 */
+		/** Unwithdrawn amount reserved for shareholder distribution. */
 		uint64 dividendAccrued;
-		/**
-		 * @brief Number of template slots ever allocated.
-		 */
-		uint64 templateCount;
-		/**
-		 * @brief Number of tickets ever allocated.
-		 */
+		/** Qubic charged from run credit for each automated round. */
+		uint64 roundFee;
+		/** Number of tickets accepted for the current request or round. */
 		uint64 ticketCount;
-		/**
-		 * @brief Monotonic winner counter used by the ring buffer.
-		 */
-		uint64 winnerCounter;
-		/**
-		 * @brief Cursor used by throttled lifecycle automation.
-		 */
+		/** First ticket slot that has never been allocated, or zero before initialization. */
+		uint64 nextUnusedTicketSlot;
+		/** Head of the free-list of reusable ticket slots. */
+		uint64 freeTicketHead;
+		/** Number of ticket slots currently available through the free list. */
+		uint64 freeTicketCount;
+		/** Oldest result sequence still requiring ticket reclamation. */
+		uint64 reclaimResultCounter;
+		/** Next ticket link awaiting background reclamation. */
+		uint64 reclaimTicketLink;
+		/** Monotonic sequence used to order and place published results. */
+		uint64 resultCounter;
+		/** Total game slots currently occupied. */
+		uint16 activeGameCount;
+		/** Next storage slot from which allocation search resumes. */
+		uint16 allocationCursor;
+		/** Next game slot from which the periodic scan resumes. */
 		uint16 automationCursor;
-		/**
-		 * @brief Platform fee percent deducted from tickets.
-		 */
+		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
-		/**
-		 * @brief Maximum creator fee allowed for future templates.
-		 */
+		/** Owner-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
+		/** Whether background cleanup is traversing this result's ticket chain. */
+		bit reclaimingTickets;
 	};
 
-	/**
-	 * @brief One ticket code used inside batched purchase input.
-	 */
-	struct TicketDigits
+	/** Validated data consumed by the create game operation. */
+	struct CreateGame_input
 	{
-		/**
-		 * @brief Submitted code digits for one batched ticket.
-		 */
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-	};
-
-	/**
-	 * @brief Input for creating a draft game template.
-	 * @param payoutMatrix Fixed payout table indexed by `(exact, misplaced)`.
-	 * @param name Creator-provided display name stored as raw bytes.
-	 * @param bonusAssets Optional assets; possession of any one qualifies a player for the multiplier bonus.
-	 * @param rewardAsset Asset paid to winners when `rewardMode == ASSET`.
-	 * @param entryAsset Asset collected from players when `entryMode == ASSET`.
-	 * @param ticketPrice Exact ticket price in Qubic or entry-asset shares, depending on `entryMode`.
-	 * @param bonusMultiplierBps Optional payout multiplier in basis points; `12000` means `1.2x`.
-	 * @param roundStartTick Optional first tick at which ticket purchases are accepted; zero means immediate.
-	 * @param roundEndTick Optional last selling tick; zero disables time-based auto-close.
-	 * @param ticketLimit Maximum tickets accepted by each round of this template.
-	 * @param playerTicketLimit Maximum tickets one player may buy in a round.
-	 * @param bonusAssetCount Number of valid entries in `bonusAssets`.
-	 * @param rewardOwnershipManagingContractIndex Ownership managing contract used for reward asset reserve/payout.
-	 * @param rewardPossessionManagingContractIndex Possession managing contract used for reward asset reserve/payout.
-	 * @param bonusOwnershipManagingContractIndex Ownership managing contract used for bonus asset checks.
-	 * @param bonusPossessionManagingContractIndex Possession managing contract used for bonus asset checks.
-	 * @param entryOwnershipManagingContractIndex Ownership managing contract used for asset ticket payments.
-	 * @param entryPossessionManagingContractIndex Possession managing contract used for asset ticket payments.
-	 * @param codeLength Number of digits players must submit.
-	 * @param maxDigit Maximum allowed digit value; valid range is `0..maxDigit`.
-	 * @param creatorFeePercent Creator share of non-platform ticket revenue.
-	 * @param burnPercent Burn share of non-platform ticket revenue.
-	 * @param rewardMode `QUBIC` for Qubic payouts or `ASSET` for asset-share payouts.
-	 * @param entryMode `QUBIC` for invocation-reward ticket payments or `ASSET` for managed-share ticket payments.
-	 * @param bonusEnabled Whether multiplier bonus checks and reserve accounting are enabled.
-	 * @param instantSettlement Whether each accepted ticket closes and settles its own round immediately.
-	 * @param allowRepeatedDigits Whether the same digit may appear more than once in a code.
-	 */
-	struct CreateTemplate_input
-	{
-		// Fixed payout table indexed by `(exact, misplaced)`.
-		PayoutMatrix payoutMatrix;
-		// Assets whose possession qualifies a winning player for the multiplier bonus.
-		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
-		// Raw template display name bytes.
+		/** Prize-pool weights for every exact/misplaced tier, in basis points. */
+		TierWeightMatrix tierWeightsBps;
+		/** Asset issuances of which holding any one grants bonus weighting. */
+		Array<Asset, PLDT_MAX_BONUS_ASSETS> bonusAssets;
+		/** Human-readable game name stored as fixed bytes. */
 		Array<uint8, 32> name;
-		// Asset paid to winners when asset reward mode is selected.
-		Asset rewardAsset;
-		// Asset collected from players when asset entry mode is selected.
-		Asset entryAsset;
-		// Ticket price in Qubic or managed asset shares.
+		/** Asset used as game currency when currencyMode is ASSET. */
+		Asset currencyAsset;
+		/** UTC instant at which ticket sales open. */
+		DateAndTime startAt;
+		/** UTC instant at which sales close and drawing may begin. */
+		DateAndTime drawAt;
+		/** Price of one ticket in Qubic or configured asset shares. */
 		uint64 ticketPrice;
-		// First tick that accepts purchases; zero means no lower bound.
-		uint32 roundStartTick;
-		// Last selling tick; zero disables time-based auto-close.
-		uint32 roundEndTick;
-		// Multiplier in fixed-point basis points; `12000` means `1.2x`.
+		/** Creator-funded amount placed into each round's prize pool. */
+		uint64 creatorPrizeSeed;
+		/** Qubic supplied for the first round fee and optional future rounds. */
+		uint64 initialRunCredit;
+		/** Game currency supplied for the first prize seed and unreserved creator balance. */
+		uint64 initialCreatorBalance;
+		/** Winner weight applied to bonus-qualified tickets, in basis points. */
 		uint32 bonusMultiplierBps;
-		// Maximum tickets accepted by each round.
+		/** Maximum tickets accepted by the round. */
 		uint16 ticketLimit;
-		// Maximum tickets one player may buy in a round.
+		/** Maximum tickets one entity may hold in the round. */
 		uint16 playerTicketLimit;
-		// Number of valid entries in `bonusAssets`.
+		/** Number of configured entries in bonusAssets. */
 		uint16 bonusAssetCount;
-		// Ownership managing contract used for reward asset reserve and payout.
-		uint16 rewardOwnershipManagingContractIndex;
-		// Possession managing contract used for reward asset reserve and payout.
-		uint16 rewardPossessionManagingContractIndex;
-		// Ownership managing contract used for bonus asset possession checks.
+		/** Contract index required to manage currency-asset ownership records. */
+		uint16 ownershipManagingContractIndex;
+		/** Contract index required to manage currency-asset possession records. */
+		uint16 possessionManagingContractIndex;
+		/** Ownership manager used when checking bonus-asset holdings. */
 		uint16 bonusOwnershipManagingContractIndex;
-		// Possession managing contract used for bonus asset possession checks.
+		/** Possession manager used when checking bonus-asset holdings. */
 		uint16 bonusPossessionManagingContractIndex;
-		// Ownership managing contract used for asset ticket payments.
-		uint16 entryOwnershipManagingContractIndex;
-		// Possession managing contract used for asset ticket payments.
-		uint16 entryPossessionManagingContractIndex;
-		// Number of digits in each submitted code.
+		/** Number of meaningful digits in every code for this game. */
 		uint8 codeLength;
-		// Maximum allowed digit value.
+		/** Largest permitted digit value, inclusive. */
 		uint8 maxDigit;
-		// Creator share percent of non-platform ticket revenue.
+		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
-		// Burn share percent of non-platform ticket revenue.
-		uint8 burnPercent;
-		// Reward payout currency mode.
-		ERewardMode rewardMode;
-		// Ticket payment currency mode.
-		EEntryMode entryMode;
-		// Enables multiplier bonus checks and reserve accounting.
-		bit bonusEnabled;
-		// Enables immediate per-ticket settlement.
-		bit instantSettlement;
-		// Allows duplicate digits in submitted and generated codes.
+		/** Selects native Qubic custody or managed asset-share custody. */
+		ECurrencyMode currencyMode;
+		/** Selects whether the game closes or starts another round after settlement. */
+		EGameMode mode;
+		/** Selects payout or reinvestment of creator fees. */
+		ECreatorRevenueMode creatorRevenueMode;
+		/** Whether a code may contain the same digit more than once. */
 		bit allowRepeatedDigits;
 	};
 
-	/**
-	 * @brief Output from template creation.
-	 * @param requiredPrizeReserve Minimum base reserve required before publication.
-	 * @param requiredBonusReserve Minimum multiplier bonus reserve required before publication.
-	 * @param templateId New template index when creation succeeds.
-	 * @param returnCode `SUCCESS` or the validation/storage error.
-	 */
-	struct CreateTemplate_output
+	/** Result data produced by the create game operation. */
+	struct CreateGame_output
 	{
-		// Minimum base reserve required before publication.
-		uint64 requiredPrizeReserve;
-		// Minimum multiplier bonus reserve required before publication.
-		uint64 requiredBonusReserve;
-		// Created template index.
-		uint16 templateId;
-		// Operation result code.
-		uint8 returnCode;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for editing an unpublished draft game template.
-	 * @param payoutMatrix Replacement fixed payout table indexed by `(exact, misplaced)`.
-	 * @param name Replacement display name stored as raw bytes.
-	 * @param bonusAssets Replacement assets; possession of any one qualifies a player for the multiplier bonus.
-	 * @param rewardAsset Replacement asset paid to winners when `rewardMode == ASSET`.
-	 * @param entryAsset Replacement asset collected from players when `entryMode == ASSET`.
-	 * @param ticketPrice Replacement ticket price in Qubic or entry-asset shares, depending on `entryMode`.
-	 * @param bonusMultiplierBps Replacement payout multiplier in basis points.
-	 * @param roundStartTick Replacement first selling tick; zero means immediate.
-	 * @param roundEndTick Replacement last selling tick; zero disables time-based auto-close.
-	 * @param templateId Draft template owned by the invocator.
-	 * @param ticketLimit Replacement maximum tickets accepted by each round.
-	 * @param playerTicketLimit Replacement maximum tickets one player may buy in a round.
-	 * @param bonusAssetCount Replacement number of valid entries in `bonusAssets`.
-	 * @param rewardOwnershipManagingContractIndex Replacement ownership managing contract for reward asset reserve/payout.
-	 * @param rewardPossessionManagingContractIndex Replacement possession managing contract for reward asset reserve/payout.
-	 * @param bonusOwnershipManagingContractIndex Replacement ownership managing contract for bonus checks.
-	 * @param bonusPossessionManagingContractIndex Replacement possession managing contract for bonus checks.
-	 * @param entryOwnershipManagingContractIndex Replacement ownership managing contract for asset ticket payments.
-	 * @param entryPossessionManagingContractIndex Replacement possession managing contract for asset ticket payments.
-	 * @param codeLength Replacement number of digits players must submit.
-	 * @param maxDigit Replacement maximum allowed digit value.
-	 * @param creatorFeePercent Replacement creator share of non-platform ticket revenue.
-	 * @param burnPercent Replacement burn share of non-platform ticket revenue.
-	 * @param rewardMode Replacement reward payout mode.
-	 * @param entryMode Replacement ticket payment mode.
-	 * @param bonusEnabled Replacement multiplier-bonus enable flag.
-	 * @param instantSettlement Replacement instant-settlement flag.
-	 * @param allowRepeatedDigits Replacement duplicate-digit policy.
-	 * @note Selling rounds are immutable; published templates may only be changed after the active round settles.
-	 */
-	struct UpdateTemplate_input
+	/** Validated data consumed by the fund game operation. */
+	struct FundGame_input
 	{
-		// Replacement fixed payout table indexed by `(exact, misplaced)`.
-		PayoutMatrix payoutMatrix;
-		// Replacement bonus qualifying assets.
-		Array<Asset, PULSEEDITOR_MAX_BONUS_ASSETS> bonusAssets;
-		// Replacement raw template display name bytes.
-		Array<uint8, 32> name;
-		// Replacement reward asset for asset reward mode.
-		Asset rewardAsset;
-		// Replacement entry asset for asset entry mode.
-		Asset entryAsset;
-		// Replacement ticket price in Qubic or managed asset shares.
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Additional Qubic added to the game run-credit ledger. */
+		uint64 runCreditTopUp;
+		/** Additional game currency added to the creator-balance ledger. */
+		uint64 creatorBalanceTopUp;
+	};
+	/** Result data produced by the fund game operation. */
+	struct FundGame_output
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the update game economics operation. */
+	struct UpdateGameEconomics_input
+	{
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Price of one ticket in Qubic or configured asset shares. */
 		uint64 ticketPrice;
-		// Replacement first selling tick; zero means no lower bound.
-		uint32 roundStartTick;
-		// Replacement last selling tick; zero disables time-based auto-close.
-		uint32 roundEndTick;
-		// Replacement multiplier in fixed-point basis points.
-		uint32 bonusMultiplierBps;
-		// Template index to update.
-		uint16 templateId;
-		// Replacement maximum tickets accepted by each round.
+		/** Creator-funded amount placed into each round's prize pool. */
+		uint64 creatorPrizeSeed;
+		/** Maximum tickets accepted by the round. */
 		uint16 ticketLimit;
-		// Replacement maximum tickets one player may buy in a round.
+		/** Maximum tickets one entity may hold in the round. */
 		uint16 playerTicketLimit;
-		// Replacement number of valid entries in `bonusAssets`.
-		uint16 bonusAssetCount;
-		// Replacement ownership managing contract for reward asset reserve and payout.
-		uint16 rewardOwnershipManagingContractIndex;
-		// Replacement possession managing contract for reward asset reserve and payout.
-		uint16 rewardPossessionManagingContractIndex;
-		// Replacement ownership managing contract for bonus asset possession checks.
-		uint16 bonusOwnershipManagingContractIndex;
-		// Replacement possession managing contract for bonus asset possession checks.
-		uint16 bonusPossessionManagingContractIndex;
-		// Replacement ownership managing contract for asset ticket payments.
-		uint16 entryOwnershipManagingContractIndex;
-		// Replacement possession managing contract for asset ticket payments.
-		uint16 entryPossessionManagingContractIndex;
-		// Replacement number of digits in each submitted code.
-		uint8 codeLength;
-		// Replacement maximum allowed digit value.
-		uint8 maxDigit;
-		// Replacement creator share percent of non-platform ticket revenue.
+		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
-		// Replacement burn share percent of non-platform ticket revenue.
-		uint8 burnPercent;
-		// Replacement reward payout currency mode.
-		ERewardMode rewardMode;
-		// Replacement ticket payment currency mode.
-		EEntryMode entryMode;
-		// Replacement multiplier bonus enable flag.
-		bit bonusEnabled;
-		// Replacement immediate per-ticket settlement flag.
-		bit instantSettlement;
-		// Replacement duplicate-digit policy.
-		bit allowRepeatedDigits;
+		/** Selects payout or reinvestment of creator fees. */
+		ECreatorRevenueMode creatorRevenueMode;
 	};
-
-	/**
-	 * @brief Output from draft template update.
-	 * @param requiredPrizeReserve Recomputed minimum base reserve required before publication.
-	 * @param requiredBonusReserve Recomputed minimum multiplier bonus reserve required before publication.
-	 * @param returnCode `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, or `INVALID_VALUE`.
-	 */
-	struct UpdateTemplate_output
+	/** Result data produced by the update game economics operation. */
+	struct UpdateGameEconomics_output
 	{
-		// Recomputed minimum base reserve required before publication.
-		uint64 requiredPrizeReserve;
-		// Recomputed minimum multiplier bonus reserve required before publication.
-		uint64 requiredBonusReserve;
-		// Operation result code.
-		uint8 returnCode;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for adding Qubic to a template's prize reserve.
-	 * @param templateId Target template owned by the invocator.
-	 * @note The deposited amount is the invocation reward attached to the call.
-	 */
-	struct DepositPrizeReserve_input
+	/** Validated data consumed by the stop game operation. */
+	struct StopGame_input
 	{
-		// Template whose Qubic prize reserve receives the invocation reward.
-		uint16 templateId;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
 	};
-
-	/**
-	 * @brief Output from prize reserve deposit.
-	 * @param depositedAmount Amount accepted from the invocation reward.
-	 * @param prizeReserve Updated reserve after the deposit.
-	 * @param returnCode `SUCCESS` or the rejection reason.
-	 */
-	struct DepositPrizeReserve_output
+	/** Result data produced by the stop game operation. */
+	struct StopGame_output
 	{
-		// Amount accepted from the invocation reward.
-		uint64 depositedAmount;
-		// Updated Qubic prize reserve.
-		uint64 prizeReserve;
-		// Operation result code.
-		uint8 returnCode;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for adding Qubic to a template's multiplier-bonus reserve.
-	 * @param templateId Target template owned by the invocator.
-	 * @note The deposited amount is the invocation reward attached to the call.
-	 */
-	struct DepositBonusReserve_input
+	/** Validated data consumed by the withdraw game balance operation. */
+	struct WithdrawGameBalance_input
 	{
-		// Template whose Qubic bonus reserve receives the invocation reward.
-		uint16 templateId;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Run credit requested for withdrawal. */
+		uint64 runCreditAmount;
+		/** Creator balance requested for withdrawal. */
+		uint64 creatorBalanceAmount;
 	};
-
-	/**
-	 * @brief Output from bonus reserve deposit.
-	 * @param depositedAmount Amount accepted from the invocation reward.
-	 * @param bonusReserve Updated multiplier-bonus reserve after the deposit.
-	 * @param returnCode `SUCCESS` or the rejection reason.
-	 */
-	struct DepositBonusReserve_output
+	/** Result data produced by the withdraw game balance operation. */
+	struct WithdrawGameBalance_output
 	{
-		// Amount accepted from the invocation reward.
-		uint64 depositedAmount;
-		// Updated Qubic multiplier-bonus reserve.
-		uint64 bonusReserve;
-		// Operation result code.
-		uint8 returnCode;
+		/** Run credit successfully returned to the owner. */
+		uint64 runCreditPaid;
+		/** Creator balance successfully returned to the owner. */
+		uint64 creatorBalancePaid;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for transferring reward asset shares into a template reserve.
-	 * @param templateId Target template owned by the invocator.
-	 * @param numberOfShares Asset shares to transfer from the invocator to this contract.
-	 * @param depositToBonusReserve Whether shares fund multiplier bonuses instead of base rewards.
-	 * @note The template must use `ASSET` reward mode and this contract must manage the transferred asset.
-	 */
-	struct DepositAssetReserve_input
-	{
-		// Asset shares transferred from the invocator to this contract.
-		uint64 numberOfShares;
-		// Template whose asset reserve receives the shares.
-		uint16 templateId;
-		// True when funding the multiplier-bonus reserve instead of the base prize reserve.
-		bit depositToBonusReserve;
-	};
-
-	/**
-	 * @brief Output from reward asset reserve deposit.
-	 * @param depositedNumberOfShares Asset shares accepted by the contract.
-	 * @param assetPrizeReserve Updated base asset reward reserve.
-	 * @param assetBonusReserve Updated multiplier-bonus asset reserve.
-	 * @param returnCode `SUCCESS` or the rejection reason.
-	 */
-	struct DepositAssetReserve_output
-	{
-		// Asset shares accepted by the contract.
-		uint64 depositedNumberOfShares;
-		// Updated base asset reward reserve.
-		uint64 assetPrizeReserve;
-		// Updated multiplier-bonus asset reserve.
-		uint64 assetBonusReserve;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for publishing a funded draft template.
-	 * @param templateId Draft template to publish.
-	 */
-	struct PublishTemplate_input
-	{
-		// Draft template to publish.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Output from template publication.
-	 * @param roundId First selling round id created by the publication.
-	 * @param returnCode `SUCCESS` or the publication error.
-	 */
-	struct PublishTemplate_output
-	{
-		// First selling round id created by publication.
-		uint32 roundId;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for buying one ticket in the current selling round.
-	 * @param digits Player-submitted code; only the first template `codeLength` entries are used.
-	 * @param templateId Published template whose active round receives the ticket.
-	 * @note Qubic-entry templates pay Qubic rewards; asset-entry templates collect and pay the same managed asset.
-	 */
+	/** Validated data consumed by the buy ticket operation. */
 	struct BuyTicket_input
 	{
-		// Submitted code digits.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		// Template whose active selling round receives the ticket.
-		uint16 templateId;
+		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
 	};
 
-	/**
-	 * @brief Output from ticket purchase.
-	 * @param roundId Active round id that accepted the ticket.
-	 * @param ticketIndex Global ticket array index assigned to the purchase.
-	 * @param returnCode `SUCCESS` or the purchase rejection reason.
-	 */
+	/** Result data produced by the buy ticket operation. */
 	struct BuyTicket_output
 	{
-		// Global ticket index assigned to the accepted purchase.
+		/** Generation-aware identifier of a ticket slot. */
+		uint64 ticketId;
+		/** Compatibility zero-based ticket slot returned to legacy clients. */
 		uint64 ticketIndex;
-		// Round id that accepted the ticket.
-		uint32 roundId;
-		// Operation result code.
-		uint8 returnCode;
+		/** Per-ticket amount added to the winner prize pool. */
+		uint64 prizeContribution;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for buying several tickets in one call.
-	 * @param tickets Submitted codes; only the first `ticketCount` entries are used.
-	 * @param templateId Published template whose active round receives the tickets.
-	 * @param ticketCount Number of tickets to buy, capped by `PULSEEDITOR_MAX_BATCH_TICKETS`.
-	 * @note Qubic-entry batches pay Qubic rewards; asset-entry batches collect and pay the same managed asset.
-	 * @warning Instant batches settle tickets sequentially, so a later failure can leave earlier tickets accepted and paid.
-	 */
-	struct BuyTickets_input
+	/** Validated data consumed by the get game operation. */
+	struct GetGame_input
 	{
-		// Submitted ticket codes.
-		Array<TicketDigits, PULSEEDITOR_MAX_BATCH_TICKETS> tickets;
-		// Template whose active selling round receives the tickets.
-		uint16 templateId;
-		// Number of tickets to buy.
-		uint16 ticketCount;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
 	};
-
-	/**
-	 * @brief Output from batched ticket purchase.
-	 * @param ticketIndexes Global ticket array indexes assigned to accepted tickets.
-	 * @param roundId First round id that accepted a ticket.
-	 * @param acceptedCount Number of tickets stored; non-instant failures keep this at zero, instant failures may return a partial count.
-	 * @param returnCode `SUCCESS` or the purchase rejection reason.
-	 */
-	struct BuyTickets_output
+	/** Result data produced by the get game operation. */
+	struct GetGame_output
 	{
-		// Global ticket indexes assigned to accepted purchases.
-		Array<uint64, PULSEEDITOR_MAX_BATCH_TICKETS> ticketIndexes;
-		// First round id that accepted a ticket.
-		uint32 roundId;
-		// Number of accepted tickets.
-		uint16 acceptedCount;
-		// Operation result code.
-		uint8 returnCode;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Internal input for settling the current selling round from tick automation.
-	 * @param templateId Template whose active round should be settled.
-	 */
-	struct SettleRound_input
+	/** Composite identity of one immutable game round. */
+	struct RoundKey
 	{
-		// Template whose active round should be settled.
-		uint16 templateId;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
 	};
-
-	/**
-	 * @brief Internal output from settlement.
-	 * @param winningDigits Generated winning code stored for the settled round.
-	 * @param totalPaid Total Qubic paid to winners during this settlement.
-	 * @param winnerCount Number of tickets with a positive fixed payout.
-	 * @param unpaidWinnerCount Winners that could not be paid because the prize reserve was insufficient.
-	 * @param returnCode `SUCCESS` or the settlement rejection reason.
-	 */
-	struct SettleRound_output
+	using RoundResult = GameResult;
+	/** Validated data consumed by the get round result operation. */
+	struct GetRoundResult_input
 	{
-		// Generated winning code stored for the settled round.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
-		// Total amount paid to winners during settlement.
-		uint64 totalPaid;
-		// Number of tickets with a positive base payout.
-		uint16 winnerCount;
-		// Number of positive-payout tickets that could not be paid.
-		uint16 unpaidWinnerCount;
-		// Operation result code.
-		uint8 returnCode;
+		/** Game and round pair used to identify immutable result history. */
+		RoundKey roundKey;
 	};
-
-	/**
-	 * @brief Input for requesting a graceful template stop.
-	 * @param templateId Template owned by the invocator.
-	 */
-	struct RequestStop_input
+	/** Result data produced by the get round result operation. */
+	struct GetRoundResult_output
 	{
-		// Template owned by the invocator.
-		uint16 templateId;
+		/** Published result associated with the requested round. */
+		RoundResult roundResult;
+		/** Published result associated with the requested game. */
+		GameResult gameResult;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
+	using GetGameResult_input = GetRoundResult_input;
+	using GetGameResult_output = GetRoundResult_output;
 
-	/**
-	 * @brief Output from stop request.
-	 * @param returnCode `SUCCESS` or the access/state rejection reason.
-	 */
-	struct RequestStop_output
-	{
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for withdrawing creator revenue accumulated by ticket purchases.
-	 * @param templateId Template whose creator balance is used.
-	 * @param amount Qubic amount or asset-share amount to transfer to the template owner.
-	 */
-	struct WithdrawCreatorRevenue_input
-	{
-		// Template whose creator balance is used.
-		uint16 templateId;
-		// Amount to transfer to the template owner.
-		uint64 amount;
-	};
-
-	/**
-	 * @brief Output from creator revenue withdrawal.
-	 * @param withdrawnAmount Amount transferred to the invocator.
-	 * @param remainingRevenue Creator revenue left after withdrawal.
-	 * @param returnCode `SUCCESS` or the withdrawal rejection reason.
-	 */
-	struct WithdrawCreatorRevenue_output
-	{
-		// Amount transferred to the invocator.
-		uint64 withdrawnAmount;
-		// Creator revenue left after withdrawal.
-		uint64 remainingRevenue;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for withdrawing asset-denominated platform revenue from one template.
-	 * @param templateId Template whose asset platform balances are used.
-	 * @note Asset dividends are paid to holders of the PulseEditor contract-share asset.
-	 */
-	struct WithdrawAssetPlatformRevenue_input
-	{
-		// Template whose asset platform balances are processed.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Output from asset platform revenue withdrawal.
-	 * @param developer1Amount Asset shares transferred to developer 1.
-	 * @param developer2Amount Asset shares transferred to developer 2.
-	 * @param dividendAmount Asset shares distributed to PulseEditor shareholders.
-	 * @param dividendAccrued Asset shares retained for future dividend handling.
-	 * @param returnCode `SUCCESS` or the withdrawal rejection reason.
-	 */
-	struct WithdrawAssetPlatformRevenue_output
-	{
-		// Asset shares transferred to developer 1.
-		uint64 developer1Amount;
-		// Asset shares transferred to developer 2.
-		uint64 developer2Amount;
-		// Asset shares distributed to PulseEditor shareholders.
-		uint64 dividendAmount;
-		// Asset dividend balance retained after distribution.
-		uint64 dividendAccrued;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for initializing or updating platform fee recipients and creator limits.
-	 * @param platformOwner Owner allowed to update platform config and withdraw platform revenue.
-	 * @param developer1 First developer fee recipient.
-	 * @param developer2 Second developer fee recipient.
-	 * @param maxCreatorFeePercent Maximum creator fee allowed for future templates.
-	 */
-	struct SetPlatformConfig_input
-	{
-		// Owner allowed to update platform config and withdraw platform revenue.
-		id platformOwner;
-		// First developer fee recipient.
-		id developer1;
-		// Second developer fee recipient.
-		id developer2;
-		// Maximum creator fee allowed for future templates.
-		uint8 maxCreatorFeePercent;
-	};
-
-	/**
-	 * @brief Output from platform config update.
-	 * @param returnCode `SUCCESS` or the access/value rejection reason.
-	 */
-	struct SetPlatformConfig_output
-	{
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Empty input for withdrawing accumulated platform revenue.
-	 * @note Only the configured platform owner may call this procedure successfully.
-	 */
-	struct WithdrawPlatformRevenue_input
-	{
-	};
-
-	/**
-	 * @brief Output from platform revenue withdrawal.
-	 * @param developer1Amount Amount transferred to developer 1.
-	 * @param developer2Amount Amount transferred to developer 2.
-	 * @param dividendAmount Total amount distributed to contract shareholders.
-	 * @param returnCode `SUCCESS` or the withdrawal rejection reason.
-	 */
-	struct WithdrawPlatformRevenue_output
-	{
-		// Amount transferred to developer 1.
-		uint64 developer1Amount;
-		// Amount transferred to developer 2.
-		uint64 developer2Amount;
-		// Total amount distributed to contract shareholders.
-		uint64 dividendAmount;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Internal input for opening the next round after settlement.
-	 * @param templateId Published template whose next round should open.
-	 */
-	struct StartNextRound_input
-	{
-		// Template whose next round should open.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Internal output from next-round creation.
-	 * @param roundId New active round id.
-	 * @param returnCode `SUCCESS` or the state/funding rejection reason.
-	 */
-	struct StartNextRound_output
-	{
-		// New active round id.
-		uint32 roundId;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for querying a template.
-	 * @param templateId Template index to read.
-	 */
-	struct GetTemplate_input
-	{
-		// Template index to read.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Output from template query.
-	 * @param gameTemplate Full stored template snapshot.
-	 * @param returnCode `SUCCESS` or `INVALID_TEMPLATE`.
-	 */
-	struct GetTemplate_output
-	{
-		// Full stored template snapshot.
-		GameTemplate gameTemplate;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for querying the current round of a template.
-	 * @param templateId Template whose round slot should be read.
-	 */
-	struct GetRound_input
-	{
-		// Template whose round slot should be read.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Output from current-round query.
-	 * @param round Current round snapshot for the template.
-	 * @param returnCode `SUCCESS` or `INVALID_TEMPLATE`.
-	 */
-	struct GetRound_output
-	{
-		// Current round snapshot for the template.
-		Round round;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for checking whether a template can be published or started.
-	 * @param templateId Template index to inspect.
-	 */
-	struct GetTemplateReadiness_input
-	{
-		// Template index to inspect.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Output from template readiness query.
-	 * @param requiredPrizeReserve Minimum base prize reserve required for one funded round.
-	 * @param requiredBonusReserve Minimum bonus reserve required when multiplier bonuses are enabled.
-	 * @param prizeReserve Current base prize reserve.
-	 * @param bonusReserve Current multiplier-bonus reserve.
-	 * @param assetPrizeReserve Current base asset reward reserve.
-	 * @param assetBonusReserve Current multiplier-bonus asset reserve.
-	 * @param currentTick Tick observed while evaluating time-window readiness.
-	 * @param reasonCode `SUCCESS` when ready, otherwise the first blocker.
-	 * @param returnCode `SUCCESS` or `INVALID_TEMPLATE`.
-	 * @param isReady True when current funding and lifecycle state allow publication or next-round start.
-	 */
-	struct GetTemplateReadiness_output
-	{
-		// Minimum base prize reserve required for one funded round.
-		uint64 requiredPrizeReserve;
-		// Minimum multiplier bonus reserve required before opening a round.
-		uint64 requiredBonusReserve;
-		// Current Qubic base prize reserve.
-		uint64 prizeReserve;
-		// Current Qubic multiplier-bonus reserve.
-		uint64 bonusReserve;
-		// Current asset base reward reserve.
-		uint64 assetPrizeReserve;
-		// Current asset multiplier-bonus reserve.
-		uint64 assetBonusReserve;
-		// Tick observed while evaluating time-window readiness.
-		uint32 currentTick;
-		// First readiness blocker, or `SUCCESS` when ready.
-		uint8 reasonCode;
-		// Operation result code.
-		uint8 returnCode;
-		// True when current funding and lifecycle state allow publication or next-round start.
-		bit isReady;
-	};
-
-	/**
-	 * @brief Input for reading a page of created template ids.
-	 * @param offset Zero-based template offset.
-	 * @param limit Requested number of ids; zero means `PULSEEDITOR_TEMPLATES_PAGE_SIZE`.
-	 */
-	struct GetTemplates_input
-	{
-		// Zero-based template offset.
-		uint64 offset;
-		// Requested number of ids; zero means the default page size.
-		uint16 limit;
-	};
-
-	/**
-	 * @brief Output from template discovery query.
-	 * @param templateIds Page of template ids.
-	 * @param statuses Status byte for each returned template.
-	 * @param totalTemplates Number of templates ever created.
-	 * @param returnedCount Number of valid entries in `templateIds` and `statuses`.
-	 * @param returnCode `SUCCESS` or `INVALID_VALUE`.
-	 */
-	struct GetTemplates_output
-	{
-		// Page of template ids.
-		Array<uint16, PULSEEDITOR_TEMPLATES_PAGE_SIZE> templateIds;
-		// Status byte for each returned template id.
-		Array<uint8, PULSEEDITOR_TEMPLATES_PAGE_SIZE> statuses;
-		// Number of templates ever created.
-		uint64 totalTemplates;
-		// Number of valid entries in `templateIds` and `statuses`.
-		uint16 returnedCount;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Input for querying a stored ticket by global index.
-	 * @param ticketIndex Index previously returned by `BuyTicket`.
-	 */
+	/** Validated data consumed by the get ticket operation. */
 	struct GetTicket_input
 	{
-		// Global ticket index to read.
-		uint64 ticketIndex;
+		/** Generation-aware identifier of a ticket slot. */
+		uint64 ticketId;
 	};
-
-	/**
-	 * @brief Output from ticket query.
-	 * @param ticket Stored ticket snapshot.
-	 * @param returnCode `SUCCESS` or `INVALID_VALUE`.
-	 */
+	/** Result data produced by the get ticket operation. */
 	struct GetTicket_output
 	{
-		// Stored ticket snapshot.
+		/** Working copy or returned snapshot of a ticket record. */
 		Ticket ticket;
-		// Operation result code.
-		uint8 returnCode;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for querying a chronological page of tickets bought by one player.
-	 * @param player Player id whose tickets should be scanned.
-	 * @param offset Zero-based offset within the matched ticket set.
-	 * @param roundId Optional round id filter, used only when `useRoundFilter` is true.
-	 * @param templateId Optional template filter, used only when `useTemplateFilter` is true.
-	 * @param limit Requested number of entries; zero means `PULSEEDITOR_TICKETS_PAGE_SIZE`.
-	 * @param useTemplateFilter Whether to restrict results to `templateId`.
-	 * @param useRoundFilter Whether to restrict results to `roundId`.
-	 * @note Tickets are returned in global insertion order, which is chronological for accepted purchases.
-	 */
-	struct GetPlayerTickets_input
+	/** Validated data consumed by the validate digits operation. */
+	struct ValidateDigits_input
 	{
-		// Player id whose tickets should be scanned.
-		id player;
-		// Zero-based offset within the matched ticket set.
-		uint64 offset;
-		// Optional round id filter.
-		uint32 roundId;
-		// Optional template id filter.
-		uint16 templateId;
-		// Requested number of entries; zero means the default page size.
-		uint16 limit;
-		// Enables filtering by `templateId`.
-		bit useTemplateFilter;
-		// Enables filtering by `roundId`.
-		bit useRoundFilter;
+		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+		/** Number of meaningful digits in every code for this game. */
+		uint8 codeLength;
+		/** Largest permitted digit value, inclusive. */
+		uint8 maxDigit;
+		/** Whether a code may contain the same digit more than once. */
+		bit allowRepeatedDigits;
 	};
-
-	/**
-	 * @brief Output from paged player-ticket query.
-	 * @param tickets Page of matched ticket snapshots.
-	 * @param ticketIndexes Global indexes corresponding to the returned tickets.
-	 * @param totalMatched Total tickets matching the player and optional filters.
-	 * @param returnedCount Number of valid entries in `tickets` and `ticketIndexes`.
-	 * @param returnCode `SUCCESS`, `INVALID_TEMPLATE`, or `INVALID_VALUE`.
-	 */
-	struct GetPlayerTickets_output
+	/** Result data produced by the validate digits operation. */
+	struct ValidateDigits_output
 	{
-		// Page of matched ticket snapshots.
-		Array<Ticket, PULSEEDITOR_TICKETS_PAGE_SIZE> tickets;
-		// Global indexes corresponding to `tickets`.
-		Array<uint64, PULSEEDITOR_TICKETS_PAGE_SIZE> ticketIndexes;
-		// Total tickets matching the player and optional filters.
-		uint64 totalMatched;
-		// Number of valid entries in `tickets` and `ticketIndexes`.
-		uint16 returnedCount;
-		// Operation result code.
-		uint8 returnCode;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for querying a page from the winner history ring buffer.
-	 * @param offset Zero-based offset from the oldest retained winner.
-	 * @param limit Requested number of entries; zero means `PULSEEDITOR_WINNERS_PAGE_SIZE`.
-	 * @note Returned entries are ordered from oldest to newest within the retained history window.
-	 */
-	struct GetWinners_input
+	using PreviewGame_input = CreateGame_input;
+	/** Result data produced by the preview game operation. */
+	struct PreviewGame_output
 	{
-		// Zero-based offset from the oldest retained winner.
-		uint64 offset;
-		// Requested number of entries; zero means the default page size.
-		uint16 limit;
+		/** Qubic charged from run credit for each automated round. */
+		uint64 roundFee;
+		/** Invocation reward required to create the game. */
+		uint64 initialQubicRequired;
+		/** Asset shares that must be transferred for initial creator funding. */
+		uint64 initialCreatorAssetRequired;
+		/** Per-ticket amount split between developers and shareholders. */
+		uint64 platformFee;
+		/** Per-ticket amount accrued to the game creator. */
+		uint64 creatorFee;
+		/** Per-ticket amount removed from circulation. */
+		uint64 burn;
+		/** Per-ticket amount added to the winner prize pool. */
+		uint64 prizeContribution;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Output from paged winner-history query.
-	 * @param winners Page of winner entries starting at `input.offset`.
-	 * @param winnerCounter Monotonic winner counter used to interpret ring-buffer order.
-	 * @param totalStored Number of winner entries currently retained by the ring buffer.
-	 * @param returnedCount Number of valid entries in `winners`.
-	 * @param returnCode `SUCCESS` or `INVALID_VALUE` when the offset is outside the retained window.
-	 */
-	struct GetWinners_output
-	{
-		// Page of winner entries.
-		Array<WinnerInfo, PULSEEDITOR_WINNERS_PAGE_SIZE> winners;
-		// Monotonic winner counter used to interpret ring-buffer order.
-		uint64 winnerCounter;
-		// Number of winner entries currently retained.
-		uint64 totalStored;
-		// Number of valid entries in `winners`.
-		uint16 returnedCount;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Empty input for querying platform fee accounting.
-	 */
+	/** Validated data consumed by the get platform accounting operation. */
 	struct GetPlatformAccounting_input
 	{
 	};
-
-	/**
-	 * @brief Output from platform accounting query.
-	 * @param platformOwner Current platform owner.
-	 * @param developer1 Current first developer recipient.
-	 * @param developer2 Current second developer recipient.
-	 * @param developer1Accrued Pending amount owed to developer 1.
-	 * @param developer2Accrued Pending amount owed to developer 2.
-	 * @param dividendAccrued Pending total amount reserved for shareholder dividends.
-	 * @param platformFeePercent Platform fee percent deducted from tickets.
-	 * @param maxCreatorFeePercent Current creator-fee upper bound.
-	 * @param returnCode Always `SUCCESS` for the MVP getter.
-	 */
+	/** Result data produced by the get platform accounting operation. */
 	struct GetPlatformAccounting_output
 	{
-		// Current platform owner.
+		/** Entity authorized to change platform configuration and withdraw accruals. */
 		id platformOwner;
-		// Current first developer recipient.
+		/** First configured recipient of platform developer fees. */
 		id developer1;
-		// Current second developer recipient.
+		/** Second configured recipient of platform developer fees. */
 		id developer2;
-		// Pending amount owed to developer 1.
+		/** Unwithdrawn amount owed to the first platform developer. */
 		uint64 developer1Accrued;
-		// Pending amount owed to developer 2.
+		/** Unwithdrawn amount owed to the second platform developer. */
 		uint64 developer2Accrued;
-		// Pending total amount reserved for shareholder dividends.
+		/** Unwithdrawn amount reserved for shareholder distribution. */
 		uint64 dividendAccrued;
-		// Platform fee percent deducted from tickets.
+		/** Qubic charged from run credit for each automated round. */
+		uint64 roundFee;
+		/** Number of tickets accepted for the current request or round. */
+		uint64 ticketCount;
+		/** Monotonic sequence used to order and place published results. */
+		uint64 resultCounter;
+		/** Total game slots currently occupied. */
+		uint16 activeGameCount;
+		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
-		// Current creator-fee upper bound.
+		/** Owner-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
-		// Operation result code.
-		uint8 returnCode;
 	};
 
-	/**
-	 * @brief Input for validating a submitted or generated code.
-	 * @param digits Code digits; only the first `codeLength` entries are checked.
-	 * @param codeLength Active code length.
-	 * @param maxDigit Maximum allowed digit value.
-	 * @param allowRepeatedDigits Whether duplicate digits are accepted.
-	 */
-	struct ValidateDigits_input
+	/** Validated data consumed by the set platform config operation. */
+	struct SetPlatformConfig_input
 	{
-		// Code digits to validate.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-		// Number of leading entries to validate.
-		uint8 codeLength;
-		// Maximum allowed digit value.
-		uint8 maxDigit;
-		// Whether duplicate digits are accepted.
-		bit allowRepeatedDigits;
+		/** Entity authorized to change platform configuration and withdraw accruals. */
+		id platformOwner;
+		/** First configured recipient of platform developer fees. */
+		id developer1;
+		/** Second configured recipient of platform developer fees. */
+		id developer2;
+		/** Qubic charged from run credit for each automated round. */
+		uint64 roundFee;
+		/** Owner-configurable upper bound for creatorFeePercent. */
+		uint8 maxCreatorFeePercent;
 	};
-
-	/**
-	 * @brief Output from digit validation.
-	 * @param isValid True when the code obeys range and uniqueness rules.
-	 * @param returnCode `SUCCESS` or `INVALID_DIGITS`.
-	 */
-	struct ValidateDigits_output
+	/** Result data produced by the set platform config operation. */
+	struct SetPlatformConfig_output
 	{
-		// True when the code obeys range and uniqueness rules.
-		bit isValid;
-		// Operation result code.
-		uint8 returnCode;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Input for releasing asset share management rights from this contract.
-	 * @param asset Asset whose management rights should be moved.
-	 * @param numberOfShares Number of shares to release.
-	 * @param newManagingContractIndex Destination ownership and possession managing contract index.
-	 */
+	/** Validated data consumed by the withdraw platform revenue operation. */
+	struct WithdrawPlatformRevenue_input
+	{
+	};
+	/** Result data produced by the withdraw platform revenue operation. */
+	struct WithdrawPlatformRevenue_output
+	{
+		/** Amount successfully transferred to the first developer. */
+		uint64 developer1Paid;
+		/** Amount successfully transferred to the second developer. */
+		uint64 developer2Paid;
+		/** Amount successfully distributed to shareholders. */
+		uint64 dividendPaid;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the buy tickets operation. */
+	struct BuyTickets_input
+	{
+		/** Generation-aware ticket records shared by all games. */
+		Array<Array<uint8, PLDT_DIGITS_ALIGNED>, PLDT_MAX_BATCH_TICKETS> tickets;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Number of tickets accepted for the current request or round. */
+		uint16 ticketCount;
+	};
+	/** Result data produced by the buy tickets operation. */
+	struct BuyTickets_output
+	{
+		/** Generation-aware ids of tickets accepted by a batch purchase. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIds;
+		/** Compatibility ticket slots accepted by a batch purchase. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIndexes;
+		/** Number of tickets committed by the batch request. */
+		uint16 acceptedCount;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the get player tickets operation. */
+	struct GetPlayerTickets_input
+	{
+		/** Entity that owns the ticket or is evaluated for bonus eligibility. */
+		id player;
+		/** Game and round pair used to identify immutable result history. */
+		RoundKey roundKey;
+		/** Zero-based number of matching records to skip. */
+		uint64 offset;
+		/** Maximum number of records requested in the response page. */
+		uint16 limit;
+	};
+	/** Result data produced by the get player tickets operation. */
+	struct GetPlayerTickets_output
+	{
+		/** Generation-aware ids of tickets accepted by a batch purchase. */
+		Array<uint64, 256> ticketIds;
+		/** Compatibility ticket slots accepted by a batch purchase. */
+		Array<uint64, 256> ticketIndexes;
+		/** Aggregate count accumulated across the current operation. */
+		uint64 totalCount;
+		/** Number of valid records written into the paged response. */
+		uint16 returnedCount;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the get games operation. */
+	struct GetGames_input
+	{
+		/** Zero-based number of matching records to skip. */
+		uint16 offset;
+		/** Maximum number of records requested in the response page. */
+		uint16 limit;
+	};
+	/** Result data produced by the get games operation. */
+	struct GetGames_output
+	{
+		/** Page of generation-aware game identifiers returned to the caller. */
+		Array<uint64, 64> gameIds;
+		/** Total active records observed while scanning bounded storage. */
+		uint16 totalActive;
+		/** Number of valid records written into the paged response. */
+		uint16 returnedCount;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the get winners operation. */
+	struct GetWinners_input
+	{
+		/** Game and round pair used to identify immutable result history. */
+		RoundKey roundKey;
+		/** Zero-based number of matching records to skip. */
+		uint64 offset;
+		/** Maximum number of records requested in the response page. */
+		uint16 limit;
+	};
+	/** Result data produced by the get winners operation. */
+	struct GetWinners_output
+	{
+		/** Generation-aware ids of tickets accepted by a batch purchase. */
+		Array<uint64, 256> ticketIds;
+		/** Compatibility ticket slots accepted by a batch purchase. */
+		Array<uint64, 256> ticketIndexes;
+		/** Aggregate count accumulated across the current operation. */
+		uint64 totalCount;
+		/** Number of valid records written into the paged response. */
+		uint16 returnedCount;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Validated data consumed by the transfer share management rights operation. */
 	struct TransferShareManagementRights_input
 	{
-		// Asset whose management rights should be moved.
+		/** Asset issuance whose shares are inspected or transferred. */
 		Asset asset;
-		// Number of shares to release.
+		/** Managed asset shares requested for rights transfer. */
 		sint64 numberOfShares;
-		// Destination ownership and possession managing contract index.
-		uint32 newManagingContractIndex;
+		/** Contract index that should receive share-management rights. */
+		uint16 newManagingContractIndex;
 	};
-
-	/**
-	 * @brief Output from share-management-rights release.
-	 * @param transferredNumberOfShares Number of shares released, or zero on failure.
-	 */
+	/** Result data produced by the transfer share management rights operation. */
 	struct TransferShareManagementRights_output
 	{
-		// Number of shares released, or zero on failure.
-		sint64 transferredNumberOfShares;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
 	};
 
-	/**
-	 * @brief Local state used while releasing asset management rights.
-	 */
-	struct TransferShareManagementRights_locals
+	/** Validated data consumed by the withdraw asset platform revenue operation. */
+	struct WithdrawAssetPlatformRevenue_input
 	{
-		TransferShareManagementRightsLog logger;
-		sint64 result;
-		sint64 possessedShares;
-		sint64 reward;
-		sint64 refundAmount;
-		bit success;
+		/** Asset issuance whose shares are inspected or transferred. */
+		Asset asset;
+		/** Contract index required to manage currency-asset ownership records. */
+		uint16 ownershipManagingContractIndex;
+		/** Contract index required to manage currency-asset possession records. */
+		uint16 possessionManagingContractIndex;
+	};
+	/** Result data produced by the withdraw asset platform revenue operation. */
+	struct WithdrawAssetPlatformRevenue_output
+	{
+		/** Amount successfully transferred to the first developer. */
+		uint64 developer1Paid;
+		/** Amount successfully transferred to the second developer. */
+		uint64 developer2Paid;
+		/** Amount successfully distributed to shareholders. */
+		uint64 dividendPaid;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** Validated data consumed by the transfer asset dividend operation. */
+	struct TransferAssetDividend_input
+	{
+		/** Asset issuance distributed proportionally to PLDT shareholders. */
+		Asset dividendAsset;
+		/** Asset units available for proportional shareholder distribution. */
+		uint64 dividendAmount;
+	};
+	/** Result data produced by the transfer asset dividend operation. */
+	struct TransferAssetDividend_output
+	{
+		/** Asset units already transferred during proportional shareholder distribution. */
+		uint64 distributedAmount;
+		/** Whether any resumable transfer attempted in this operation failed. */
+		bit failed;
+	};
+	/** QPI scratch state for transfer asset dividend; contract routines cannot declare stack locals. */
+	struct TransferAssetDividend_locals
+	{
+		/** Iterator state for bounded PLDT shareholder distribution. */
+		AssetPossessionIterator shareholdersIter;
+		/** Contract-share asset whose holders receive asset dividends. */
+		Asset shareholdersAsset;
+		/** Cumulative prize amount that should be allocated at this step. */
+		uint64 targetDistribution;
+		/** Whole currency units still unallocated after integer division. */
+		uint64 remainder;
+		/** Unassigned asset units after whole-share distribution. */
+		uint64 holderRemainder;
+		/** Whole asset units assigned per held PLDT share. */
+		sint64 dividendPerShare;
+		/** PLDT shares possessed by the current shareholder. */
+		sint64 holderShares;
+		/** Asset units assigned to the current PLDT shareholder. */
+		sint64 holderDividend;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+	};
+	/** QPI scratch state for withdraw asset platform revenue; contract routines cannot declare stack locals. */
+	struct WithdrawAssetPlatformRevenue_locals
+	{
+		/** Request passed to the dividend helper. */
+		TransferAssetDividend_input dividendInput;
+		/** Response returned by the dividend helper. */
+		TransferAssetDividend_output dividendOutput;
+		/** Working copy of one asset platform-accrual bucket. */
+		AssetPlatformAccounting accounting;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Whether the requested record was found during bounded lookup. */
+		bit found;
+		/** Whether any resumable transfer attempted in this operation failed. */
+		bit failed;
 	};
 
-	/**
-	 * @brief Input for internal exact/misplaced match counting.
-	 * @param playerDigits Player code.
-	 * @param winningDigits Generated winning code.
-	 * @param codeLength Number of positions to compare.
-	 */
+	/** Validated data consumed by the count matches operation. */
 	struct CountMatches_input
 	{
-		// Player-submitted code.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> playerDigits;
-		// Generated winning code.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> winningDigits;
-		// Number of leading positions to compare.
+		/** Working copy of the player's submitted code. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> playerDigits;
+		/** Deterministically generated code used to settle the round. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> winningDigits;
+		/** Number of meaningful digits in every code for this game. */
 		uint8 codeLength;
 	};
-
-	/**
-	 * @brief Output from internal match counting.
-	 * @param payoutMatrixIndex Linear payout matrix index for `(exact, misplaced)`.
-	 * @param exact Number of position-correct digits.
-	 * @param misplaced Number of value-correct but position-wrong digits.
-	 */
+	/** Result data produced by the count matches operation. */
 	struct CountMatches_output
 	{
-		// Linear payout matrix index for `(exact, misplaced)`.
-		uint16 payoutMatrixIndex;
-		// Number of position-correct digits.
+		/** Compact exact/misplaced match-tier index for a ticket. */
+		uint16 tierIndex;
+		/** Digits that match the winning code in both value and position. */
 		uint8 exact;
-		// Number of value-correct but position-wrong digits.
+		/** Winning digit values found in a different position. */
 		uint8 misplaced;
 	};
-
-	/**
-	 * @brief Input for deterministic winning-code generation.
-	 * @param seed K12-derived round seed.
-	 * @param codeLength Number of digits to generate.
-	 * @param maxDigit Maximum generated digit value.
-	 * @param allowRepeatedDigits Whether generated digits may repeat.
-	 */
-	struct GenerateWinningDigits_input
-	{
-		// K12-derived deterministic round seed.
-		uint64 seed;
-		// Number of digits to generate.
-		uint8 codeLength;
-		// Maximum generated digit value.
-		uint8 maxDigit;
-		// Whether generated digits may repeat.
-		bit allowRepeatedDigits;
-	};
-
-	/**
-	 * @brief Output from deterministic winning-code generation.
-	 * @param digits Generated winning digits in QPI-aligned storage.
-	 */
-	struct GenerateWinningDigits_output
-	{
-		// Generated winning digits in QPI-aligned storage.
-		Array<uint8, PULSEEDITOR_DIGITS_ALIGNED> digits;
-	};
-
-	/**
-	 * @brief Internal input for settling one just-purchased instant ticket.
-	 * @param ticketIndex Global ticket index to settle.
-	 * @param templateId Template that accepted the ticket.
-	 */
-	struct SettleInstantTicket_input
-	{
-		// Global ticket index to settle.
-		uint64 ticketIndex;
-		// Template that accepted the ticket.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Internal output from instant-ticket settlement.
-	 * @param returnCode `SUCCESS` or the internal settlement blocker.
-	 */
-	struct SettleInstantTicket_output
-	{
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Internal input for distributing asset dividends to shareholders.
-	 * @param dividendAsset Asset being distributed as dividends.
-	 * @param shareholdersAsset Contract-share asset used to enumerate holders.
-	 * @param dividendAmount Total dividend asset shares available for distribution.
-	 * @param shareholdersTotalShares Total shareholder supply used for per-share division.
-	 */
-	struct TransferAssetDividendToShareholders_input
-	{
-		// Asset being distributed as dividends.
-		Asset dividendAsset;
-		// Contract-share asset used to enumerate holders.
-		Asset shareholdersAsset;
-		// Total dividend asset shares available for distribution.
-		sint64 dividendAmount;
-		// Total shareholder supply used for per-share division.
-		sint64 shareholdersTotalShares;
-	};
-
-	/**
-	 * @brief Internal output from asset dividend distribution.
-	 * @param distributedAmount Asset shares actually distributed to shareholders.
-	 */
-	struct TransferAssetDividendToShareholders_output
-	{
-		// Asset shares actually distributed to shareholders.
-		uint64 distributedAmount;
-	};
-
-	/**
-	 * @brief Internal input for deleting an idle template.
-	 * @param templateId Template whose local balances should be refunded before clearing storage.
-	 */
-	struct DeleteIdleTemplate_input
-	{
-		// Template whose local balances should be refunded before clearing storage.
-		uint16 templateId;
-	};
-
-	/**
-	 * @brief Internal output from idle-template deletion.
-	 * @param qubicRefund Qubic amount returned to the template owner.
-	 * @param assetRefund Asset shares returned to the template owner.
-	 * @param returnCode `SUCCESS` or the deletion blocker.
-	 */
-	struct DeleteIdleTemplate_output
-	{
-		// Qubic amount returned to the template owner.
-		uint64 qubicRefund;
-		// Asset shares returned to the template owner.
-		uint64 assetRefund;
-		// Operation result code.
-		uint8 returnCode;
-	};
-
-	/**
-	 * @brief Empty input for the throttled lifecycle automation pass.
-	 */
-	struct ProcessLifecycleAutomation_input
-	{
-	};
-
-	/**
-	 * @brief Output counters from one lifecycle automation pass.
-	 * @param inspectedTemplates Number of template slots checked in this pass.
-	 * @param lifecycleActions Number of settle/start actions attempted in this pass.
-	 */
-	struct ProcessLifecycleAutomation_output
-	{
-		// Number of template slots checked in this pass.
-		uint16 inspectedTemplates;
-		// Number of settle/start/delete actions attempted in this pass.
-		uint16 lifecycleActions;
-	};
-
-	/**
-	 * @brief Scratch storage for digit validation.
-	 */
-	struct ValidateDigits_locals
-	{
-		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> seen;
-		uint64 i;
-		uint8 digit;
-		uint8 count;
-	};
-
-	/**
-	 * @brief Scratch storage for exact and misplaced match counting.
-	 */
+	/** QPI scratch state for count matches; contract routines cannot declare stack locals. */
 	struct CountMatches_locals
 	{
-		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> playerCounts;
-		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> winningCounts;
+		/** Per-player ticket counts used during settlement accounting. */
+		Array<uint8, PLDT_DIGIT_BUCKETS> playerCounts;
+		/** Per-tier winner counts used to divide the prize pool. */
+		Array<uint8, PLDT_DIGIT_BUCKETS> winningCounts;
+		/** Loop cursor for the bounded collection being processed. */
 		uint64 i;
+		/** Current submitted digit being compared. */
 		uint8 playerDigit;
+		/** Current winning digit being compared. */
 		uint8 winningDigit;
+		/** Number of distinct players represented in the round. */
 		uint8 playerCount;
+		/** Number of matching digits classified for one ticket. */
 		uint8 winningCount;
 	};
 
-	/**
-	 * @brief Scratch storage for deterministic winning digit generation.
-	 */
+	/** Validated data consumed by the generate winning digits operation. */
+	struct GenerateWinningDigits_input
+	{
+		/** Deterministic hash-derived seed used to generate winning digits. */
+		uint64 seed;
+		/** Number of meaningful digits in every code for this game. */
+		uint8 codeLength;
+		/** Largest permitted digit value, inclusive. */
+		uint8 maxDigit;
+		/** Whether a code may contain the same digit more than once. */
+		bit allowRepeatedDigits;
+	};
+	/** Result data produced by the generate winning digits operation. */
+	struct GenerateWinningDigits_output
+	{
+		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+	};
+	/** QPI scratch state for generate winning digits; contract routines cannot declare stack locals. */
 	struct GenerateWinningDigits_locals
 	{
-		Array<uint8, PULSEEDITOR_DIGIT_BUCKETS> used;
+		/** Presence table marking digits already selected or matched. */
+		Array<uint8, PLDT_DIGIT_BUCKETS> used;
+		/** Candidate digit or scalar value being validated. */
+		uint64 value;
+		/** Current zero-based storage or array position. */
 		uint64 index;
-		uint64 tempValue;
-		uint8 candidate;
+		/** Collision retries consumed while generating a unique digit. */
 		uint8 attempts;
+		/** Candidate winning digit before uniqueness is confirmed. */
+		uint8 candidate;
+		/** Deterministic replacement digit used after retry exhaustion. */
 		uint8 fallback;
 	};
 
-	/**
-	 * @brief Local state used while creating a template.
-	 */
-	struct CreateTemplate_locals
+	/** QPI scratch state for validate digits; contract routines cannot declare stack locals. */
+	struct ValidateDigits_locals
 	{
-		GameTemplate gameTemplate;
-		CreateTemplateLog logger;
+		/** Presence table used to reject repeated submitted digits. */
+		Array<uint8, PLDT_DIGIT_BUCKETS> seen;
+		/** Loop cursor for the bounded collection being processed. */
 		uint64 i;
-		uint16 templateId;
-		uint64 payout;
+		/** Current digit being validated or inserted into a presence table. */
+		uint8 digit;
 	};
 
-	/**
-	 * @brief Local state used while updating a template.
-	 */
-	struct UpdateTemplate_locals
+	/** Validated data consumed by the calculate ticket economics operation. */
+	struct CalculateTicketEconomics_input
 	{
-		GameTemplate gameTemplate;
-		Round round;
-		UpdateTemplateLog logger;
-		uint64 i;
-		uint64 payout;
+		/** Price of one ticket in Qubic or configured asset shares. */
+		uint64 ticketPrice;
+		/** Ticket-price percentage reserved for the game creator. */
+		uint8 creatorFeePercent;
+		/** Ticket-price percentage reserved for platform recipients. */
+		uint8 platformFeePercent;
 	};
-
-	/**
-	 * @brief Local state used while depositing Qubic prize reserve.
-	 */
-	struct DepositPrizeReserve_locals
+	/** Result data produced by the calculate ticket economics operation. */
+	struct CalculateTicketEconomics_output
 	{
-		GameTemplate gameTemplate;
-		DepositPrizeReserveLog logger;
-		uint64 depositAmount;
-	};
-
-	/**
-	 * @brief Local state used while depositing Qubic bonus reserve.
-	 */
-	struct DepositBonusReserve_locals
-	{
-		GameTemplate gameTemplate;
-		DepositBonusReserveLog logger;
-		uint64 depositAmount;
-	};
-
-	/**
-	 * @brief Local state used while depositing asset reserve shares.
-	 */
-	struct DepositAssetReserve_locals
-	{
-		GameTemplate gameTemplate;
-		DepositAssetReserveLog logger;
-		sint64 transferResult;
-		sint64 possessedShares;
-	};
-
-	/**
-	 * @brief Local state used while publishing a template.
-	 */
-	struct PublishTemplate_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-		PublishTemplateLog logger;
-	};
-
-	/**
-	 * @brief Local state used while buying one ticket.
-	 */
-	struct BuyTicket_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-		Ticket ticket;
-		SettleInstantTicket_input settleInput;
-		SettleInstantTicket_output settleOutput;
-		ValidateDigits_input validateInput;
-		ValidateDigits_output validateOutput;
-		BuyTicketLog logger;
-		uint64 i;
+		/** Per-ticket amount split between developers and shareholders. */
 		uint64 platformFee;
-		uint64 dev1Amount;
-		uint64 dev2Amount;
-		uint64 dividendAmount;
-		uint64 netRevenue;
-		uint64 creatorAmount;
-		uint64 burnAmount;
-		uint64 prizeAmount;
-		uint64 reward;
-		sint64 transferResult;
-		sint64 possessedShares;
-		uint16 playerTicketCount;
+		/** Ticket price remaining after creator, platform, and burn deductions. */
+		uint64 net;
+		/** Per-ticket amount accrued to the game creator. */
+		uint64 creatorFee;
+		/** Per-ticket amount removed from circulation. */
+		uint64 burn;
+		/** Per-ticket amount added to the winner prize pool. */
+		uint64 prizeContribution;
+		/** Amount accrued to the first platform developer. */
+		uint64 developer1Fee;
+		/** Amount accrued to the second platform developer. */
+		uint64 developer2Fee;
+		/** Amount accrued for PLDT shareholder distribution. */
+		uint64 dividendFee;
 	};
 
-	/**
-	 * @brief Local state used while buying a batch of tickets.
-	 */
-	struct BuyTickets_locals
+	/** Validated data consumed by the evaluate bonus qualification operation. */
+	struct EvaluateBonusQualification_input
 	{
-		GameTemplate gameTemplate;
-		Round round;
-		Ticket ticket;
-		SettleInstantTicket_input settleInput;
-		SettleInstantTicket_output settleOutput;
-		ValidateDigits_input validateInput;
-		ValidateDigits_output validateOutput;
-		BuyTicketsLog logger;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Entity that owns the ticket or is evaluated for bonus eligibility. */
+		id player;
+	};
+	/** Result data produced by the evaluate bonus qualification operation. */
+	struct EvaluateBonusQualification_output
+	{
+		/** Whether the player's holdings satisfy any configured bonus asset. */
+		bit qualified;
+	};
+	/** QPI scratch state for evaluate bonus qualification; contract routines cannot declare stack locals. */
+	struct EvaluateBonusQualification_locals
+	{
+		/** Loop cursor for the bounded collection being processed. */
 		uint64 i;
-		uint64 j;
-		uint64 platformFee;
-		uint64 dev1Amount;
-		uint64 dev2Amount;
-		uint64 dividendAmount;
-		uint64 netRevenue;
-		uint64 creatorAmount;
-		uint64 burnAmount;
-		uint64 prizeAmount;
-		uint64 totalPrice;
-		uint64 reward;
-		sint64 transferResult;
+		/** Managed asset shares currently possessed by the inspected entity. */
 		sint64 possessedShares;
-		uint16 playerTicketCount;
 	};
 
-	/**
-	 * @brief Entropy input used for round settlement randomness.
-	 */
-	struct SettleRound_randomData
+	/** Validated data consumed by the evaluate game lifecycle operation. */
+	struct EvaluateGameLifecycle_input
 	{
-		m256i prevSpectrumDigest;
-		uint32 roundId;
-		uint16 templateId;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Current UTC time obtained from QPI for lifecycle decisions. */
+		DateAndTime now;
+	};
+	/** Result data produced by the evaluate game lifecycle operation. */
+	struct EvaluateGameLifecycle_output
+	{
+		/** Time-adjusted status used by read and purchase paths. */
+		EGameStatus effectiveStatus;
+		/** Lifecycle transition selected without mutating state. */
+		EGameLifecycleAction action;
+		/** Purchase-specific outcome produced by lifecycle evaluation. */
+		EReturnCode purchaseReturnCode;
+		/** Whether the owner may cancel before the first sales window. */
+		bit canCancel;
+	};
+
+	/** QPI scratch state for preview game; contract routines cannot declare stack locals. */
+	struct PreviewGame_locals
+	{
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Latest UTC draw allowed by the scheduling horizon. */
+		DateAndTime maxDrawAt;
+		/** Sum of configured tier weights used to enforce exactly 10000 basis points. */
+		uint64 weightTotal;
+		/** Creator plus prize amount that may need terminal return per ticket. */
+		uint64 refundablePerTicket;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** Game-currency shares currently managed by PulseEditor. */
+		sint64 managedCurrencyShares;
+		/** Digits that match the winning code in both value and position. */
+		uint8 exact;
+		/** Winning digit values found in a different position. */
+		uint8 misplaced;
+	};
+
+	/** Validated data consumed by the refund invocation reward operation. */
+	struct RefundInvocationReward_input
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** Result data produced by the refund invocation reward operation. */
+	struct RefundInvocationReward_output
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** Validated data consumed by the transfer game currency operation. */
+	struct TransferGameCurrency_input
+	{
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Entity that receives the requested transfer. */
+		id destination;
+		/** Currency quantity requested for the current transfer. */
+		uint64 amount;
+	};
+	/** Result data produced by the transfer game currency operation. */
+	struct TransferGameCurrency_output
+	{
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+	};
+	/** Validated data consumed by the burn collected ticket payment operation. */
+	struct BurnCollectedTicketPayment_input
+	{
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Number of tickets accepted for the current request or round. */
 		uint16 ticketCount;
 	};
-
-	/**
-	 * @brief Local state used while settling a non-instant round.
-	 */
-	struct SettleRound_locals
+	/** Result data produced by the burn collected ticket payment operation. */
+	struct BurnCollectedTicketPayment_output
 	{
-		SettleRound_randomData randomData;
-		GameTemplate gameTemplate;
-		Round round;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for burn collected ticket payment; contract routines cannot declare stack locals. */
+	struct BurnCollectedTicketPayment_locals
+	{
+		/** Request passed to the transfer helper. */
+		TransferGameCurrency_input transferInput;
+		/** Response returned by the transfer helper. */
+		TransferGameCurrency_output transferOutput;
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Aggregate burn amount for all tickets in the accepted purchase. */
+		uint64 totalBurn;
+	};
+
+	/** Validated data consumed by the apply accepted ticket operation. */
+	struct ApplyAcceptedTicket_input
+	{
+		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** Whether this ticket receives the configured bonus winner weight. */
+		bit bonusQualified;
+	};
+	/** Result data produced by the apply accepted ticket operation. */
+	struct ApplyAcceptedTicket_output
+	{
+		/** Generation-aware identifier of a ticket slot. */
+		uint64 ticketId;
+		/** Compatibility zero-based ticket slot returned to legacy clients. */
+		uint64 ticketIndex;
+		/** Per-ticket amount added to the winner prize pool. */
+		uint64 prizeContribution;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for apply accepted ticket; contract routines cannot declare stack locals. */
+	struct ApplyAcceptedTicket_locals
+	{
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Working copy of the game currency asset's accrual bucket. */
+		AssetPlatformAccounting assetAccounting;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Ticket record inspected before linking a newly accepted ticket. */
+		Ticket previousTicket;
+		/** Working copy or returned snapshot of a ticket record. */
 		Ticket ticket;
-		WinnerInfo winnerInfo;
-		GenerateWinningDigits_input generateInput;
-		GenerateWinningDigits_output generateOutput;
-		CountMatches_input countInput;
-		CountMatches_output countOutput;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Zero-based ticket slot extracted from a ticket id or reclaim cursor. */
+		uint64 ticketSlot;
+		/** Generation counter preventing stale ticket ids from aliasing reused slots. */
+		uint64 ticketGeneration;
+	};
+
+	/** QPI scratch state for create game; contract routines cannot declare stack locals. */
+	struct CreateGame_locals
+	{
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Request passed to the preview helper. */
+		PreviewGame_input previewInput;
+		/** Response returned by the preview helper. */
+		PreviewGame_output previewOutput;
+		/** Working copy of the game currency asset's accrual bucket. */
+		AssetPlatformAccounting assetAccounting;
+		/** Latest UTC draw allowed by the scheduling horizon. */
+		DateAndTime maxDrawAt;
+		/** Generation counter preventing stale game ids from aliasing reused slots. */
+		uint64 generation;
+		/** Exact Qubic invocation reward required by the operation. */
+		uint64 expectedReward;
+		/** Amount accrued to the first platform developer. */
+		uint64 developer1Fee;
+		/** Amount accrued to the second platform developer. */
+		uint64 developer2Fee;
+		/** Amount accrued for PLDT shareholder distribution. */
+		uint64 dividendFee;
+		/** Loop cursor for the bounded collection being processed. */
 		uint64 i;
-		uint64 winnerIndex;
-		uint64 payout;
-		uint64 bonusPayout;
-		uint64 totalPayout;
-		uint64 seed;
-		sint64 bonusShares;
-		sint64 transferResult;
-		uint16 bonusAssetIndex;
-		bit bonusQualified;
-	};
-
-	/**
-	 * @brief Local state used while settling one instant ticket.
-	 */
-	struct SettleInstantTicket_locals
-	{
-		SettleRound_randomData randomData;
-		GameTemplate gameTemplate;
-		Round round;
-		Ticket ticket;
-		WinnerInfo winnerInfo;
-		GenerateWinningDigits_input generateInput;
-		GenerateWinningDigits_output generateOutput;
-		CountMatches_input countInput;
-		CountMatches_output countOutput;
-		uint64 winnerIndex;
-		uint64 payout;
-		uint64 bonusPayout;
-		uint64 totalPayout;
-		uint64 seed;
-		sint64 bonusShares;
-		sint64 transferResult;
-		uint16 bonusAssetIndex;
-		bit bonusQualified;
-	};
-
-	/**
-	 * @brief Local state used while iterating shareholder asset holders.
-	 */
-	struct TransferAssetDividendToShareholders_locals
-	{
-		AssetPossessionIterator shareholdersIter;
-		sint64 dividendPerShare;
-		sint64 holderShares;
-		sint64 holderDividend;
-		sint64 transferResult;
-	};
-
-	/**
-	 * @brief Local state used while requesting graceful template shutdown.
-	 */
-	struct RequestStop_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-		RequestStopLog logger;
-	};
-
-	/**
-	 * @brief Local state used while withdrawing creator revenue.
-	 */
-	struct WithdrawCreatorRevenue_locals
-	{
-		GameTemplate gameTemplate;
-		WithdrawCreatorRevenueLog logger;
-		uint64 amount;
-		sint64 transferResult;
-	};
-
-	/**
-	 * @brief Local state used while withdrawing asset-denominated platform revenue.
-	 */
-	struct WithdrawAssetPlatformRevenue_locals
-	{
-		GameTemplate gameTemplate;
-		TransferAssetDividendToShareholders_input transferInput;
-		TransferAssetDividendToShareholders_output transferOutput;
-		WithdrawAssetPlatformRevenueLog logger;
-		uint64 developer1Amount;
-		uint64 developer2Amount;
-		uint64 dividendAmount;
-		uint64 totalAmount;
-		sint64 transferResult;
+		/** Managed asset shares currently possessed by the inspected entity. */
 		sint64 possessedShares;
-	};
-
-	/**
-	 * @brief Local state used while withdrawing Qubic-denominated platform revenue.
-	 */
-	struct WithdrawPlatformRevenue_locals
-	{
-		WithdrawPlatformRevenueLog logger;
-		uint64 developer1Amount;
-		uint64 developer2Amount;
-		uint64 dividendAmount;
-		uint64 dividendPerShare;
-	};
-
-	/** @brief Local state used while updating platform configuration. */
-	struct SetPlatformConfig_locals
-	{
-		SetPlatformConfigLog logger;
-	};
-
-	/**
-	 * @brief Local state used while opening the next automated round.
-	 */
-	struct StartNextRound_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-	};
-
-	/**
-	 * @brief Local state used by the throttled tick automation pass.
-	 */
-	struct ProcessLifecycleAutomation_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-		SettleRound_input settleInput;
-		SettleRound_output settleOutput;
-		StartNextRound_input startInput;
-		StartNextRound_output startOutput;
-		DeleteIdleTemplate_input deleteInput;
-		DeleteIdleTemplate_output deleteOutput;
-		uint64 i;
-		uint64 templateIndex;
-		uint64 templatesToInspect;
-	};
-
-	/**
-	 * @brief Local state used while deleting an idle template.
-	 */
-	struct DeleteIdleTemplate_locals
-	{
-		GameTemplate gameTemplate;
-		Round round;
-		uint64 qubicRefund;
-		uint64 assetRefund;
+		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Potential free slot being checked before allocation. */
+		uint16 candidateSlot;
+		/** Zero-based asset accounting slot selected for the game. */
+		uint16 accountingSlot;
+		/** Per-owner count used to enforce the active-game limit. */
+		uint16 creatorActiveGames;
+		/** Whether the requested record was found during bounded lookup. */
+		bit found;
+		/** Whether an existing asset accrual bucket matched the currency tuple. */
+		bit accountingFound;
 	};
 
-	/**
-	 * @brief Local state used by `BEGIN_TICK_WITH_LOCALS`.
-	 */
-	struct BEGIN_TICK_locals
+	/** QPI scratch state for fund game; contract routines cannot declare stack locals. */
+	struct FundGame_locals
 	{
-		ProcessLifecycleAutomation_input automationInput;
-		ProcessLifecycleAutomation_output automationOutput;
-		uint32 currentDateStamp;
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Exact Qubic invocation reward required by the operation. */
+		uint64 expectedReward;
+		/** Managed asset shares currently possessed by the inspected entity. */
+		sint64 possessedShares;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
 	};
 
-	/**
-	 * @brief Local state used while reading the winner-history ring buffer.
-	 */
-	struct GetWinners_locals
+	/** QPI scratch state for withdraw game balance; contract routines cannot declare stack locals. */
+	struct WithdrawGameBalance_locals
 	{
-		uint64 oldestCounter;
-		uint64 sourceCounter;
-		uint64 sourceIndex;
-		uint64 remaining;
-		uint16 requestedLimit;
-		uint16 i;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Whether any resumable transfer attempted in this operation failed. */
+		bit failed;
 	};
 
-	/**
-	 * @brief Local state used while scanning tickets for one player.
-	 */
+	/** QPI scratch state for update game economics; contract routines cannot declare stack locals. */
+	struct UpdateGameEconomics_locals
+	{
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Validated next-round economics before it is committed. */
+		GameEconomics pending;
+		/** Creator plus prize amount that may need terminal return per ticket. */
+		uint64 refundablePerTicket;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+
+	/** QPI scratch state for buy ticket; contract routines cannot declare stack locals. */
+	struct BuyTicket_locals
+	{
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
+		/** Request passed to the transfer helper. */
+		TransferGameCurrency_input transferInput;
+		/** Response returned by the transfer helper. */
+		TransferGameCurrency_output transferOutput;
+		/** Request passed to the apply helper. */
+		ApplyAcceptedTicket_input applyInput;
+		/** Response returned by the apply helper. */
+		ApplyAcceptedTicket_output applyOutput;
+		/** Request passed to the burn helper. */
+		BurnCollectedTicketPayment_input burnInput;
+		/** Response returned by the burn helper. */
+		BurnCollectedTicketPayment_output burnOutput;
+		/** Request passed to the lifecycle helper. */
+		EvaluateGameLifecycle_input lifecycleInput;
+		/** Response returned by the lifecycle helper. */
+		EvaluateGameLifecycle_output lifecycleOutput;
+		/** Request passed to the bonus helper. */
+		EvaluateBonusQualification_input bonusInput;
+		/** Response returned by the bonus helper. */
+		EvaluateBonusQualification_output bonusOutput;
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Working copy or returned snapshot of a ticket record. */
+		Ticket ticket;
+		/** Ticket record inspected before linking a newly accepted ticket. */
+		Ticket previousTicket;
+		/** Working copy of the game currency asset's accrual bucket. */
+		AssetPlatformAccounting assetAccounting;
+		/** Request passed to the validate helper. */
+		ValidateDigits_input validateInput;
+		/** Response returned by the validate helper. */
+		ValidateDigits_output validateOutput;
+		/** Current UTC time obtained from QPI for lifecycle decisions. */
+		DateAndTime now;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Tickets already owned by the invocator in this round. */
+		uint64 playerTickets;
+		/** Managed asset shares currently possessed by the inspected entity. */
+		sint64 possessedShares;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+
+	/** QPI scratch state for buy tickets; contract routines cannot declare stack locals. */
+	struct BuyTickets_locals
+	{
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
+		/** Request passed to the transfer helper. */
+		TransferGameCurrency_input transferInput;
+		/** Response returned by the transfer helper. */
+		TransferGameCurrency_output transferOutput;
+		/** Request passed to the apply helper. */
+		ApplyAcceptedTicket_input applyInput;
+		/** Response returned by the apply helper. */
+		ApplyAcceptedTicket_output applyOutput;
+		/** Request passed to the burn helper. */
+		BurnCollectedTicketPayment_input burnInput;
+		/** Response returned by the burn helper. */
+		BurnCollectedTicketPayment_output burnOutput;
+		/** Request passed to the lifecycle helper. */
+		EvaluateGameLifecycle_input lifecycleInput;
+		/** Response returned by the lifecycle helper. */
+		EvaluateGameLifecycle_output lifecycleOutput;
+		/** Request passed to the bonus helper. */
+		EvaluateBonusQualification_input bonusInput;
+		/** Response returned by the bonus helper. */
+		EvaluateBonusQualification_output bonusOutput;
+		/** Request passed to the economics helper. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Response returned by the economics helper. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Request passed to the validate helper. */
+		ValidateDigits_input validateInput;
+		/** Response returned by the validate helper. */
+		ValidateDigits_output validateOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Working copy or returned snapshot of a ticket record. */
+		Ticket ticket;
+		/** Working copy of the game currency asset's accrual bucket. */
+		AssetPlatformAccounting assetAccounting;
+		/** Current UTC time obtained from QPI for lifecycle decisions. */
+		DateAndTime now;
+		/** Gross price of all tickets in the batch. */
+		uint64 totalPrice;
+		/** Amount accrued to the first platform developer. */
+		uint64 developer1Fee;
+		/** Amount accrued to the second platform developer. */
+		uint64 developer2Fee;
+		/** Amount accrued for PLDT shareholder distribution. */
+		uint64 dividendFee;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Tickets already owned by the invocator in this round. */
+		uint64 playerTickets;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** Managed asset shares currently possessed by the inspected entity. */
+		sint64 possessedShares;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+
+	/** Validated data consumed by the finalize game operation. */
+	struct FinalizeGame_input
+	{
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Requested terminal outcome passed to finalization. */
+		EGameTerminalReason reason;
+	};
+	/** Result data produced by the finalize game operation. */
+	struct FinalizeGame_output
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for stop game; contract routines cannot declare stack locals. */
+	struct StopGame_locals
+	{
+		/** Request passed to the finalize helper. */
+		FinalizeGame_input finalizeInput;
+		/** Response returned by the finalize helper. */
+		FinalizeGame_output finalizeOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+	/** Validated data consumed by the clear game slot operation. */
+	struct ClearGameSlot_input
+	{
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+	/** Result data produced by the clear game slot operation. */
+	struct ClearGameSlot_output
+	{
+	};
+
+	/** QPI scratch state for get game; contract routines cannot declare stack locals. */
+	struct GetGame_locals
+	{
+		/** Request passed to the lifecycle helper. */
+		EvaluateGameLifecycle_input lifecycleInput;
+		/** Response returned by the lifecycle helper. */
+		EvaluateGameLifecycle_output lifecycleOutput;
+	};
+
+	/** QPI scratch state for get round result; contract routines cannot declare stack locals. */
+	struct GetRoundResult_locals
+	{
+		/** Working copy or returned snapshot of a round result. */
+		GameResult result;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
+		/** Whether the inspected result slot contains a published result. */
+		uint64 available;
+		/** Bounded scan counter for the current collection. */
+		uint64 counter;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** Whether any history entry for the requested game was observed. */
+		bit foundGame;
+	};
+
+	/** Validated data consumed by the find game ticket list operation. */
+	struct FindGameTicketList_input
+	{
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
+	};
+	/** Result data produced by the find game ticket list operation. */
+	struct FindGameTicketList_output
+	{
+		/** One-based link to the first ticket in this round's chain. */
+		uint64 firstTicketLink;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for find game ticket list; contract routines cannot declare stack locals. */
+	struct FindGameTicketList_locals
+	{
+		/** Working copy or returned snapshot of a round result. */
+		GameResult result;
+		/** Whether the inspected result slot contains a published result. */
+		uint64 available;
+		/** Bounded scan counter for the current collection. */
+		uint64 counter;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** Whether any history entry for the requested game was observed. */
+		bit foundGame;
+	};
+
+	/** QPI scratch state for get player tickets; contract routines cannot declare stack locals. */
 	struct GetPlayerTickets_locals
 	{
+		/** Request passed to the find helper. */
+		FindGameTicketList_input findInput;
+		/** Response returned by the find helper. */
+		FindGameTicketList_output findOutput;
+		/** Working copy or returned snapshot of a ticket record. */
 		Ticket ticket;
-		uint64 i;
-		uint64 matchedCount;
-		uint16 requestedLimit;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Number of matching records skipped to satisfy pagination offset. */
+		uint64 skipped;
 	};
 
-	/**
-	 * @brief Local state used while evaluating template readiness.
-	 */
-	struct GetTemplateReadiness_locals
+	/** QPI scratch state for get winners; contract routines cannot declare stack locals. */
+	struct GetWinners_locals
 	{
-		GameTemplate gameTemplate;
-		Round round;
+		/** Request passed to the find helper. */
+		FindGameTicketList_input findInput;
+		/** Response returned by the find helper. */
+		FindGameTicketList_output findOutput;
+		/** Working copy or returned snapshot of a ticket record. */
+		Ticket ticket;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Number of matching records skipped to satisfy pagination offset. */
+		uint64 skipped;
 	};
 
-	/**
-	 * @brief Local state used while reading template discovery pages.
-	 */
-	struct GetTemplates_locals
+	/** QPI scratch state for get games; contract routines cannot declare stack locals. */
+	struct GetGames_locals
 	{
-		uint64 remaining;
-		uint16 requestedLimit;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Number of matching records skipped to satisfy pagination offset. */
+		uint64 skipped;
+		/** Loop cursor for the bounded collection being processed. */
 		uint16 i;
 	};
 
-	/**
-	 * @brief Registers PulseEditor public ABI procedures and functions.
-	 * @note Procedure/function indices are part of the contract ABI and must stay stable once published.
-	 */
+	/** Canonical bytes hashed to derive deterministic winning digits. */
+	struct BeginSettlement_randomData
+	{
+		/** Previous Spectrum digest anchoring deterministic round randomness. */
+		m256i prevSpectrumDigest;
+		/** Generation-aware identifier of a game slot. */
+		uint64 gameId;
+		/** One-based round sequence within a game generation. */
+		uint64 roundNumber;
+		/** Number of tickets accepted for the current request or round. */
+		uint16 ticketCount;
+	};
+	/** Validated data consumed by the begin settlement operation. */
+	struct BeginSettlement_input
+	{
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+	/** Result data produced by the begin settlement operation. */
+	struct BeginSettlement_output
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for begin settlement; contract routines cannot declare stack locals. */
+	struct BeginSettlement_locals
+	{
+		/** Canonical round context assembled before deterministic hashing. */
+		BeginSettlement_randomData randomData;
+		/** Request passed to the generate helper. */
+		GenerateWinningDigits_input generateInput;
+		/** Response returned by the generate helper. */
+		GenerateWinningDigits_output generateOutput;
+		/** Persistent settlement state for the current game slot. */
+		SettlementProgress progress;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Deterministic hash-derived seed used to generate winning digits. */
+		uint64 seed;
+	};
+
+	/** QPI scratch state for finalize game; contract routines cannot declare stack locals. */
+	struct FinalizeGame_locals
+	{
+		/** Request passed to the transfer helper. */
+		TransferGameCurrency_input transferInput;
+		/** Response returned by the transfer helper. */
+		TransferGameCurrency_output transferOutput;
+		/** Request passed to the clear helper. */
+		ClearGameSlot_input clearInput;
+		/** Response returned by the clear helper. */
+		ClearGameSlot_output clearOutput;
+		/** Persistent settlement state for the current game slot. */
+		SettlementProgress progress;
+		/** Working copy or returned snapshot of a round result. */
+		GameResult result;
+		/** Result slot that may need ticket reclamation before reuse. */
+		GameResult previousResult;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Computed UTC opening time for the next permanent round. */
+		DateAndTime nextStartAt;
+		/** Computed UTC draw time for the next permanent round. */
+		DateAndTime nextDrawAt;
+		/** Ring-buffer slot selected for a round result. */
+		uint64 resultIndex;
+		/** Amount accrued to the first platform developer. */
+		uint64 developer1Fee;
+		/** Amount accrued to the second platform developer. */
+		uint64 developer2Fee;
+		/** Amount accrued for PLDT shareholder distribution. */
+		uint64 dividendFee;
+		/** Remaining capacity in the destination bounded ledger. */
+		uint64 availableCredit;
+		/** Amount that fits in the destination bounded ledger. */
+		uint64 amountToCredit;
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+	};
+
+	/** QPI scratch state for clear game slot; contract routines cannot declare stack locals. */
+	struct ClearGameSlot_locals
+	{
+		/** Working copy of the game currency asset's accrual bucket. */
+		AssetPlatformAccounting assetAccounting;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Zeroed replacement used when releasing settlement state. */
+		SettlementProgress emptyProgress;
+		/** Zeroed replacement used when releasing a game slot. */
+		Game emptyGame;
+	};
+
+	/** Validated data consumed by the advance settlement operation. */
+	struct AdvanceSettlement_input
+	{
+		/** Maximum state-changing work allowed in this invocation. */
+		uint64 actionBudget;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+	/** Result data produced by the advance settlement operation. */
+	struct AdvanceSettlement_output
+	{
+		/** Number of bounded settlement or reclamation actions consumed. */
+		uint64 actionsUsed;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for advance settlement; contract routines cannot declare stack locals. */
+	struct AdvanceSettlement_locals
+	{
+		/** Request passed to the transfer helper. */
+		TransferGameCurrency_input transferInput;
+		/** Response returned by the transfer helper. */
+		TransferGameCurrency_output transferOutput;
+		/** Persistent settlement state for the current game slot. */
+		SettlementProgress progress;
+		/** Request passed to the match helper. */
+		CountMatches_input matchInput;
+		/** Response returned by the match helper. */
+		CountMatches_output matchOutput;
+		/** Request passed to the finalize helper. */
+		FinalizeGame_input finalizeInput;
+		/** Response returned by the finalize helper. */
+		FinalizeGame_output finalizeOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Working copy or returned snapshot of a ticket record. */
+		Ticket ticket;
+		/** Remaining actions available to the resumable operation. */
+		uint64 budget;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Aggregate count for the tier or collection currently being scanned. */
+		uint64 count;
+		/** Count of bonus-qualified winners in the current tier. */
+		uint64 bonusCount;
+		/** Sum of normal and bonus winner weights in the current tier. */
+		uint64 totalWeight;
+		/** Prize amount assigned to the tier currently being processed. */
+		uint64 tierPool;
+		/** Sum of integer payout floors before remainder distribution. */
+		uint64 floorSum;
+		/** Whole currency units still unallocated after integer division. */
+		uint64 remainder;
+		/** Current candidate's division remainder for deterministic tie-breaking. */
+		uint64 fraction;
+		/** Largest unallocated fractional remainder found in the current pass. */
+		uint64 bestFraction;
+		/** Currency amount assigned or transferred to the current ticket. */
+		uint64 payout;
+		/** Loop cursor for the bounded collection being processed. */
+		uint64 i;
+		/** Tier selected to receive the next rounding unit. */
+		uint16 bestTier;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+		/** Whether an eligible tier was found for a rounding unit. */
+		bit foundTier;
+	};
+
+	/** Validated data consumed by the process game operation. */
+	struct ProcessGame_input
+	{
+		/** Maximum state-changing work allowed in this invocation. */
+		uint64 actionBudget;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+	/** Result data produced by the process game operation. */
+	struct ProcessGame_output
+	{
+		/** Number of bounded settlement or reclamation actions consumed. */
+		uint64 actionsUsed;
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+	/** QPI scratch state for process game; contract routines cannot declare stack locals. */
+	struct ProcessGame_locals
+	{
+		/** Request passed to the lifecycle helper. */
+		EvaluateGameLifecycle_input lifecycleInput;
+		/** Response returned by the lifecycle helper. */
+		EvaluateGameLifecycle_output lifecycleOutput;
+		/** Request passed to the begin helper. */
+		BeginSettlement_input beginInput;
+		/** Response returned by the begin helper. */
+		BeginSettlement_output beginOutput;
+		/** Request passed to the advance helper. */
+		AdvanceSettlement_input advanceInput;
+		/** Response returned by the advance helper. */
+		AdvanceSettlement_output advanceOutput;
+		/** Request passed to the finalize helper. */
+		FinalizeGame_input finalizeInput;
+		/** Response returned by the finalize helper. */
+		FinalizeGame_output finalizeOutput;
+		/** Working copy or returned snapshot of a game record. */
+		Game game;
+		/** Current UTC time obtained from QPI for lifecycle decisions. */
+		DateAndTime now;
+	};
+	/** Validated data consumed by the reclaim completed tickets operation. */
+	struct ReclaimCompletedTickets_input
+	{
+		/** Maximum state-changing work allowed in this invocation. */
+		uint64 actionBudget;
+	};
+	/** Result data produced by the reclaim completed tickets operation. */
+	struct ReclaimCompletedTickets_output
+	{
+		/** Number of bounded settlement or reclamation actions consumed. */
+		uint64 actionsUsed;
+	};
+	/** QPI scratch state for reclaim completed tickets; contract routines cannot declare stack locals. */
+	struct ReclaimCompletedTickets_locals
+	{
+		/** Working copy or returned snapshot of a round result. */
+		GameResult result;
+		/** Working copy or returned snapshot of a ticket record. */
+		Ticket ticket;
+		/** Remaining actions available to the resumable operation. */
+		uint64 budget;
+		/** Ring-buffer slot selected for a round result. */
+		uint64 resultIndex;
+		/** Zero-based ticket slot extracted from a ticket id or reclaim cursor. */
+		uint64 ticketSlot;
+		/** One-based link to the next ticket or zero at the chain end. */
+		uint64 nextLink;
+		/** Number of result slots inspected during bounded lookup. */
+		uint16 resultScans;
+	};
+
+	/** QPI scratch state for periodic lifecycle automation and ticket reclamation. */
+	struct BEGIN_TICK_locals
+	{
+		/** Request passed to the process helper. */
+		ProcessGame_input processInput;
+		/** Response returned by the process helper. */
+		ProcessGame_output processOutput;
+		/** Request passed to the reclaim helper. */
+		ReclaimCompletedTickets_input reclaimInput;
+		/** Response returned by the reclaim helper. */
+		ReclaimCompletedTickets_output reclaimOutput;
+		/** Maximum state-changing work allowed in this invocation. */
+		uint64 actionBudget;
+		/** Number of game slots examined during this automation pass. */
+		uint16 inspected;
+		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		uint16 slot;
+	};
+
+	/** QPI scratch state for withdraw platform revenue; contract routines cannot declare stack locals. */
+	struct WithdrawPlatformRevenue_locals
+	{
+		/** QPI transfer result; a negative value indicates failure. */
+		sint64 transferResult;
+		/** Whether any resumable transfer attempted in this operation failed. */
+		bit failed;
+	};
+
 	REGISTER_USER_FUNCTIONS_AND_PROCEDURES()
 	{
-		REGISTER_USER_PROCEDURE(CreateTemplate, 1);
-		REGISTER_USER_PROCEDURE(DepositPrizeReserve, 2);
-		REGISTER_USER_PROCEDURE(PublishTemplate, 3);
+		REGISTER_USER_PROCEDURE(CreateGame, 1);
+		REGISTER_USER_PROCEDURE(FundGame, 3);
 		REGISTER_USER_PROCEDURE(BuyTicket, 4);
-		REGISTER_USER_PROCEDURE(RequestStop, 6);
-		REGISTER_USER_PROCEDURE(WithdrawCreatorRevenue, 7);
+		REGISTER_USER_PROCEDURE(UpdateGameEconomics, 5);
+		REGISTER_USER_PROCEDURE(StopGame, 7);
 		REGISTER_USER_PROCEDURE(SetPlatformConfig, 8);
 		REGISTER_USER_PROCEDURE(WithdrawPlatformRevenue, 9);
+		REGISTER_USER_PROCEDURE(WithdrawGameBalance, 10);
 		REGISTER_USER_PROCEDURE(TransferShareManagementRights, 11);
-		REGISTER_USER_PROCEDURE(UpdateTemplate, 12);
-		REGISTER_USER_PROCEDURE(DepositBonusReserve, 13);
-		REGISTER_USER_PROCEDURE(DepositAssetReserve, 14);
 		REGISTER_USER_PROCEDURE(BuyTickets, 15);
 		REGISTER_USER_PROCEDURE(WithdrawAssetPlatformRevenue, 16);
 
-		REGISTER_USER_FUNCTION(GetTemplate, 1);
-		REGISTER_USER_FUNCTION(GetRound, 2);
+		REGISTER_USER_FUNCTION(GetGame, 1);
+		REGISTER_USER_FUNCTION(GetRoundResult, 2);
 		REGISTER_USER_FUNCTION(GetTicket, 3);
 		REGISTER_USER_FUNCTION(GetWinners, 4);
 		REGISTER_USER_FUNCTION(GetPlatformAccounting, 5);
 		REGISTER_USER_FUNCTION(ValidateDigits, 6);
 		REGISTER_USER_FUNCTION(GetPlayerTickets, 7);
-		REGISTER_USER_FUNCTION(GetTemplateReadiness, 8);
-		REGISTER_USER_FUNCTION(GetTemplates, 9);
+		REGISTER_USER_FUNCTION(PreviewGame, 8);
+		REGISTER_USER_FUNCTION(GetGames, 9);
 	}
 
-	/**
-	 * @brief Initializes platform defaults when the contract state is first constructed.
-	 * @note The QPI runtime zeroes the state before this procedure, so only non-zero defaults are assigned here.
-	 */
 	INITIALIZE()
 	{
-		state.mut().platformFeePercent = PULSEEDITOR_PLATFORM_FEE_PERCENT;
-		state.mut().maxCreatorFeePercent = PULSEEDITOR_DEFAULT_MAX_CREATOR_FEE_PERCENT;
+		state.mut().platformOwner =
+		    ID(_R, _O, _J, _V, _A, _E, _M, _F, _B, _X, _X, _Y, _N, _G, _A, _U, _A, _U, _I, _I, _X, _L, _B, _U, _P, _D, _H, _C, _D, _P, _E, _S, _Y, _Z,
+		       _O, _V, _W, _U, _Y, _E, _C, _B, _Q, _V, _Z, _R, _F, _T, _K, _A, _G, _S, _H, _T, _N, _A);
+		state.mut().platformFeePercent = PLDT_PLATFORM_FEE_PERCENT;
+		state.mut().maxCreatorFeePercent = PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT;
+		state.mut().roundFee = PLDT_DEFAULT_ROUND_FEE;
 	}
 
-	/**
-	 * @brief Runs automated lifecycle work on a throttled tick cadence.
-	 * @note The calendar-time guard mirrors Pulse: automation is skipped while QPI still exposes the bootstrap date.
-	 */
-	BEGIN_TICK_WITH_LOCALS()
-	{
-		if (mod(qpi.tick(), PULSEEDITOR_TICK_UPDATE_PERIOD) != 0)
-		{
-			return;
-		}
-
-		makeDateStamp(qpi.year(), qpi.month(), qpi.day(), locals.currentDateStamp);
-		if (locals.currentDateStamp == PULSEEDITOR_DEFAULT_INIT_TIME)
-		{
-			return;
-		}
-
-		CALL(ProcessLifecycleAutomation, locals.automationInput, locals.automationOutput);
-	}
-
-	/**
-	 * @brief Allows incoming asset management rights transfers into this contract.
-	 * @param output Sets zero requested fee and allows the transfer.
-	 * @note PulseEditor does not charge an acquire fee for managed assets in the MVP.
-	 */
 	PRE_ACQUIRE_SHARES()
 	{
 		output.requestedFee = 0;
-		output.allowTransfer = true;
+		output.allowTransfer = qpi.originator() == input.owner && qpi.originator() == input.possessor;
+	}
+
+	BEGIN_TICK_WITH_LOCALS()
+	{
+		if (mod(qpi.tick(), PLDT_TICK_UPDATE_PERIOD) != 0)
+		{
+			return;
+		}
+		locals.inspected = 0;
+		locals.actionBudget = PLDT_SETTLEMENT_ACTION_BUDGET;
+		while (locals.inspected < PLDT_AUTOMATION_GAMES_PER_TICK)
+		{
+			locals.slot =
+			    static_cast<uint16>(mod(static_cast<uint64>(state.get().automationCursor + locals.inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
+			if (state.get().games.get(locals.slot).status != EGameStatus::EMPTY_SLOT)
+			{
+				locals.processInput.slot = locals.slot;
+				locals.processInput.actionBudget = locals.actionBudget;
+				CALL(ProcessGame, locals.processInput, locals.processOutput);
+				locals.actionBudget -= locals.processOutput.actionsUsed;
+			}
+			++locals.inspected;
+		}
+		state.mut().automationCursor =
+		    static_cast<uint16>(mod(static_cast<uint64>(state.get().automationCursor + locals.inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
+		locals.reclaimInput.actionBudget = locals.actionBudget;
+		CALL(ReclaimCompletedTickets, locals.reclaimInput, locals.reclaimOutput);
 	}
 
 	/**
-	 * @brief Creates a draft fixed-payout game template owned by the invocator.
-	 * @param input Template mechanics, ticket limits, fee settings, name, and payout matrix.
-	 * @param output New template id and minimum required prize reserve.
-	 * @return `SUCCESS`, `STORAGE_FULL`, or `INVALID_VALUE`.
-	 * @note Any invocation reward is refunded because template creation is configuration-only.
+	 * @brief Validates a proposed game and previews its initial funding and accounting.
+	 * @param input Complete game configuration, lifecycle mode, and initial ledgers.
+	 * @param output Required funding, per-ticket economics, and validation result.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(CreateTemplate)
+	PUBLIC_FUNCTION_WITH_LOCALS(PreviewGame)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.ticketPrice = input.ticketPrice;
-		locals.logger.ticketLimit = input.ticketLimit;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
+		// Validate the scheduling window, bounded configuration, and custody managers without mutating state.
+		output.returnCode = EReturnCode::INVALID_VALUE;
+		locals.weightTotal = 0;
+		locals.managedCurrencyShares = 0;
+		locals.maxDrawAt = qpi.now();
+		if (!locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS))
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			prepareLog(locals.logger, ELogPhase::REFUND, ELogDetail::REFUND, qpi.invocator());
-			LOG_DEBUG(locals.logger);
+			return;
+		}
+		if (input.currencyMode == ECurrencyMode::ASSET)
+		{
+			locals.managedCurrencyShares = qpi.numberOfShares(input.currencyAsset, AssetOwnershipSelect::byManagingContract(SELF_INDEX),
+			                                                  AssetPossessionSelect::byManagingContract(SELF_INDEX));
+		}
+		if (input.initialRunCredit < state.get().roundFee || input.initialCreatorBalance < input.creatorPrizeSeed)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (!input.startAt.isValid() || !input.drawAt.isValid() || input.startAt <= qpi.now() || input.drawAt > locals.maxDrawAt ||
+		    input.drawAt <= input.startAt)
+		{
+			return;
+		}
+		if (input.ticketPrice == 0 || input.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT || input.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT ||
+		    input.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT || input.initialCreatorBalance > PLDT_MAX_TRANSFER_AMOUNT ||
+		    (input.currencyMode == ECurrencyMode::QUBIC && input.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT - input.initialCreatorBalance))
+		{
+			return;
+		}
+		if (input.ticketLimit == 0 || input.ticketLimit > PLDT_MAX_TICKETS_PER_GAME || input.playerTicketLimit == 0 ||
+		    input.playerTicketLimit > input.ticketLimit)
+		{
+			return;
+		}
+		if (input.codeLength == 0 || input.codeLength > PLDT_MAX_CODE_LENGTH || input.maxDigit > PLDT_MAX_DIGIT ||
+		    (!input.allowRepeatedDigits && input.maxDigit + 1 < input.codeLength))
+		{
+			return;
+		}
+		if (input.creatorFeePercent > state.get().maxCreatorFeePercent || input.creatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT ||
+		    input.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
+		{
+			return;
+		}
+		if ((input.mode != EGameMode::ONE_SHOT && input.mode != EGameMode::PERMANENT) ||
+		    (input.creatorRevenueMode != ECreatorRevenueMode::PAYOUT && input.creatorRevenueMode != ECreatorRevenueMode::REINVEST) ||
+		    (input.currencyMode != ECurrencyMode::QUBIC && input.currencyMode != ECurrencyMode::ASSET))
+		{
+			return;
+		}
+		if (input.bonusAssetCount > 0 &&
+		    (input.bonusMultiplierBps < PLDT_BONUS_MULTIPLIER_SCALE || input.bonusMultiplierBps > PLDT_MAX_BONUS_MULTIPLIER_BPS))
+		{
+			return;
+		}
+		if (input.currencyMode == ECurrencyMode::ASSET &&
+		    (input.currencyAsset.assetName == 0 || !qpi.isAssetIssued(input.currencyAsset.issuer, input.currencyAsset.assetName) ||
+		     locals.managedCurrencyShares <= 0 || input.ownershipManagingContractIndex != SELF_INDEX ||
+		     input.possessionManagingContractIndex != SELF_INDEX))
+		{
+			return;
 		}
 
-		output.templateId = 0;
-		output.requiredPrizeReserve = 0;
-		output.requiredBonusReserve = 0;
-
-		if (state.get().templateCount >= state.get().templates.capacity())
-		{
-			output.returnCode = toReturnCode(EReturnCode::STORAGE_FULL);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_STORAGE_FULL, qpi.invocator());
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isTemplateConfigValid(input.codeLength, input.maxDigit, input.ticketPrice, input.ticketLimit, input.playerTicketLimit,
-		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_CONFIG, qpi.invocator());
-			locals.logger.ticketPrice = input.ticketPrice;
-			locals.logger.ticketLimit = input.ticketLimit;
-			locals.logger.playerTicketLimit = input.playerTicketLimit;
-			locals.logger.codeLength = input.codeLength;
-			locals.logger.maxDigit = input.maxDigit;
-			locals.logger.creatorFeePercent = input.creatorFeePercent;
-			locals.logger.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
-			locals.logger.burnPercent = input.burnPercent;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_SCHEDULE, qpi.invocator());
-			locals.logger.roundStartTick = input.roundStartTick;
-			locals.logger.roundEndTick = input.roundEndTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isRewardConfigValid(input.rewardMode, input.rewardAsset, input.rewardOwnershipManagingContractIndex,
-		                         input.rewardPossessionManagingContractIndex))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_REWARD, qpi.invocator());
-			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
-			locals.logger.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
-			locals.logger.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isEntryConfigValid(input.entryMode, input.entryAsset, input.rewardMode, input.rewardAsset, input.entryOwnershipManagingContractIndex,
-		                        input.entryPossessionManagingContractIndex))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_ENTRY, qpi.invocator());
-			locals.logger.entryMode = static_cast<uint8>(input.entryMode);
-			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
-			locals.logger.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
-			locals.logger.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isBonusConfigValid(input.bonusEnabled, input.bonusMultiplierBps, input.bonusAssetCount, input.bonusOwnershipManagingContractIndex,
-		                        input.bonusPossessionManagingContractIndex))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_BONUS, qpi.invocator());
-			locals.logger.bonusEnabled = input.bonusEnabled;
-			locals.logger.bonusMultiplierBps = input.bonusMultiplierBps;
-			locals.logger.bonusAssetCount = input.bonusAssetCount;
-			locals.logger.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
-			locals.logger.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
+		// Verify every optional bonus asset and the complete payout matrix before calculating economics.
 		for (locals.i = 0; locals.i < input.bonusAssetCount; ++locals.i)
 		{
-			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
+			if (input.bonusAssets.get(locals.i).assetName == 0 ||
+			    !qpi.isAssetIssued(input.bonusAssets.get(locals.i).issuer, input.bonusAssets.get(locals.i).assetName))
 			{
-				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_BONUS_ASSET, qpi.invocator());
-				locals.logger.bonusAssetIndex = static_cast<uint16>(locals.i);
-				locals.logger.bonusAssetCount = input.bonusAssetCount;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
 				return;
 			}
 		}
-		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
+		for (locals.exact = 0; locals.exact <= PLDT_MAX_CODE_LENGTH; ++locals.exact)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::CT_UNIQUE_DIGITS, qpi.invocator());
-			locals.logger.codeLength = input.codeLength;
-			locals.logger.maxDigit = input.maxDigit;
-			locals.logger.allowRepeatedDigits = input.allowRepeatedDigits;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.templateId = static_cast<uint16>(state.get().templateCount);
-		locals.gameTemplate.name = input.name;
-		locals.gameTemplate.payoutMatrix = input.payoutMatrix;
-		locals.gameTemplate.bonusAssets = input.bonusAssets;
-		locals.gameTemplate.owner = qpi.invocator();
-		locals.gameTemplate.rewardAsset = input.rewardAsset;
-		locals.gameTemplate.entryAsset = input.entryAsset;
-		locals.gameTemplate.ticketPrice = input.ticketPrice;
-		locals.gameTemplate.roundStartTick = input.roundStartTick;
-		locals.gameTemplate.roundEndTick = input.roundEndTick;
-		locals.gameTemplate.bonusMultiplierBps = input.bonusMultiplierBps;
-		locals.gameTemplate.ticketLimit = input.ticketLimit;
-		locals.gameTemplate.playerTicketLimit = input.playerTicketLimit;
-		locals.gameTemplate.bonusAssetCount = input.bonusAssetCount;
-		locals.gameTemplate.lastDrawEpoch = qpi.epoch();
-		locals.gameTemplate.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
-		locals.gameTemplate.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
-		locals.gameTemplate.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
-		locals.gameTemplate.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
-		locals.gameTemplate.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
-		locals.gameTemplate.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
-		locals.gameTemplate.codeLength = input.codeLength;
-		locals.gameTemplate.maxDigit = input.maxDigit;
-		locals.gameTemplate.creatorFeePercent = input.creatorFeePercent;
-		locals.gameTemplate.burnPercent = input.burnPercent;
-		locals.gameTemplate.rewardMode = input.rewardMode;
-		locals.gameTemplate.entryMode = input.entryMode;
-		locals.gameTemplate.bonusEnabled = input.bonusEnabled;
-		locals.gameTemplate.instantSettlement = input.instantSettlement;
-		locals.gameTemplate.allowRepeatedDigits = input.allowRepeatedDigits;
-		locals.gameTemplate.status = ETemplateStatus::DRAFT;
-		locals.gameTemplate.maxSinglePayout = 0;
-
-		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; ++locals.i)
-		{
-			locals.payout = locals.gameTemplate.payoutMatrix.get(locals.i);
-			if (locals.payout > locals.gameTemplate.maxSinglePayout)
+			for (locals.misplaced = 0; locals.misplaced <= PLDT_MAX_CODE_LENGTH - locals.exact; ++locals.misplaced)
 			{
-				locals.gameTemplate.maxSinglePayout = locals.payout;
+				locals.i = payoutMatrixIndex(locals.exact, locals.misplaced);
+				locals.weightTotal = sadd(locals.weightTotal, static_cast<uint64>(input.tierWeightsBps.get(static_cast<uint16>(locals.i))));
+				if (input.tierWeightsBps.get(static_cast<uint16>(locals.i)) > 0 &&
+				    (locals.exact > input.codeLength || locals.misplaced > input.codeLength - locals.exact ||
+				     (locals.exact + 1 == input.codeLength && locals.misplaced == 1)))
+				{
+					return;
+				}
 			}
 		}
-
-		state.mut().templates.set(locals.templateId, locals.gameTemplate);
-		state.mut().templateCount = sadd(state.get().templateCount, 1ULL);
-
-		output.templateId = locals.templateId;
-		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
-		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = output.templateId;
-		locals.logger.requiredPrizeReserve = output.requiredPrizeReserve;
-		locals.logger.requiredBonusReserve = output.requiredBonusReserve;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Replaces the editable configuration of an unpublished draft template.
-	 * @param input Template id and replacement mechanics/economic settings.
-	 * @param output Recomputed reserve requirement and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, or `INVALID_VALUE`.
-	 * @note Existing prize reserve stays attached to the template; publication later enforces the new reserve requirement.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateTemplate)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.ticketPrice = input.ticketPrice;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
+		if (locals.weightTotal != PLDT_TIER_BPS_SCALE)
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-		output.requiredPrizeReserve = 0;
-		output.requiredBonusReserve = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
 			return;
 		}
-		if (!isTemplateConfigValid(input.codeLength, input.maxDigit, input.ticketPrice, input.ticketLimit, input.playerTicketLimit,
-		                           input.creatorFeePercent, input.burnPercent, state.get().maxCreatorFeePercent))
+		// Ensure gross revenue and every terminally refundable amount fit QPI's transfer bound.
+		locals.economicsInput.ticketPrice = input.ticketPrice;
+		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		if (input.currencyMode == ECurrencyMode::ASSET && input.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_CONFIG, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.ticketPrice = input.ticketPrice;
-			locals.logger.ticketLimit = input.ticketLimit;
-			locals.logger.playerTicketLimit = input.playerTicketLimit;
-			locals.logger.codeLength = input.codeLength;
-			locals.logger.maxDigit = input.maxDigit;
-			locals.logger.creatorFeePercent = input.creatorFeePercent;
-			locals.logger.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
-			locals.logger.burnPercent = input.burnPercent;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			// QPI intentionally forbids burning issuer-zero contract shares.
 			return;
 		}
-		if (!isScheduleConfigValid(input.roundStartTick, input.roundEndTick))
+		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
+		if (input.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.ticketLimit)) ||
+		    locals.refundablePerTicket > div(PLDT_MAX_TRANSFER_AMOUNT - input.creatorPrizeSeed, static_cast<uint64>(input.ticketLimit)))
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_SCHEDULE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundStartTick = input.roundStartTick;
-			locals.logger.roundEndTick = input.roundEndTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
 			return;
 		}
-		if (!isRewardConfigValid(input.rewardMode, input.rewardAsset, input.rewardOwnershipManagingContractIndex,
-		                         input.rewardPossessionManagingContractIndex))
+		output.platformFee = locals.economicsOutput.platformFee;
+		output.roundFee = state.get().roundFee;
+		if (input.currencyMode == ECurrencyMode::QUBIC)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_REWARD, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
-			locals.logger.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
-			locals.logger.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isEntryConfigValid(input.entryMode, input.entryAsset, input.rewardMode, input.rewardAsset, input.entryOwnershipManagingContractIndex,
-		                        input.entryPossessionManagingContractIndex))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_ENTRY, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.entryMode = static_cast<uint8>(input.entryMode);
-			locals.logger.rewardMode = static_cast<uint8>(input.rewardMode);
-			locals.logger.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
-			locals.logger.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!isBonusConfigValid(input.bonusEnabled, input.bonusMultiplierBps, input.bonusAssetCount, input.bonusOwnershipManagingContractIndex,
-		                        input.bonusPossessionManagingContractIndex))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_BONUS, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.bonusEnabled = input.bonusEnabled;
-			locals.logger.bonusMultiplierBps = input.bonusMultiplierBps;
-			locals.logger.bonusAssetCount = input.bonusAssetCount;
-			locals.logger.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
-			locals.logger.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		for (locals.i = 0; locals.i < input.bonusAssetCount; ++locals.i)
-		{
-			if (input.bonusAssets.get(locals.i).assetName == 0 || input.bonusAssets.get(locals.i).issuer == NULL_ID)
-			{
-				output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_BONUS_ASSET, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.bonusAssetIndex = static_cast<uint16>(locals.i);
-				locals.logger.bonusAssetCount = input.bonusAssetCount;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
-				return;
-			}
-		}
-		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_UNIQUE_DIGITS, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.codeLength = input.codeLength;
-			locals.logger.maxDigit = input.maxDigit;
-			locals.logger.allowRepeatedDigits = input.allowRepeatedDigits;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		locals.round = state.get().rounds.get(input.templateId);
-		if (locals.gameTemplate.hasTicketSales)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_TICKET_SALES, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.hasTicketSales = locals.gameTemplate.hasTicketSales;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.gameTemplate.status != ETemplateStatus::DRAFT &&
-		    (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status == ERoundStatus::SELLING))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::UT_STATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate.name = input.name;
-		locals.gameTemplate.payoutMatrix = input.payoutMatrix;
-		locals.gameTemplate.bonusAssets = input.bonusAssets;
-		locals.gameTemplate.rewardAsset = input.rewardAsset;
-		locals.gameTemplate.entryAsset = input.entryAsset;
-		locals.gameTemplate.ticketPrice = input.ticketPrice;
-		locals.gameTemplate.roundStartTick = input.roundStartTick;
-		locals.gameTemplate.roundEndTick = input.roundEndTick;
-		locals.gameTemplate.bonusMultiplierBps = input.bonusMultiplierBps;
-		locals.gameTemplate.ticketLimit = input.ticketLimit;
-		locals.gameTemplate.playerTicketLimit = input.playerTicketLimit;
-		locals.gameTemplate.bonusAssetCount = input.bonusAssetCount;
-		locals.gameTemplate.rewardOwnershipManagingContractIndex = input.rewardOwnershipManagingContractIndex;
-		locals.gameTemplate.rewardPossessionManagingContractIndex = input.rewardPossessionManagingContractIndex;
-		locals.gameTemplate.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
-		locals.gameTemplate.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
-		locals.gameTemplate.entryOwnershipManagingContractIndex = input.entryOwnershipManagingContractIndex;
-		locals.gameTemplate.entryPossessionManagingContractIndex = input.entryPossessionManagingContractIndex;
-		locals.gameTemplate.codeLength = input.codeLength;
-		locals.gameTemplate.maxDigit = input.maxDigit;
-		locals.gameTemplate.creatorFeePercent = input.creatorFeePercent;
-		locals.gameTemplate.burnPercent = input.burnPercent;
-		locals.gameTemplate.rewardMode = input.rewardMode;
-		locals.gameTemplate.entryMode = input.entryMode;
-		locals.gameTemplate.bonusEnabled = input.bonusEnabled;
-		locals.gameTemplate.instantSettlement = input.instantSettlement;
-		locals.gameTemplate.allowRepeatedDigits = input.allowRepeatedDigits;
-		locals.gameTemplate.maxSinglePayout = 0;
-
-		for (locals.i = 0; locals.i < PULSEEDITOR_PAYOUT_MATRIX_CAPACITY; ++locals.i)
-		{
-			locals.payout = locals.gameTemplate.payoutMatrix.get(locals.i);
-			if (locals.payout > locals.gameTemplate.maxSinglePayout)
-			{
-				locals.gameTemplate.maxSinglePayout = locals.payout;
-			}
-		}
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
-		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requiredPrizeReserve = output.requiredPrizeReserve;
-		locals.logger.requiredBonusReserve = output.requiredBonusReserve;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Adds the attached Qubic invocation reward to a template prize reserve.
-	 * @param input Target template id.
-	 * @param output Deposited amount and updated reserve balance.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, or `INSUFFICIENT_FUNDS`.
-	 * @note Only the template owner may fund the reserve.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(DepositPrizeReserve)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.depositAmount = qpi.invocationReward();
-		LOG_DEBUG(locals.logger);
-		output.depositedAmount = 0;
-		output.prizeReserve = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (qpi.invocationReward() == 0)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			output.prizeReserve = locals.gameTemplate.prizeReserve;
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DPR_AMOUNT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.depositAmount = qpi.invocationReward();
-			locals.logger.prizeReserve = output.prizeReserve;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.depositAmount = static_cast<uint64>(qpi.invocationReward());
-		locals.gameTemplate.prizeReserve = sadd(locals.gameTemplate.prizeReserve, locals.depositAmount);
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.depositedAmount = locals.depositAmount;
-		output.prizeReserve = locals.gameTemplate.prizeReserve;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.depositAmount = output.depositedAmount;
-		locals.logger.prizeReserve = output.prizeReserve;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Adds the attached Qubic invocation reward to a template multiplier-bonus reserve.
-	 * @param input Target template id.
-	 * @param output Deposited amount and updated bonus reserve balance.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, or `INSUFFICIENT_FUNDS`.
-	 * @note Only the template owner may fund the bonus reserve, and the template must have multiplier bonuses enabled.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(DepositBonusReserve)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.depositAmount = qpi.invocationReward();
-		LOG_DEBUG(locals.logger);
-		output.depositedAmount = 0;
-		output.bonusReserve = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!locals.gameTemplate.bonusEnabled || locals.gameTemplate.bonusMultiplierBps <= PULSEEDITOR_BONUS_MULTIPLIER_SCALE)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			output.bonusReserve = locals.gameTemplate.bonusReserve;
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_MODE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.bonusReserve = output.bonusReserve;
-			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
-			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (qpi.invocationReward() == 0)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			output.bonusReserve = locals.gameTemplate.bonusReserve;
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DBR_AMOUNT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.depositAmount = qpi.invocationReward();
-			locals.logger.bonusReserve = output.bonusReserve;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.depositAmount = static_cast<uint64>(qpi.invocationReward());
-		locals.gameTemplate.bonusReserve = sadd(locals.gameTemplate.bonusReserve, locals.depositAmount);
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.depositedAmount = locals.depositAmount;
-		output.bonusReserve = locals.gameTemplate.bonusReserve;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.depositAmount = output.depositedAmount;
-		locals.logger.bonusReserve = output.bonusReserve;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Transfers reward asset shares from the template owner into base or bonus reserves.
-	 * @param input Template id, share amount, and target reserve bucket.
-	 * @param output Accepted share amount, updated asset reserves, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, or `INSUFFICIENT_FUNDS`.
-	 * @note The invocator must possess the reward asset under this contract's management rights.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(DepositAssetReserve)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requestedShares = input.numberOfShares;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
-		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-		output.depositedNumberOfShares = 0;
-		output.assetPrizeReserve = 0;
-		output.assetBonusReserve = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		output.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve;
-		output.assetBonusReserve = locals.gameTemplate.assetBonusReserve;
-
-		if (qpi.invocator() != locals.gameTemplate.owner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.gameTemplate.rewardMode != ERewardMode::ASSET || input.numberOfShares == 0 ||
-		    input.numberOfShares > static_cast<uint64>(INT64_MAX))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_MODE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedShares = input.numberOfShares;
-			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (input.depositToBonusReserve &&
-		    (!locals.gameTemplate.bonusEnabled || locals.gameTemplate.bonusMultiplierBps <= PULSEEDITOR_BONUS_MULTIPLIER_SCALE))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_BONUS_MODE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.depositToBonusReserve = input.depositToBonusReserve;
-			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
-			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.possessedShares = qpi.numberOfPossessedShares(
-		    locals.gameTemplate.rewardAsset.assetName, locals.gameTemplate.rewardAsset.issuer, qpi.invocator(), qpi.invocator(),
-		    locals.gameTemplate.rewardOwnershipManagingContractIndex, locals.gameTemplate.rewardPossessionManagingContractIndex);
-		if (locals.possessedShares < static_cast<sint64>(input.numberOfShares))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::DAR_SHARES, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedShares = input.numberOfShares;
-			locals.logger.possessedShares = locals.possessedShares;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.transferResult =
-		    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.rewardAsset.assetName, locals.gameTemplate.rewardAsset.issuer,
-		                                            qpi.invocator(), qpi.invocator(), static_cast<sint64>(input.numberOfShares), SELF);
-		if (locals.transferResult < 0)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::DAR_TRANSFER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedShares = input.numberOfShares;
-			locals.logger.transferResult = locals.transferResult;
-			locals.logger.returnCode = output.returnCode;
-			LOG_ERROR(locals.logger);
-			return;
-		}
-
-		if (input.depositToBonusReserve)
-		{
-			locals.gameTemplate.assetBonusReserve = sadd(locals.gameTemplate.assetBonusReserve, input.numberOfShares);
+			output.initialQubicRequired = sadd(input.initialRunCredit, input.initialCreatorBalance);
 		}
 		else
 		{
-			locals.gameTemplate.assetPrizeReserve = sadd(locals.gameTemplate.assetPrizeReserve, input.numberOfShares);
+			output.initialQubicRequired = input.initialRunCredit;
+			output.initialCreatorAssetRequired = input.initialCreatorBalance;
 		}
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.depositedNumberOfShares = input.numberOfShares;
-		output.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve;
-		output.assetBonusReserve = locals.gameTemplate.assetBonusReserve;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requestedShares = output.depositedNumberOfShares;
-		locals.logger.assetPrizeReserve = output.assetPrizeReserve;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		output.creatorFee = locals.economicsOutput.creatorFee;
+		output.burn = locals.economicsOutput.burn;
+		output.prizeContribution = locals.economicsOutput.prizeContribution;
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Publishes a funded draft template and opens its first selling round.
-	 * @param input Template id to publish.
-	 * @param output First round id.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, or `INSUFFICIENT_FUNDS`.
-	 * @warning Publication requires the reserve required by `requiredBasePrizeReserve` plus any enabled bonus reserve.
+	 * @brief Atomically creates, funds, and charges a one-shot or permanent game.
+	 * @param input Game rules, lifecycle mode, UTC window, economics, currency, and initial ledgers.
+	 * @param output Generation-aware game id, slot, and result code.
+	 * @note The first round fee is non-refundable; asset creator funding is pulled from the creator.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(PublishTemplate)
+	PUBLIC_PROCEDURE_WITH_LOCALS(CreateGame)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
+		// Complete all configuration, payment, and accrual-capacity checks before taking asset custody.
+		output.gameId = 0;
+		output.slot = 0;
+		locals.previewInput = input;
+		CALL(PreviewGame, locals.previewInput, locals.previewOutput);
+		locals.maxDrawAt = qpi.now();
+		if (locals.previewOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.refundInput.returnCode = locals.previewOutput.returnCode;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
+		if (input.startAt <= qpi.now() || !locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS) || input.drawAt > locals.maxDrawAt)
 		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		if (locals.gameTemplate.status != ETemplateStatus::DRAFT)
+		locals.expectedReward = locals.previewOutput.initialQubicRequired;
+		if (qpi.invocationReward() != locals.expectedReward)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_STATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		if (!hasRequiredBaseReserve(locals.gameTemplate))
+		locals.developer1Fee = mulDiv(state.get().roundFee, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
+		locals.developer2Fee = mulDiv(state.get().roundFee, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
+		locals.dividendFee = state.get().roundFee - locals.developer1Fee - locals.developer2Fee;
+		if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
+		    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
+		    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_BASE_RESERVE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.prizeReserve = locals.gameTemplate.prizeReserve;
-			locals.logger.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
-			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		if (!hasRequiredBonusReserve(locals.gameTemplate))
+		// Find a reusable slot while enforcing the creator-wide active-game limit in the same bounded scan.
+		locals.found = false;
+		locals.creatorActiveGames = 0;
+		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_BONUS_RESERVE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.bonusReserve = locals.gameTemplate.bonusReserve;
-			locals.logger.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
-			locals.logger.bonusEnabled = locals.gameTemplate.bonusEnabled;
-			locals.logger.bonusMultiplierBps = locals.gameTemplate.bonusMultiplierBps;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.gameTemplate.roundEndTick > 0 && qpi.tick() > locals.gameTemplate.roundEndTick)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::PT_SCHEDULE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.currentTick = qpi.tick();
-			locals.logger.roundEndTick = locals.gameTemplate.roundEndTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate.status = ETemplateStatus::PUBLISHED;
-		locals.gameTemplate.currentRoundId = sadd(locals.gameTemplate.currentRoundId, 1U);
-		locals.gameTemplate.lastDrawEpoch = qpi.epoch();
-
-		locals.round.roundId = locals.gameTemplate.currentRoundId;
-		locals.round.startTick = locals.gameTemplate.roundStartTick;
-		locals.round.endTick = locals.gameTemplate.roundEndTick;
-		locals.round.status = ERoundStatus::SELLING;
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-
-		output.roundId = locals.round.roundId;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.roundId = output.roundId;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Buys one ticket for a template's active selling round.
-	 * @param input Template id and submitted digits.
-	 * @param output Accepted round id, ticket index, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `INVALID_STATE`, `TICKET_INVALID_PRICE`, `TICKET_SOLD_OUT`,
-	 * `INVALID_DIGITS`, or `PLAYER_TICKET_LIMIT`.
-	 * @note The invocation reward must exactly equal the ticket price; rejected purchases are refunded.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTicket)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.digits = input.digits;
-		locals.logger.invocationReward = qpi.invocationReward();
-		LOG_DEBUG(locals.logger);
-		output.ticketIndex = 0;
-		output.roundId = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			if (qpi.invocationReward() > 0)
+			locals.game = state.get().games.get(static_cast<uint16>(locals.i));
+			if (locals.game.status != EGameStatus::EMPTY_SLOT && locals.game.owner == qpi.invocator())
 			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
+				++locals.creatorActiveGames;
 			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.storageTicketCount = state.get().ticketCount;
-			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		locals.reward = qpi.invocationReward() > 0 ? static_cast<uint64>(qpi.invocationReward()) : 0;
-
-		if (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status != ERoundStatus::SELLING)
-		{
-			if (qpi.invocationReward() > 0)
+			locals.candidateSlot = static_cast<uint16>(mod(state.get().allocationCursor + locals.i, static_cast<uint64>(PLDT_MAX_GAMES)));
+			if (!locals.found && state.get().games.get(locals.candidateSlot).status == EGameStatus::EMPTY_SLOT)
 			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_STATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_NOT_STARTED, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.currentTick = qpi.tick();
-			locals.logger.startTick = locals.round.startTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
-		{
-			locals.round.status = ERoundStatus::CLOSED;
-			state.mut().rounds.set(input.templateId, locals.round);
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ENDED, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.currentTick = qpi.tick();
-			locals.logger.endTick = locals.round.endTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if ((locals.gameTemplate.entryMode == EEntryMode::QUBIC && locals.reward != locals.gameTemplate.ticketPrice) ||
-		    (locals.gameTemplate.entryMode == EEntryMode::ASSET && locals.reward != 0))
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_PRICE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.invocationReward = locals.reward;
-			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (state.get().ticketCount >= state.get().tickets.capacity() || locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_SOLD_OUT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.storageTicketCount = state.get().ticketCount;
-			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
-			locals.logger.roundTicketCount = locals.round.ticketCount;
-			locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.validateInput.digits = input.digits;
-		locals.validateInput.codeLength = locals.gameTemplate.codeLength;
-		locals.validateInput.maxDigit = locals.gameTemplate.maxDigit;
-		locals.validateInput.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-		CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
-		if (!locals.validateOutput.isValid)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_DIGITS, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.digits = input.digits;
-			locals.logger.codeLength = locals.gameTemplate.codeLength;
-			locals.logger.maxDigit = locals.gameTemplate.maxDigit;
-			locals.logger.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.playerTicketCount = 0;
-		for (locals.i = 0; locals.i < state.get().ticketCount; ++locals.i)
-		{
-			locals.ticket = state.get().tickets.get(locals.i);
-			if (locals.ticket.status == ETicketStatus::ACTIVE && locals.ticket.templateId == input.templateId &&
-			    locals.ticket.roundId == locals.round.roundId && locals.ticket.player == qpi.invocator())
-			{
-				++locals.playerTicketCount;
+				locals.slot = locals.candidateSlot;
+				locals.found = true;
 			}
 		}
-		if (locals.playerTicketCount >= locals.gameTemplate.playerTicketLimit)
+		if (!locals.found || locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_PLAYER_LIMIT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.playerTicketCount = locals.playerTicketCount;
-			locals.logger.playerTicketLimit = locals.gameTemplate.playerTicketLimit;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-
-		if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
+		// Resolve the asset accounting bucket and take creator funding only after every Qubic-side check passes.
+		if (input.currencyMode == ECurrencyMode::ASSET)
 		{
-			if (locals.gameTemplate.ticketPrice > static_cast<uint64>(INT64_MAX))
+			locals.accountingFound = false;
+			for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
 			{
-				output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_PRICE, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
+				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+				if (locals.assetAccounting.isActive && locals.assetAccounting.asset.assetName == input.currencyAsset.assetName &&
+				    locals.assetAccounting.asset.issuer == input.currencyAsset.issuer &&
+				    locals.assetAccounting.ownershipManagingContractIndex == input.ownershipManagingContractIndex &&
+				    locals.assetAccounting.possessionManagingContractIndex == input.possessionManagingContractIndex)
+				{
+					locals.accountingSlot = static_cast<uint16>(locals.i);
+					locals.accountingFound = true;
+					break;
+				}
+			}
+			if (!locals.accountingFound)
+			{
+				for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
+				{
+					locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+					if (!locals.assetAccounting.isActive)
+					{
+						locals.accountingSlot = static_cast<uint16>(locals.i);
+						locals.assetAccounting.asset = input.currencyAsset;
+						locals.assetAccounting.ownershipManagingContractIndex = input.ownershipManagingContractIndex;
+						locals.assetAccounting.possessionManagingContractIndex = input.possessionManagingContractIndex;
+						locals.assetAccounting.isActive = true;
+						locals.accountingFound = true;
+						break;
+					}
+				}
+			}
+			if (!locals.accountingFound)
+			{
+				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
 				return;
 			}
-			locals.possessedShares = qpi.numberOfPossessedShares(
-			    locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, qpi.invocator(), qpi.invocator(),
-			    locals.gameTemplate.entryOwnershipManagingContractIndex, locals.gameTemplate.entryPossessionManagingContractIndex);
-			if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
+			if (input.initialCreatorBalance > 0)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BT_ASSET_BALANCE, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-				locals.logger.possessedShares = locals.possessedShares;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
+				locals.possessedShares =
+				    qpi.numberOfPossessedShares(input.currencyAsset.assetName, input.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+				                                input.ownershipManagingContractIndex, input.possessionManagingContractIndex);
+				if (locals.possessedShares < static_cast<sint64>(input.initialCreatorBalance))
+				{
+					locals.refundInput.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+					CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+					output.returnCode = locals.refundOutput.returnCode;
+					return;
+				}
+				locals.transferResult =
+				    qpi.transferShareOwnershipAndPossession(input.currencyAsset.assetName, input.currencyAsset.issuer, qpi.invocator(),
+				                                            qpi.invocator(), static_cast<sint64>(input.initialCreatorBalance), SELF);
+				if (locals.transferResult < 0)
+				{
+					locals.refundInput.returnCode = EReturnCode::TRANSFER_FAILED;
+					CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+					output.returnCode = locals.refundOutput.returnCode;
+					return;
+				}
+			}
+		}
+		// Commit a fresh slot generation and all accounting together so stale ids cannot alias the new game.
+		locals.generation = sadd(state.get().generations.get(locals.slot), 1ULL);
+		if (locals.generation == 0)
+		{
+			locals.generation = 1;
+		}
+		state.mut().generations.set(locals.slot, locals.generation);
+		setMemory(locals.game, 0);
+		locals.game.tierWeightsBps = input.tierWeightsBps;
+		locals.game.bonusAssets = input.bonusAssets;
+		locals.game.name = input.name;
+		locals.game.currencyAsset = input.currencyAsset;
+		locals.game.owner = qpi.invocator();
+		locals.game.startAt = input.startAt;
+		locals.game.drawAt = input.drawAt;
+		locals.game.gameId = (locals.generation << 10) | locals.slot;
+		locals.game.ticketPrice = input.ticketPrice;
+		locals.game.creatorPrizeSeed = input.creatorPrizeSeed;
+		locals.game.prizePool = input.creatorPrizeSeed;
+		locals.game.roundFeeSnapshot = state.get().roundFee;
+		locals.game.runCredit = input.initialRunCredit - state.get().roundFee;
+		locals.game.creatorBalance = input.initialCreatorBalance - input.creatorPrizeSeed;
+		locals.game.roundDurationMicroseconds = input.startAt.durationMicrosec(input.drawAt);
+		locals.game.bonusMultiplierBps = input.bonusMultiplierBps;
+		locals.game.ticketLimit = input.ticketLimit;
+		locals.game.playerTicketLimit = input.playerTicketLimit;
+		locals.game.bonusAssetCount = input.bonusAssetCount;
+		locals.game.ownershipManagingContractIndex = input.ownershipManagingContractIndex;
+		locals.game.possessionManagingContractIndex = input.possessionManagingContractIndex;
+		locals.game.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
+		locals.game.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
+		locals.game.assetAccountingLink = input.currencyMode == ECurrencyMode::ASSET ? locals.accountingSlot + 1 : 0;
+		locals.game.codeLength = input.codeLength;
+		locals.game.maxDigit = input.maxDigit;
+		locals.game.creatorFeePercent = input.creatorFeePercent;
+		locals.game.currencyMode = input.currencyMode;
+		locals.game.mode = input.mode;
+		locals.game.creatorRevenueMode = input.creatorRevenueMode;
+		locals.game.roundNumber = 1;
+		locals.game.allowRepeatedDigits = input.allowRepeatedDigits;
+		locals.game.status = EGameStatus::SCHEDULED;
+		if (input.currencyMode == ECurrencyMode::ASSET)
+		{
+			++locals.assetAccounting.activeGameCount;
+			state.mut().assetAccounting.set(locals.accountingSlot, locals.assetAccounting);
+		}
+		state.mut().games.set(locals.slot, locals.game);
+		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
+		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
+		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, state.get().roundFee - locals.developer1Fee - locals.developer2Fee);
+		state.mut().activeGameCount = state.get().activeGameCount + 1;
+		state.mut().allocationCursor = static_cast<uint16>(mod(static_cast<uint64>(locals.slot + 1), static_cast<uint64>(PLDT_MAX_GAMES)));
+		output.gameId = locals.game.gameId;
+		output.slot = locals.slot;
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Adds Qubic run credit and/or game-currency creator balance.
+	 * @param input Game id and ledger top-ups.
+	 * @param output Result code; failed operations preserve both ledgers.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(FundGame)
+	{
+		// Authorize and capacity-check both ledgers before taking any asset shares.
+		locals.slot = gameSlot(input.gameId);
+		if (!isGameIdValid(state, input.gameId))
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.game = state.get().games.get(locals.slot);
+		if (locals.game.owner != qpi.invocator())
+		{
+			locals.refundInput.returnCode = EReturnCode::ACCESS_DENIED;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (locals.game.status == EGameStatus::FINALIZING)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_STATE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.expectedReward = input.runCreditTopUp;
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (input.runCreditTopUp > PLDT_MAX_TRANSFER_AMOUNT - input.creatorBalanceTopUp)
+			{
+				locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+			locals.expectedReward = sadd(locals.expectedReward, input.creatorBalanceTopUp);
+		}
+		if (qpi.invocationReward() != locals.expectedReward)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (input.runCreditTopUp > PLDT_MAX_TRANSFER_AMOUNT - locals.game.runCredit ||
+		    locals.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool ||
+		    input.creatorBalanceTopUp > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool - locals.game.creatorBalance)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		// Asset creator balance is pulled only after the Qubic invocation reward and all invariants are valid.
+		if (locals.game.currencyMode == ECurrencyMode::ASSET && input.creatorBalanceTopUp > 0)
+		{
+			locals.possessedShares =
+			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
+			if (locals.possessedShares < static_cast<sint64>(input.creatorBalanceTopUp))
+			{
+				locals.refundInput.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
 				return;
 			}
 			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer,
-			                                            qpi.invocator(), qpi.invocator(), static_cast<sint64>(locals.gameTemplate.ticketPrice), SELF);
+			    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(),
+			                                            qpi.invocator(), static_cast<sint64>(input.creatorBalanceTopUp), SELF);
 			if (locals.transferResult < 0)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BT_ASSET_TRANSFER, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-				locals.logger.transferResult = locals.transferResult;
-				locals.logger.returnCode = output.returnCode;
-				LOG_ERROR(locals.logger);
+				locals.refundInput.returnCode = EReturnCode::TRANSFER_FAILED;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
 				return;
 			}
-			locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
-			locals.dev1Amount = platformDev1Share(locals.platformFee);
-			locals.dev2Amount = platformDev2Share(locals.platformFee);
-			locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-			locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
-			locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
-			locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
-			locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
-			if (locals.burnAmount > 0)
-			{
-				locals.transferResult =
-				    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
-				                                            SELF, static_cast<sint64>(locals.burnAmount), NULL_ID);
-				if (locals.transferResult < 0)
-				{
-					qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
-					                                        SELF, static_cast<sint64>(locals.gameTemplate.ticketPrice), qpi.invocator());
-					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BT_BURN_TRANSFER, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.ticketPrice = locals.burnAmount;
-					locals.logger.transferResult = locals.transferResult;
-					locals.logger.returnCode = output.returnCode;
-					LOG_ERROR(locals.logger);
-					return;
-				}
-			}
-			locals.gameTemplate.assetDeveloper1Accrued = sadd(locals.gameTemplate.assetDeveloper1Accrued, locals.dev1Amount);
-			locals.gameTemplate.assetDeveloper2Accrued = sadd(locals.gameTemplate.assetDeveloper2Accrued, locals.dev2Amount);
-			locals.gameTemplate.assetDividendAccrued = sadd(locals.gameTemplate.assetDividendAccrued, locals.dividendAmount);
-			locals.gameTemplate.assetCreatorRevenue = sadd(locals.gameTemplate.assetCreatorRevenue, locals.creatorAmount);
-			locals.gameTemplate.assetBurnAccrued = sadd(locals.gameTemplate.assetBurnAccrued, locals.burnAmount);
-			locals.gameTemplate.assetPrizeReserve = sadd(locals.gameTemplate.assetPrizeReserve, locals.prizeAmount);
-			locals.gameTemplate.assetEntryRevenue = sadd(locals.gameTemplate.assetEntryRevenue, locals.gameTemplate.ticketPrice);
-			locals.gameTemplate.hasTicketSales = true;
-			locals.round.revenue = sadd(locals.round.revenue, locals.gameTemplate.ticketPrice);
-			locals.round.prizeAdded = sadd(locals.round.prizeAdded, locals.prizeAmount);
 		}
-		else
-		{
-			locals.platformFee = ticketPlatformFee(locals.reward, state.get().platformFeePercent);
-			locals.dev1Amount = platformDev1Share(locals.platformFee);
-			locals.dev2Amount = platformDev2Share(locals.platformFee);
-			locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-			locals.netRevenue = ticketNetRevenue(locals.reward, locals.platformFee);
-			locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
-			locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
-			locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
-
-			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.dev1Amount);
-			state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.dev2Amount);
-			state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.dividendAmount);
-
-			locals.gameTemplate.creatorRevenue = sadd(locals.gameTemplate.creatorRevenue, locals.creatorAmount);
-			locals.gameTemplate.burnAccrued = sadd(locals.gameTemplate.burnAccrued, locals.burnAmount);
-			if (locals.burnAmount > 0)
-			{
-				qpi.transfer(NULL_ID, locals.burnAmount);
-			}
-			locals.gameTemplate.prizeReserve = sadd(locals.gameTemplate.prizeReserve, locals.prizeAmount);
-			locals.gameTemplate.totalRevenue = sadd(locals.gameTemplate.totalRevenue, locals.reward);
-			locals.gameTemplate.hasTicketSales = true;
-			locals.round.revenue = sadd(locals.round.revenue, locals.reward);
-			locals.round.prizeAdded = sadd(locals.round.prizeAdded, locals.prizeAmount);
-		}
-		++locals.round.ticketCount;
-		if (locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
-		{
-			locals.round.status = ERoundStatus::CLOSED;
-		}
-
-		setMemory(locals.ticket, 0);
-		locals.ticket.digits = input.digits;
-		locals.ticket.player = qpi.invocator();
-		locals.ticket.roundId = locals.round.roundId;
-		locals.ticket.templateId = input.templateId;
-		locals.ticket.status = ETicketStatus::ACTIVE;
-
-		output.ticketIndex = state.get().ticketCount;
-		output.roundId = locals.round.roundId;
-
-		state.mut().tickets.set(state.get().ticketCount, locals.ticket);
-		state.mut().ticketCount = sadd(state.get().ticketCount, 1ULL);
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-		prepareLog(locals.logger, ELogPhase::STATE_CHANGE, ELogDetail::BT_ACCEPTED, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.roundId = output.roundId;
-		locals.logger.ticketIndex = output.ticketIndex;
-		locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-		locals.logger.digits = input.digits;
-		LOG_DEBUG(locals.logger);
-
-		if (locals.gameTemplate.instantSettlement)
-		{
-			locals.settleInput.templateId = input.templateId;
-			locals.settleInput.ticketIndex = output.ticketIndex;
-			CALL(SettleInstantTicket, locals.settleInput, locals.settleOutput);
-			if (locals.settleOutput.returnCode != toReturnCode(EReturnCode::SUCCESS))
-			{
-				output.returnCode = locals.settleOutput.returnCode;
-				prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.ticketIndex = output.ticketIndex;
-				locals.logger.settlementReturnCode = locals.settleOutput.returnCode;
-				locals.logger.returnCode = output.returnCode;
-				LOG_ERROR(locals.logger);
-				return;
-			}
-			prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BT_INSTANT_SETTLEMENT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.ticketIndex = output.ticketIndex;
-			locals.logger.returnCode = locals.settleOutput.returnCode;
-			LOG_DEBUG(locals.logger);
-		}
-
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.roundId = output.roundId;
-		locals.logger.ticketIndex = output.ticketIndex;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		locals.game.runCredit = sadd(locals.game.runCredit, input.runCreditTopUp);
+		locals.game.creatorBalance = sadd(locals.game.creatorBalance, input.creatorBalanceTopUp);
+		state.mut().games.set(locals.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Buys several tickets for the selected template.
-	 * @param input Template id, ticket count, and submitted digit arrays.
-	 * @param output First accepted round id, ticket indexes, accepted count, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `INVALID_STATE`, `INVALID_VALUE`, `TICKET_INVALID_PRICE`,
-	 * `TICKET_SOLD_OUT`, `INVALID_DIGITS`, `INSUFFICIENT_FUNDS`, or `PLAYER_TICKET_LIMIT`.
-	 * @note Non-instant batches are stored atomically in one round; instant batches settle each accepted ticket sequentially.
+	 * @brief Withdraws unreserved game ledgers to their owner.
+	 * @param input Requested amounts; the current prize pool is not addressable.
+	 * @param output Successfully transferred amounts and result code.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTickets)
+	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawGameBalance)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requestedCount = input.ticketCount;
-		locals.logger.invocationReward = qpi.invocationReward();
-		LOG_DEBUG(locals.logger);
-		setMemory(output.ticketIndexes, 0);
-		output.roundId = 0;
-		output.acceptedCount = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
+		locals.slot = gameSlot(input.gameId);
+		if (!isGameIdValid(state, input.gameId))
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.storageTicketCount = state.get().ticketCount;
-			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_GAME;
 			return;
 		}
-		if (input.ticketCount == 0 || input.ticketCount > PULSEEDITOR_MAX_BATCH_TICKETS)
+		locals.game = state.get().games.get(locals.slot);
+		if (locals.game.owner != qpi.invocator())
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_COUNT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedCount = input.ticketCount;
-			locals.logger.ticketLimit = PULSEEDITOR_MAX_BATCH_TICKETS;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		locals.reward = qpi.invocationReward() > 0 ? static_cast<uint64>(qpi.invocationReward()) : 0;
-		locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount));
-
-		if (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status != ERoundStatus::SELLING)
+		if (locals.game.status == EGameStatus::FINALIZING)
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_STATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-			locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
-		if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
+		if (input.runCreditAmount > locals.game.runCredit || input.creatorBalanceAmount > locals.game.creatorBalance)
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_NOT_STARTED, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.currentTick = qpi.tick();
-			locals.logger.startTick = locals.round.startTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
-		if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
+		locals.failed = false;
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
 		{
-			locals.round.status = ERoundStatus::CLOSED;
-			state.mut().rounds.set(input.templateId, locals.round);
-			if (qpi.invocationReward() > 0)
+			if (input.runCreditAmount > 0)
 			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ENDED, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.currentTick = qpi.tick();
-			locals.logger.endTick = locals.round.endTick;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if ((locals.gameTemplate.entryMode == EEntryMode::QUBIC && locals.reward != locals.totalPrice) ||
-		    (locals.gameTemplate.entryMode == EEntryMode::ASSET && locals.reward != 0))
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PRICE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.invocationReward = locals.reward;
-			locals.logger.totalPrice = locals.totalPrice;
-			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
-			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-			locals.logger.requestedCount = input.ticketCount;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.gameTemplate.entryMode == EEntryMode::ASSET && locals.totalPrice > static_cast<uint64>(INT64_MAX))
-		{
-			output.returnCode = toReturnCode(EReturnCode::TICKET_INVALID_PRICE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_PRICE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.totalPrice = locals.totalPrice;
-			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-			locals.logger.requestedCount = input.ticketCount;
-			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (sadd(state.get().ticketCount, static_cast<uint64>(input.ticketCount)) > state.get().tickets.capacity())
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_STORAGE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedCount = input.ticketCount;
-			locals.logger.storageTicketCount = state.get().ticketCount;
-			locals.logger.storageTicketCapacity = state.get().tickets.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (!locals.gameTemplate.instantSettlement &&
-		    sadd(static_cast<uint64>(locals.round.ticketCount), static_cast<uint64>(input.ticketCount)) > locals.gameTemplate.ticketLimit)
-		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ROUND_LIMIT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedCount = input.ticketCount;
-			locals.logger.roundTicketCount = locals.round.ticketCount;
-			locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
-		{
-			locals.validateInput.digits = input.tickets.get(locals.i).digits;
-			locals.validateInput.codeLength = locals.gameTemplate.codeLength;
-			locals.validateInput.maxDigit = locals.gameTemplate.maxDigit;
-			locals.validateInput.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
-			if (!locals.validateOutput.isValid)
-			{
-				if (qpi.invocationReward() > 0)
+				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.runCreditAmount));
+				if (locals.transferResult >= 0)
 				{
-					qpi.transfer(qpi.invocator(), qpi.invocationReward());
-				}
-				output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_DIGITS, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.loopIndex = static_cast<uint32>(locals.i);
-				locals.logger.digits = input.tickets.get(locals.i).digits;
-				locals.logger.codeLength = locals.gameTemplate.codeLength;
-				locals.logger.maxDigit = locals.gameTemplate.maxDigit;
-				locals.logger.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
-				return;
-			}
-		}
-
-		if (!locals.gameTemplate.instantSettlement)
-		{
-			locals.playerTicketCount = 0;
-			for (locals.i = 0; locals.i < state.get().ticketCount; ++locals.i)
-			{
-				locals.ticket = state.get().tickets.get(locals.i);
-				if (locals.ticket.status == ETicketStatus::ACTIVE && locals.ticket.templateId == input.templateId &&
-				    locals.ticket.roundId == locals.round.roundId && locals.ticket.player == qpi.invocator())
-				{
-					++locals.playerTicketCount;
-				}
-			}
-			if (sadd(static_cast<uint64>(locals.playerTicketCount), static_cast<uint64>(input.ticketCount)) > locals.gameTemplate.playerTicketLimit)
-			{
-				if (qpi.invocationReward() > 0)
-				{
-					qpi.transfer(qpi.invocator(), qpi.invocationReward());
-				}
-				output.returnCode = toReturnCode(EReturnCode::PLAYER_TICKET_LIMIT);
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PLAYER_LIMIT, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.requestedCount = input.ticketCount;
-				locals.logger.playerTicketCount = locals.playerTicketCount;
-				locals.logger.playerTicketLimit = locals.gameTemplate.playerTicketLimit;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
-				return;
-			}
-			if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
-			{
-				locals.possessedShares = qpi.numberOfPossessedShares(
-				    locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, qpi.invocator(), qpi.invocator(),
-				    locals.gameTemplate.entryOwnershipManagingContractIndex, locals.gameTemplate.entryPossessionManagingContractIndex);
-				if (locals.possessedShares < static_cast<sint64>(locals.totalPrice))
-				{
-					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_ASSET_BALANCE, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.totalPrice = locals.totalPrice;
-					locals.logger.possessedShares = locals.possessedShares;
-					locals.logger.returnCode = output.returnCode;
-					LOG_WARNING(locals.logger);
-					return;
-				}
-				locals.transferResult =
-				    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer,
-				                                            qpi.invocator(), qpi.invocator(), static_cast<sint64>(locals.totalPrice), SELF);
-				if (locals.transferResult < 0)
-				{
-					output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_ASSET_TRANSFER, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.totalPrice = locals.totalPrice;
-					locals.logger.transferResult = locals.transferResult;
-					locals.logger.returnCode = output.returnCode;
-					LOG_ERROR(locals.logger);
-					return;
-				}
-			}
-		}
-
-		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
-		{
-			if (locals.gameTemplate.instantSettlement)
-			{
-				locals.gameTemplate = state.get().templates.get(input.templateId);
-				locals.round = state.get().rounds.get(input.templateId);
-				if (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status != ERoundStatus::SELLING)
-				{
-					if (locals.gameTemplate.entryMode == EEntryMode::QUBIC)
-					{
-						locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount - output.acceptedCount));
-						if (locals.totalPrice > 0)
-						{
-							qpi.transfer(qpi.invocator(), locals.totalPrice);
-						}
-					}
-					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_STATE, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.acceptedCount = output.acceptedCount;
-					locals.logger.roundId = locals.round.roundId;
-					locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-					locals.logger.roundStatus = static_cast<uint8>(locals.round.status);
-					locals.logger.returnCode = output.returnCode;
-					if (output.acceptedCount > 0)
-					{
-						LOG_ERROR(locals.logger);
-					}
-					else
-					{
-						LOG_WARNING(locals.logger);
-					}
-					return;
-				}
-				if (locals.round.startTick > 0 && qpi.tick() < locals.round.startTick)
-				{
-					if (locals.gameTemplate.entryMode == EEntryMode::QUBIC)
-					{
-						locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount - output.acceptedCount));
-						if (locals.totalPrice > 0)
-						{
-							qpi.transfer(qpi.invocator(), locals.totalPrice);
-						}
-					}
-					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_NOT_STARTED,
-					           qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.acceptedCount = output.acceptedCount;
-					locals.logger.currentTick = qpi.tick();
-					locals.logger.startTick = locals.round.startTick;
-					locals.logger.returnCode = output.returnCode;
-					if (output.acceptedCount > 0)
-					{
-						LOG_ERROR(locals.logger);
-					}
-					else
-					{
-						LOG_WARNING(locals.logger);
-					}
-					return;
-				}
-				if (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick)
-				{
-					locals.round.status = ERoundStatus::CLOSED;
-					state.mut().rounds.set(input.templateId, locals.round);
-					if (locals.gameTemplate.entryMode == EEntryMode::QUBIC)
-					{
-						locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount - output.acceptedCount));
-						if (locals.totalPrice > 0)
-						{
-							qpi.transfer(qpi.invocator(), locals.totalPrice);
-						}
-					}
-					output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_ENDED, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.acceptedCount = output.acceptedCount;
-					locals.logger.currentTick = qpi.tick();
-					locals.logger.endTick = locals.round.endTick;
-					locals.logger.returnCode = output.returnCode;
-					if (output.acceptedCount > 0)
-					{
-						LOG_ERROR(locals.logger);
-					}
-					else
-					{
-						LOG_WARNING(locals.logger);
-					}
-					return;
-				}
-				if (state.get().ticketCount >= state.get().tickets.capacity() || locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
-				{
-					if (locals.gameTemplate.entryMode == EEntryMode::QUBIC)
-					{
-						locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount - output.acceptedCount));
-						if (locals.totalPrice > 0)
-						{
-							qpi.transfer(qpi.invocator(), locals.totalPrice);
-						}
-					}
-					output.returnCode = toReturnCode(EReturnCode::TICKET_SOLD_OUT);
-					prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_PARTIAL_SOLD_OUT, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.acceptedCount = output.acceptedCount;
-					locals.logger.storageTicketCount = state.get().ticketCount;
-					locals.logger.storageTicketCapacity = state.get().tickets.capacity();
-					locals.logger.roundTicketCount = locals.round.ticketCount;
-					locals.logger.ticketLimit = locals.gameTemplate.ticketLimit;
-					locals.logger.returnCode = output.returnCode;
-					if (output.acceptedCount > 0)
-					{
-						LOG_ERROR(locals.logger);
-					}
-					else
-					{
-						LOG_WARNING(locals.logger);
-					}
-					return;
-				}
-			}
-
-			if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
-			{
-				if (locals.gameTemplate.instantSettlement)
-				{
-					locals.possessedShares = qpi.numberOfPossessedShares(
-					    locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, qpi.invocator(), qpi.invocator(),
-					    locals.gameTemplate.entryOwnershipManagingContractIndex, locals.gameTemplate.entryPossessionManagingContractIndex);
-					if (locals.possessedShares < static_cast<sint64>(locals.gameTemplate.ticketPrice))
-					{
-						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::BTS_TICKET_ASSET_BALANCE,
-						           qpi.invocator());
-						locals.logger.templateId = input.templateId;
-						locals.logger.acceptedCount = output.acceptedCount;
-						locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-						locals.logger.possessedShares = locals.possessedShares;
-						locals.logger.returnCode = output.returnCode;
-						if (output.acceptedCount > 0)
-						{
-							LOG_ERROR(locals.logger);
-						}
-						else
-						{
-							LOG_WARNING(locals.logger);
-						}
-						return;
-					}
-					locals.transferResult = qpi.transferShareOwnershipAndPossession(
-					    locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, qpi.invocator(), qpi.invocator(),
-					    static_cast<sint64>(locals.gameTemplate.ticketPrice), SELF);
-					if (locals.transferResult < 0)
-					{
-						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_TICKET_ASSET_TRANSFER,
-						           qpi.invocator());
-						locals.logger.templateId = input.templateId;
-						locals.logger.acceptedCount = output.acceptedCount;
-						locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-						locals.logger.transferResult = locals.transferResult;
-						locals.logger.returnCode = output.returnCode;
-						LOG_ERROR(locals.logger);
-						return;
-					}
-				}
-				locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
-				locals.dev1Amount = platformDev1Share(locals.platformFee);
-				locals.dev2Amount = platformDev2Share(locals.platformFee);
-				locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-				locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
-				locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
-				locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
-				locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
-				if (locals.burnAmount > 0)
-				{
-					locals.transferResult =
-					    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
-					                                            SELF, static_cast<sint64>(locals.burnAmount), NULL_ID);
-					if (locals.transferResult < 0)
-					{
-						if (locals.gameTemplate.instantSettlement)
-						{
-							qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer,
-							                                        SELF, SELF, static_cast<sint64>(locals.gameTemplate.ticketPrice),
-							                                        qpi.invocator());
-						}
-						else if (output.acceptedCount == 0)
-						{
-							qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer,
-							                                        SELF, SELF, static_cast<sint64>(locals.totalPrice), qpi.invocator());
-						}
-						output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-						prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::BTS_BURN_TRANSFER, qpi.invocator());
-						locals.logger.templateId = input.templateId;
-						locals.logger.acceptedCount = output.acceptedCount;
-						locals.logger.ticketPrice = locals.burnAmount;
-						locals.logger.transferResult = locals.transferResult;
-						locals.logger.returnCode = output.returnCode;
-						LOG_ERROR(locals.logger);
-						return;
-					}
-				}
-				locals.gameTemplate.assetDeveloper1Accrued = sadd(locals.gameTemplate.assetDeveloper1Accrued, locals.dev1Amount);
-				locals.gameTemplate.assetDeveloper2Accrued = sadd(locals.gameTemplate.assetDeveloper2Accrued, locals.dev2Amount);
-				locals.gameTemplate.assetDividendAccrued = sadd(locals.gameTemplate.assetDividendAccrued, locals.dividendAmount);
-				locals.gameTemplate.assetCreatorRevenue = sadd(locals.gameTemplate.assetCreatorRevenue, locals.creatorAmount);
-				locals.gameTemplate.assetBurnAccrued = sadd(locals.gameTemplate.assetBurnAccrued, locals.burnAmount);
-				locals.gameTemplate.assetPrizeReserve = sadd(locals.gameTemplate.assetPrizeReserve, locals.prizeAmount);
-				locals.gameTemplate.assetEntryRevenue = sadd(locals.gameTemplate.assetEntryRevenue, locals.gameTemplate.ticketPrice);
-				locals.gameTemplate.hasTicketSales = true;
-				locals.round.revenue = sadd(locals.round.revenue, locals.gameTemplate.ticketPrice);
-				locals.round.prizeAdded = sadd(locals.round.prizeAdded, locals.prizeAmount);
-			}
-			else
-			{
-				locals.platformFee = ticketPlatformFee(locals.gameTemplate.ticketPrice, state.get().platformFeePercent);
-				locals.dev1Amount = platformDev1Share(locals.platformFee);
-				locals.dev2Amount = platformDev2Share(locals.platformFee);
-				locals.dividendAmount = locals.platformFee - locals.dev1Amount - locals.dev2Amount;
-				locals.netRevenue = ticketNetRevenue(locals.gameTemplate.ticketPrice, locals.platformFee);
-				locals.creatorAmount = ticketCreatorShare(locals.netRevenue, locals.gameTemplate.creatorFeePercent);
-				locals.burnAmount = ticketBurnShare(locals.netRevenue, locals.gameTemplate.burnPercent);
-				locals.prizeAmount = ticketPrizeShare(locals.netRevenue, locals.creatorAmount, locals.burnAmount);
-
-				state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.dev1Amount);
-				state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.dev2Amount);
-				state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.dividendAmount);
-
-				locals.gameTemplate.creatorRevenue = sadd(locals.gameTemplate.creatorRevenue, locals.creatorAmount);
-				locals.gameTemplate.burnAccrued = sadd(locals.gameTemplate.burnAccrued, locals.burnAmount);
-				if (locals.burnAmount > 0)
-				{
-					qpi.transfer(NULL_ID, locals.burnAmount);
-				}
-				locals.gameTemplate.prizeReserve = sadd(locals.gameTemplate.prizeReserve, locals.prizeAmount);
-				locals.gameTemplate.totalRevenue = sadd(locals.gameTemplate.totalRevenue, locals.gameTemplate.ticketPrice);
-				locals.gameTemplate.hasTicketSales = true;
-				locals.round.revenue = sadd(locals.round.revenue, locals.gameTemplate.ticketPrice);
-				locals.round.prizeAdded = sadd(locals.round.prizeAdded, locals.prizeAmount);
-			}
-			++locals.round.ticketCount;
-
-			setMemory(locals.ticket, 0);
-			locals.ticket.digits = input.tickets.get(locals.i).digits;
-			locals.ticket.player = qpi.invocator();
-			locals.ticket.roundId = locals.round.roundId;
-			locals.ticket.templateId = input.templateId;
-			locals.ticket.status = ETicketStatus::ACTIVE;
-
-			if (output.acceptedCount == 0)
-			{
-				output.roundId = locals.round.roundId;
-			}
-			output.ticketIndexes.set(locals.i, state.get().ticketCount);
-			state.mut().tickets.set(state.get().ticketCount, locals.ticket);
-			state.mut().ticketCount = sadd(state.get().ticketCount, 1ULL);
-			++output.acceptedCount;
-
-			if (locals.round.ticketCount >= locals.gameTemplate.ticketLimit)
-			{
-				locals.round.status = ERoundStatus::CLOSED;
-			}
-			state.mut().templates.set(input.templateId, locals.gameTemplate);
-			state.mut().rounds.set(input.templateId, locals.round);
-			prepareLog(locals.logger, ELogPhase::STATE_CHANGE, ELogDetail::BTS_ACCEPTED, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.roundId = locals.round.roundId;
-			locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-			locals.logger.acceptedCount = output.acceptedCount;
-			locals.logger.ticketPrice = locals.gameTemplate.ticketPrice;
-			locals.logger.digits = input.tickets.get(locals.i).digits;
-			LOG_DEBUG(locals.logger);
-
-			if (locals.gameTemplate.instantSettlement)
-			{
-				locals.settleInput.templateId = input.templateId;
-				locals.settleInput.ticketIndex = output.ticketIndexes.get(locals.i);
-				CALL(SettleInstantTicket, locals.settleInput, locals.settleOutput);
-				if (locals.settleOutput.returnCode != toReturnCode(EReturnCode::SUCCESS))
-				{
-					if (locals.gameTemplate.entryMode == EEntryMode::QUBIC)
-					{
-						locals.totalPrice = smul(locals.gameTemplate.ticketPrice, static_cast<uint64>(input.ticketCount - output.acceptedCount));
-						if (locals.totalPrice > 0)
-						{
-							qpi.transfer(qpi.invocator(), locals.totalPrice);
-						}
-					}
-					output.returnCode = locals.settleOutput.returnCode;
-					prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
-					locals.logger.templateId = input.templateId;
-					locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-					locals.logger.acceptedCount = output.acceptedCount;
-					locals.logger.settlementReturnCode = locals.settleOutput.returnCode;
-					locals.logger.returnCode = output.returnCode;
-					LOG_ERROR(locals.logger);
-					return;
-				}
-				prepareLog(locals.logger, ELogPhase::SETTLEMENT, ELogDetail::BTS_INSTANT_SETTLEMENT, qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.ticketIndex = output.ticketIndexes.get(locals.i);
-				locals.logger.acceptedCount = output.acceptedCount;
-				locals.logger.returnCode = locals.settleOutput.returnCode;
-				LOG_DEBUG(locals.logger);
-			}
-		}
-
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.roundId = output.roundId;
-		locals.logger.acceptedCount = output.acceptedCount;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Settles an eligible active round from tick automation.
-	 * @param input Template id whose current round should be settled.
-	 * @param output Winning digits, paid total, winner counts, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, or `INVALID_STATE`.
-	 * @note This is not user-callable; external callers cannot force draws outside the tick lifecycle.
-	 * @warning Winners are marked unpaid if the prize reserve cannot cover their fixed payout.
-	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(SettleRound)
-	{
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-
-		if (locals.round.status != ERoundStatus::SELLING && locals.round.status != ERoundStatus::CLOSED)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			return;
-		}
-		if (locals.round.status == ERoundStatus::SELLING && locals.round.ticketCount < locals.gameTemplate.ticketLimit && locals.round.endTick > 0 &&
-		    qpi.tick() <= locals.round.endTick)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			return;
-		}
-		if (locals.round.status == ERoundStatus::SELLING)
-		{
-			locals.round.status = ERoundStatus::CLOSED;
-		}
-
-		locals.randomData.prevSpectrumDigest = qpi.getPrevSpectrumDigest();
-		locals.randomData.templateId = input.templateId;
-		locals.randomData.roundId = locals.round.roundId;
-		locals.randomData.ticketCount = locals.round.ticketCount;
-		locals.seed = qpi.K12(locals.randomData).u64._0;
-		locals.generateInput.seed = locals.seed;
-		locals.generateInput.codeLength = locals.gameTemplate.codeLength;
-		locals.generateInput.maxDigit = locals.gameTemplate.maxDigit;
-		locals.generateInput.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-		CALL(GenerateWinningDigits, locals.generateInput, locals.generateOutput);
-
-		locals.round.winningDigits = locals.generateOutput.digits;
-		for (locals.i = 0; locals.i < state.get().ticketCount; ++locals.i)
-		{
-			locals.ticket = state.get().tickets.get(locals.i);
-			if (locals.ticket.status != ETicketStatus::ACTIVE || locals.ticket.templateId != input.templateId ||
-			    locals.ticket.roundId != locals.round.roundId)
-			{
-				continue;
-			}
-
-			locals.countInput.playerDigits = locals.ticket.digits;
-			locals.countInput.winningDigits = locals.round.winningDigits;
-			locals.countInput.codeLength = locals.gameTemplate.codeLength;
-			CALL(CountMatches, locals.countInput, locals.countOutput);
-
-			locals.ticket.exact = locals.countOutput.exact;
-			locals.ticket.misplaced = locals.countOutput.misplaced;
-			locals.payout = locals.gameTemplate.payoutMatrix.get(locals.countOutput.payoutMatrixIndex);
-			locals.bonusPayout = 0;
-			locals.bonusQualified = false;
-
-			if (locals.payout > 0)
-			{
-				++locals.round.winnerCount;
-				if (locals.gameTemplate.bonusEnabled && locals.gameTemplate.bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE)
-				{
-					for (locals.bonusAssetIndex = 0; locals.bonusAssetIndex < locals.gameTemplate.bonusAssetCount; ++locals.bonusAssetIndex)
-					{
-						locals.bonusShares = qpi.numberOfPossessedShares(
-						    locals.gameTemplate.bonusAssets.get(locals.bonusAssetIndex).assetName,
-						    locals.gameTemplate.bonusAssets.get(locals.bonusAssetIndex).issuer, locals.ticket.player, locals.ticket.player,
-						    locals.gameTemplate.bonusOwnershipManagingContractIndex, locals.gameTemplate.bonusPossessionManagingContractIndex);
-						if (locals.bonusShares > 0)
-						{
-							locals.bonusQualified = true;
-							break;
-						}
-					}
-					locals.bonusPayout = bonusExtraPayout(locals.payout, locals.gameTemplate.bonusMultiplierBps);
-					if (!locals.bonusQualified ||
-					    !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
-					      (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
-					{
-						locals.bonusPayout = 0;
-					}
-				}
-				locals.totalPayout = sadd(locals.payout, locals.bonusPayout);
-				locals.ticket.payout = locals.gameTemplate.rewardMode == ERewardMode::QUBIC ? locals.totalPayout : 0;
-				locals.ticket.bonusPayout = locals.gameTemplate.rewardMode == ERewardMode::QUBIC ? locals.bonusPayout : 0;
-				locals.ticket.assetPayout = locals.gameTemplate.rewardMode == ERewardMode::ASSET ? locals.totalPayout : 0;
-				locals.ticket.assetBonusPayout = locals.gameTemplate.rewardMode == ERewardMode::ASSET ? locals.bonusPayout : 0;
-				if (locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.prizeReserve >= locals.payout)
-				{
-					qpi.transfer(locals.ticket.player, locals.totalPayout);
-					locals.gameTemplate.prizeReserve = locals.gameTemplate.prizeReserve - locals.payout;
-					locals.gameTemplate.bonusReserve = locals.gameTemplate.bonusReserve - locals.bonusPayout;
-					locals.gameTemplate.totalPaid = sadd(locals.gameTemplate.totalPaid, locals.totalPayout);
-					locals.gameTemplate.totalBonusPaid = sadd(locals.gameTemplate.totalBonusPaid, locals.bonusPayout);
-					locals.round.paid = sadd(locals.round.paid, locals.totalPayout);
-					locals.ticket.status = ETicketStatus::PAID;
-				}
-				else if (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetPrizeReserve >= locals.payout &&
-				         locals.totalPayout <= static_cast<uint64>(INT64_MAX))
-				{
-					locals.transferResult =
-					    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.rewardAsset.assetName, locals.gameTemplate.rewardAsset.issuer,
-					                                            SELF, SELF, static_cast<sint64>(locals.totalPayout), locals.ticket.player);
-					if (locals.transferResult < 0)
-					{
-						++locals.round.unpaidWinnerCount;
-						locals.ticket.status = ETicketStatus::UNPAID;
-					}
-					else
-					{
-						locals.gameTemplate.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve - locals.payout;
-						locals.gameTemplate.assetBonusReserve = locals.gameTemplate.assetBonusReserve - locals.bonusPayout;
-						locals.gameTemplate.totalAssetPaid = sadd(locals.gameTemplate.totalAssetPaid, locals.totalPayout);
-						locals.gameTemplate.totalBonusPaid = sadd(locals.gameTemplate.totalBonusPaid, locals.bonusPayout);
-						locals.round.paid = sadd(locals.round.paid, locals.totalPayout);
-						locals.ticket.status = ETicketStatus::PAID;
-					}
+					locals.game.runCredit -= input.runCreditAmount;
+					output.runCreditPaid = input.runCreditAmount;
 				}
 				else
 				{
-					++locals.round.unpaidWinnerCount;
-					locals.ticket.status = ETicketStatus::UNPAID;
-				}
-
-				if (locals.ticket.status == ETicketStatus::PAID)
-				{
-					locals.winnerInfo.epoch = qpi.epoch();
-					locals.winnerInfo.tick = qpi.tick();
-					locals.winnerInfo.player = locals.ticket.player;
-					locals.winnerInfo.payout = locals.ticket.payout;
-					locals.winnerInfo.bonusPayout = locals.ticket.bonusPayout;
-					locals.winnerInfo.assetPayout = locals.ticket.assetPayout;
-					locals.winnerInfo.assetBonusPayout = locals.ticket.assetBonusPayout;
-					locals.winnerInfo.roundId = locals.round.roundId;
-					locals.winnerInfo.templateId = input.templateId;
-					locals.winnerInfo.exact = locals.ticket.exact;
-					locals.winnerInfo.misplaced = locals.ticket.misplaced;
-					locals.winnerIndex = mod(state.get().winnerCounter, state.get().winners.capacity());
-					state.mut().winners.set(locals.winnerIndex, locals.winnerInfo);
-					state.mut().winnerCounter = sadd(state.get().winnerCounter, 1ULL);
+					locals.failed = true;
 				}
 			}
-			else
+			if (input.creatorBalanceAmount > 0)
 			{
-				locals.ticket.payout = 0;
-				locals.ticket.bonusPayout = 0;
-				locals.ticket.assetPayout = 0;
-				locals.ticket.assetBonusPayout = 0;
-				locals.ticket.status = ETicketStatus::PAID;
+				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.creatorBalanceAmount));
+				if (locals.transferResult >= 0)
+				{
+					locals.game.creatorBalance -= input.creatorBalanceAmount;
+					output.creatorBalancePaid = input.creatorBalanceAmount;
+				}
+				else
+				{
+					locals.failed = true;
+				}
 			}
-
-			state.mut().tickets.set(locals.i, locals.ticket);
-		}
-
-		locals.round.settledTick = qpi.tick();
-		locals.round.status = ERoundStatus::SETTLED;
-		locals.gameTemplate.lastDrawEpoch = qpi.epoch();
-		if (locals.gameTemplate.status == ETemplateStatus::STOP_REQUESTED)
-		{
-			locals.gameTemplate.status = ETemplateStatus::STOPPED;
-		}
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-
-		output.winningDigits = locals.round.winningDigits;
-		output.totalPaid = locals.round.paid;
-		output.winnerCount = locals.round.winnerCount;
-		output.unpaidWinnerCount = locals.round.unpaidWinnerCount;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Requests graceful template shutdown.
-	 * @param input Template id owned by the invocator.
-	 * @param output Status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, or `ACCESS_DENIED`.
-	 * @note If a round is still selling, the template enters `STOP_REQUESTED` and becomes stopped after settlement.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(RequestStop)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
-		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::RS_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::RS_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (locals.round.status == ERoundStatus::SELLING || locals.round.status == ERoundStatus::CLOSED)
-		{
-			locals.gameTemplate.status = ETemplateStatus::STOP_REQUESTED;
 		}
 		else
 		{
-			locals.gameTemplate.status = ETemplateStatus::STOPPED;
+			if (input.runCreditAmount > 0)
+			{
+				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.runCreditAmount));
+				if (locals.transferResult >= 0)
+				{
+					locals.game.runCredit -= input.runCreditAmount;
+					output.runCreditPaid = input.runCreditAmount;
+				}
+				else
+				{
+					locals.failed = true;
+				}
+			}
+			if (input.creatorBalanceAmount > 0)
+			{
+				locals.transferResult =
+				    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, SELF, SELF,
+				                                            static_cast<sint64>(input.creatorBalanceAmount), locals.game.owner);
+				if (locals.transferResult >= 0)
+				{
+					locals.game.creatorBalance -= input.creatorBalanceAmount;
+					output.creatorBalancePaid = input.creatorBalanceAmount;
+				}
+				else
+				{
+					locals.failed = true;
+				}
+			}
 		}
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.roundId = locals.round.roundId;
-		locals.logger.templateStatus = static_cast<uint8>(locals.gameTemplate.status);
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		state.mut().games.set(locals.slot, locals.game);
+		output.returnCode = locals.failed ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Withdraws creator revenue accrued from ticket purchases.
-	 * @param input Template id and amount to withdraw.
-	 * @param output Withdrawn amount, remaining creator revenue, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, or `INSUFFICIENT_FUNDS`.
-	 * @note Prize reserves and platform accounting are not affected by this withdrawal.
+	 * @brief Queues validated economics for the next round of a permanent game.
+	 * @param input Complete replace-on-write next-round economics.
+	 * @param output Result code; the current round is never modified.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawCreatorRevenue)
+	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateGameEconomics)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requestedAmount = input.amount;
-		LOG_DEBUG(locals.logger);
-		if (!isTemplateIdValid(state, input.templateId))
+		locals.slot = gameSlot(input.gameId);
+		if (!isGameIdValid(state, input.gameId))
 		{
-			if (qpi.invocationReward() > 0)
-			{
-				qpi.transfer(qpi.invocator(), qpi.invocationReward());
-			}
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_TEMPLATE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_GAME;
 			return;
 		}
-		if (qpi.invocationReward() > 0)
+		locals.game = state.get().games.get(locals.slot);
+		if (locals.game.mode != EGameMode::PERMANENT)
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
 		}
+		if (locals.game.owner != qpi.invocator())
+		{
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
+		}
+		if (locals.game.status == EGameStatus::FINALIZING)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (input.ticketPrice == 0 || input.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT || input.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (input.ticketLimit == 0 || input.ticketLimit > PLDT_MAX_TICKETS_PER_GAME || input.playerTicketLimit == 0 ||
+		    input.playerTicketLimit > input.ticketLimit)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (input.creatorFeePercent > state.get().maxCreatorFeePercent)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (input.creatorRevenueMode != ECreatorRevenueMode::PAYOUT && input.creatorRevenueMode != ECreatorRevenueMode::REINVEST)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		locals.economicsInput.ticketPrice = input.ticketPrice;
+		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
+		if (input.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.ticketLimit)) ||
+		    locals.refundablePerTicket > div(PLDT_MAX_TRANSFER_AMOUNT - input.creatorPrizeSeed, static_cast<uint64>(input.ticketLimit)))
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		setMemory(locals.pending, 0);
+		locals.pending.ticketPrice = input.ticketPrice;
+		locals.pending.creatorPrizeSeed = input.creatorPrizeSeed;
+		locals.pending.ticketLimit = input.ticketLimit;
+		locals.pending.playerTicketLimit = input.playerTicketLimit;
+		locals.pending.creatorFeePercent = input.creatorFeePercent;
+		locals.pending.creatorRevenueMode = input.creatorRevenueMode;
+		locals.pending.isSet = true;
+		locals.game.pendingEconomics = locals.pending;
+		state.mut().games.set(locals.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
+	}
 
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		if (qpi.invocator() != locals.gameTemplate.owner)
+	/**
+	 * @brief Cancels either mode before first start or requests terminal closure when applicable.
+	 * @param input Game id.
+	 * @param output Result code; an active one-shot round is unchanged and an active permanent round is not shortened.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(StopGame)
+	{
+		locals.slot = gameSlot(input.gameId);
+		if (!isGameIdValid(state, input.gameId))
 		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.owner = locals.gameTemplate.owner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_GAME;
 			return;
 		}
-		if (locals.gameTemplate.entryMode == EEntryMode::ASSET)
+		locals.game = state.get().games.get(locals.slot);
+		if (locals.game.owner != qpi.invocator())
 		{
-			if (input.amount == 0 || input.amount > locals.gameTemplate.assetCreatorRevenue || input.amount > static_cast<uint64>(INT64_MAX))
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
+		}
+		if (locals.game.roundNumber == 1 && locals.game.status == EGameStatus::SCHEDULED && qpi.now() < locals.game.startAt)
+		{
+			locals.finalizeInput.slot = locals.slot;
+			locals.finalizeInput.reason = EGameTerminalReason::OWNER_CANCELLED;
+			CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+			output.returnCode = locals.finalizeOutput.returnCode;
+			return;
+		}
+		if (locals.game.mode == EGameMode::ONE_SHOT)
+		{
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		if (locals.game.status == EGameStatus::FINALIZING && locals.game.finalizingStopReason == EGameStopReason::NONE)
+		{
+			locals.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
+			locals.game.pendingRunCreditPayout = locals.game.runCredit;
+			locals.game.runCredit = 0;
+			locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
+			locals.game.creatorBalance = 0;
+			locals.game.stopRequested = true;
+			state.mut().games.set(locals.slot, locals.game);
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		locals.game.stopRequested = true;
+		state.mut().games.set(locals.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Buys one ticket during the effective UTC sales window.
+	 * @param input Game id and submitted digits.
+	 * @param output Generation-aware ticket id, compatibility slot, contribution, and result code.
+	 * @note Invalid Qubic purchases refund the invocation reward.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTicket)
+	{
+		// Validate lifecycle, storage, digits, player limit, and every bounded ledger before custody.
+		output.ticketIndex = 0;
+		output.prizeContribution = 0;
+		if (!isGameIdValid(state, input.gameId))
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.slot = gameSlot(input.gameId);
+		locals.game = state.get().games.get(locals.slot);
+		locals.now = qpi.now();
+		locals.lifecycleInput.game = locals.game;
+		locals.lifecycleInput.now = locals.now;
+		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
+		{
+			locals.refundInput.returnCode = locals.lifecycleOutput.purchaseReturnCode;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.game.status = locals.lifecycleOutput.effectiveStatus;
+		if (locals.game.ticketCount >= locals.game.ticketLimit ||
+		    (state.get().freeTicketCount == 0 &&
+		     (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount) >= state.get().tickets.capacity()))
+		{
+			locals.refundInput.returnCode = EReturnCode::TICKET_SOLD_OUT;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.validateInput.digits = input.digits;
+		locals.validateInput.codeLength = locals.game.codeLength;
+		locals.validateInput.maxDigit = locals.game.maxDigit;
+		locals.validateInput.allowRepeatedDigits = locals.game.allowRepeatedDigits;
+		CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
+		if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			locals.refundInput.returnCode = locals.validateOutput.returnCode;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.link = locals.game.firstTicketLink;
+		locals.playerTickets = 0;
+		while (locals.link != 0)
+		{
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.player == qpi.invocator())
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
-				prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_ASSET_AMOUNT,
-				           qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.requestedAmount = input.amount;
-				locals.logger.remainingRevenue = output.remainingRevenue;
-				locals.logger.returnCode = output.returnCode;
-				LOG_WARNING(locals.logger);
+				++locals.playerTickets;
+			}
+			locals.link = locals.ticket.nextLink;
+		}
+		if (locals.playerTickets >= locals.game.playerTicketLimit)
+		{
+			locals.refundInput.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.bonusInput.game = locals.game;
+		locals.bonusInput.player = qpi.invocator();
+		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
+		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
+		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		if (locals.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - locals.game.ticketPrice ||
+		    locals.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool ||
+		    locals.economicsOutput.prizeContribution > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool - locals.game.creatorBalance)
+		{
+			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		// Take exactly one currency payment only after the purchase is known to fit atomically.
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer1Fee ||
+			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer2Fee ||
+			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.dividendFee)
+			{
+				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
 				return;
 			}
-
-			locals.amount = input.amount;
+		}
+		else
+		{
+			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
+			if (locals.assetAccounting.developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer1Fee ||
+			    locals.assetAccounting.developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer2Fee ||
+			    locals.assetAccounting.dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.dividendFee)
+			{
+				output.returnCode = EReturnCode::STORAGE_FULL;
+				return;
+			}
+		}
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (qpi.invocationReward() != locals.game.ticketPrice)
+			{
+				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+		}
+		else
+		{
+			if (qpi.invocationReward() != 0)
+			{
+				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+			locals.possessedShares =
+			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
+			if (locals.possessedShares < static_cast<sint64>(locals.game.ticketPrice))
+			{
+				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+				return;
+			}
 			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF, SELF,
-			                                            static_cast<sint64>(locals.amount), qpi.invocator());
+			    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(),
+			                                            qpi.invocator(), static_cast<sint64>(locals.game.ticketPrice), SELF);
 			if (locals.transferResult < 0)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
-				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WCR_ASSET_TRANSFER,
-				           qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.requestedAmount = input.amount;
-				locals.logger.remainingRevenue = output.remainingRevenue;
-				locals.logger.transferResult = locals.transferResult;
-				locals.logger.returnCode = output.returnCode;
-				LOG_ERROR(locals.logger);
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
 				return;
 			}
-			locals.gameTemplate.assetCreatorRevenue = locals.gameTemplate.assetCreatorRevenue - locals.amount;
-			state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-			output.withdrawnAmount = locals.amount;
-			output.remainingRevenue = locals.gameTemplate.assetCreatorRevenue;
-			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedAmount = output.withdrawnAmount;
-			locals.logger.remainingRevenue = output.remainingRevenue;
-			locals.logger.returnCode = output.returnCode;
-			LOG_INFO(locals.logger);
-			return;
 		}
-
-		if (input.amount == 0 || input.amount > locals.gameTemplate.creatorRevenue)
+		// Burn first, then commit the ticket and accounting; a failed burn refunds the collected payment.
+		locals.burnInput.game = locals.game;
+		locals.burnInput.ticketCount = 1;
+		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
+		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			output.remainingRevenue = locals.gameTemplate.creatorRevenue;
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WCR_QUBIC_AMOUNT, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.requestedAmount = input.amount;
-			locals.logger.remainingRevenue = output.remainingRevenue;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			locals.transferInput.game = locals.game;
+			locals.transferInput.destination = qpi.invocator();
+			locals.transferInput.amount = locals.game.ticketPrice;
+			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
-
-		locals.amount = input.amount;
-		qpi.transfer(qpi.invocator(), locals.amount);
-		locals.gameTemplate.creatorRevenue = locals.gameTemplate.creatorRevenue - locals.amount;
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.withdrawnAmount = locals.amount;
-		output.remainingRevenue = locals.gameTemplate.creatorRevenue;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.requestedAmount = output.withdrawnAmount;
-		locals.logger.remainingRevenue = output.remainingRevenue;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		state.mut().games.set(locals.slot, locals.game);
+		locals.applyInput.gameId = input.gameId;
+		locals.applyInput.digits = input.digits;
+		locals.applyInput.bonusQualified = locals.bonusOutput.qualified;
+		CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
+		output.ticketIndex = locals.applyOutput.ticketIndex;
+		output.ticketId = locals.applyOutput.ticketId;
+		output.prizeContribution = locals.applyOutput.prizeContribution;
+		output.returnCode = locals.applyOutput.returnCode;
 	}
 
 	/**
-	 * @brief Initializes or updates platform owner, fee recipients, and creator fee limit.
-	 * @param input Platform owner, developer recipients, and maximum creator fee.
-	 * @param output Status code.
-	 * @return `SUCCESS`, `ACCESS_DENIED`, or `INVALID_VALUE`.
-	 * @note The first successful call may bootstrap the platform owner when no owner is configured.
+	 * @brief Reads an active game with its effective time-based sales status.
+	 * @param input Generation-aware game id.
+	 * @param output Game snapshot and result code.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(SetPlatformConfig)
+	PUBLIC_FUNCTION_WITH_LOCALS(GetGame)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.platformOwner = input.platformOwner;
-		locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
+		if (!isGameIdValid(state, input.gameId))
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-
-		if (state.get().platformOwner != NULL_ID && qpi.invocator() != state.get().platformOwner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::SPC_OWNER, qpi.invocator());
-			locals.logger.platformOwner = state.get().platformOwner;
-			locals.logger.currentPlatformOwner = state.get().platformOwner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_GAME;
 			return;
 		}
-		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID || input.maxCreatorFeePercent > 100)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::SPC_VALUE, qpi.invocator());
-			locals.logger.platformOwner = input.platformOwner;
-			locals.logger.developer1 = input.developer1;
-			locals.logger.developer2 = input.developer2;
-			locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
-			locals.logger.developer1Configured = input.developer1 != NULL_ID;
-			locals.logger.developer2Configured = input.developer2 != NULL_ID;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		state.mut().platformOwner = input.platformOwner;
-		state.mut().developer1 = input.developer1;
-		state.mut().developer2 = input.developer2;
-		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.platformOwner = input.platformOwner;
-		locals.logger.maxCreatorFeePercent = input.maxCreatorFeePercent;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		output.game = state.get().games.get(gameSlot(input.gameId));
+		locals.lifecycleInput.game = output.game;
+		locals.lifecycleInput.now = qpi.now();
+		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		output.game.status = locals.lifecycleOutput.effectiveStatus;
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Withdraws accumulated platform fee balances to developers and distributes shareholder dividends.
-	 * @param input Empty input.
-	 * @param output Amounts transferred/distributed to each platform revenue bucket and status code.
-	 * @return `SUCCESS`, `ACCESS_DENIED`, or `INVALID_VALUE`.
-	 * @note Dividends are paid from this SC balance with `qpi.distributeDividends(amountPerShare)`.
+	 * @brief Reads a retained terminal result.
+	 * @param input Generation-aware game id.
+	 * @param output Result snapshot or `INVALID_GAME` after ring eviction.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
+	PUBLIC_FUNCTION_WITH_LOCALS(GetRoundResult)
 	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
+		locals.gameId = input.roundKey.gameId;
+		locals.roundNumber = input.roundKey.roundNumber;
+		if (locals.gameId == 0 || locals.roundNumber == 0)
 		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-
-		if (qpi.invocator() != state.get().platformOwner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WPR_OWNER, qpi.invocator());
-			locals.logger.platformOwner = state.get().platformOwner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::INVALID_ROUND;
 			return;
 		}
-		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
+		locals.foundGame = false;
+		locals.available = state.get().resultCounter < PLDT_RESULT_HISTORY_SIZE ? state.get().resultCounter : PLDT_RESULT_HISTORY_SIZE;
+		for (locals.i = 0; locals.i < locals.available; ++locals.i)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WPR_RECIPIENTS, qpi.invocator());
-			locals.logger.developer1 = state.get().developer1;
-			locals.logger.developer2 = state.get().developer2;
-			locals.logger.developer1Configured = state.get().developer1 != NULL_ID;
-			locals.logger.developer2Configured = state.get().developer2 != NULL_ID;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.developer1Amount = state.get().developer1Accrued;
-		locals.developer2Amount = state.get().developer2Accrued;
-		locals.dividendPerShare = div<uint64>(state.get().dividendAccrued, NUMBER_OF_COMPUTORS);
-		locals.dividendAmount = smul(locals.dividendPerShare, static_cast<uint64>(NUMBER_OF_COMPUTORS));
-
-		if (locals.dividendPerShare > 0 && !qpi.distributeDividends(static_cast<sint64>(locals.dividendPerShare)))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WPR_DIVIDENDS, qpi.invocator());
-			locals.logger.dividendPerShare = locals.dividendPerShare;
-			locals.logger.dividendAmount = locals.dividendAmount;
-			locals.logger.dividendResult = 0;
-			locals.logger.retainedDividendAccrued = state.get().dividendAccrued;
-			locals.logger.returnCode = output.returnCode;
-			LOG_ERROR(locals.logger);
-			return;
-		}
-
-		if (locals.developer1Amount > 0)
-		{
-			qpi.transfer(state.get().developer1, locals.developer1Amount);
-			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
-			locals.logger.developer1 = state.get().developer1;
-			locals.logger.developer1Amount = locals.developer1Amount;
-			LOG_DEBUG(locals.logger);
-		}
-		if (locals.developer2Amount > 0)
-		{
-			qpi.transfer(state.get().developer2, locals.developer2Amount);
-			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::SUCCESS, qpi.invocator());
-			locals.logger.developer2 = state.get().developer2;
-			locals.logger.developer2Amount = locals.developer2Amount;
-			LOG_DEBUG(locals.logger);
-		}
-
-		state.mut().developer1Accrued = 0;
-		state.mut().developer2Accrued = 0;
-		state.mut().dividendAccrued = state.get().dividendAccrued - locals.dividendAmount;
-
-		output.developer1Amount = locals.developer1Amount;
-		output.developer2Amount = locals.developer2Amount;
-		output.dividendAmount = locals.dividendAmount;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.developer1Amount = output.developer1Amount;
-		locals.logger.developer2Amount = output.developer2Amount;
-		locals.logger.dividendAmount = output.dividendAmount;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
-	}
-
-	/**
-	 * @brief Withdraws asset-denominated platform developer fees for one asset-entry template.
-	 * @param input Template id whose asset platform balances should be processed.
-	 * @param output Developer transfer amounts, distributed dividend amount, retained dividend balance, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `ACCESS_DENIED`, `INVALID_STATE`, `INVALID_VALUE`, or `INSUFFICIENT_FUNDS`.
-	 * @note Asset dividends are distributed to holders of the PulseEditor contract-share asset.
-	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
-	{
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		LOG_DEBUG(locals.logger);
-		if (qpi.invocationReward() > 0)
-		{
-			qpi.transfer(qpi.invocator(), qpi.invocationReward());
-		}
-		output.developer1Amount = 0;
-		output.developer2Amount = 0;
-		output.dividendAmount = 0;
-		output.dividendAccrued = 0;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_TEMPLATE,
-			           qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.templateCount = state.get().templateCount;
-			locals.logger.templateCapacity = state.get().templates.capacity();
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (qpi.invocator() != state.get().platformOwner)
-		{
-			output.returnCode = toReturnCode(EReturnCode::ACCESS_DENIED);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_OWNER, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.platformOwner = state.get().platformOwner;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		if (state.get().developer1 == NULL_ID || state.get().developer2 == NULL_ID)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_RECIPIENTS,
-			           qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.developer1 = state.get().developer1;
-			locals.logger.developer2 = state.get().developer2;
-			locals.logger.developer1Configured = state.get().developer1 != NULL_ID;
-			locals.logger.developer2Configured = state.get().developer2 != NULL_ID;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		output.dividendAccrued = locals.gameTemplate.assetDividendAccrued;
-		if (locals.gameTemplate.entryMode != EEntryMode::ASSET || locals.gameTemplate.rewardMode != ERewardMode::ASSET)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_MODE, qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.entryMode = static_cast<uint8>(locals.gameTemplate.entryMode);
-			locals.logger.rewardMode = static_cast<uint8>(locals.gameTemplate.rewardMode);
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		locals.developer1Amount = locals.gameTemplate.assetDeveloper1Accrued;
-		locals.developer2Amount = locals.gameTemplate.assetDeveloper2Accrued;
-		locals.dividendAmount = div<uint64>(locals.gameTemplate.assetDividendAccrued, static_cast<uint64>(NUMBER_OF_COMPUTORS)) *
-		                        static_cast<uint64>(NUMBER_OF_COMPUTORS);
-		locals.totalAmount = sadd(sadd(locals.developer1Amount, locals.developer2Amount), locals.dividendAmount);
-		if (locals.totalAmount > static_cast<uint64>(INT64_MAX))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_AMOUNT,
-			           qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.totalAmount = locals.totalAmount;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-		locals.possessedShares = qpi.numberOfPossessedShares(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF,
-		                                                     SELF, locals.gameTemplate.entryOwnershipManagingContractIndex,
-		                                                     locals.gameTemplate.entryPossessionManagingContractIndex);
-		if (locals.possessedShares < static_cast<sint64>(locals.totalAmount))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::WAPR_BALANCE,
-			           qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.totalAmount = locals.totalAmount;
-			locals.logger.possessedShares = locals.possessedShares;
-			locals.logger.returnCode = output.returnCode;
-			LOG_WARNING(locals.logger);
-			return;
-		}
-
-		if (locals.developer1Amount > 0)
-		{
-			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF, SELF,
-			                                            static_cast<sint64>(locals.developer1Amount), state.get().developer1);
-			if (locals.transferResult < 0)
+			locals.counter = state.get().resultCounter - 1 - locals.i;
+			locals.result = state.get().results.get(static_cast<uint16>(mod(locals.counter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE))));
+			if (locals.result.gameId == locals.gameId)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV1_TRANSFER,
-				           qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.developer1Amount = locals.developer1Amount;
-				locals.logger.developer1 = state.get().developer1;
-				locals.logger.transferResult = locals.transferResult;
-				locals.logger.returnCode = output.returnCode;
-				LOG_ERROR(locals.logger);
+				locals.foundGame = true;
+				if (locals.result.roundNumber != locals.roundNumber)
+				{
+					continue;
+				}
+				output.roundResult = locals.result;
+				output.gameResult = locals.result;
+				output.returnCode = EReturnCode::SUCCESS;
 				return;
 			}
-			locals.gameTemplate.assetDeveloper1Accrued = 0;
 		}
-		if (locals.developer2Amount > 0)
-		{
-			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF, SELF,
-			                                            static_cast<sint64>(locals.developer2Amount), state.get().developer2);
-			if (locals.transferResult < 0)
-			{
-				state.mut().templates.set(input.templateId, locals.gameTemplate);
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-				prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DEV2_TRANSFER,
-				           qpi.invocator());
-				locals.logger.templateId = input.templateId;
-				locals.logger.developer2Amount = locals.developer2Amount;
-				locals.logger.developer2 = state.get().developer2;
-				locals.logger.transferResult = locals.transferResult;
-				locals.logger.returnCode = output.returnCode;
-				LOG_ERROR(locals.logger);
-				return;
-			}
-			locals.gameTemplate.assetDeveloper2Accrued = 0;
-		}
-		locals.transferOutput.distributedAmount = 0;
-		if (locals.dividendAmount > 0)
-		{
-			locals.transferInput.dividendAsset = locals.gameTemplate.entryAsset;
-			locals.transferInput.shareholdersAsset.assetName = PULSEEDITOR_CONTRACT_ASSET_NAME;
-			locals.transferInput.shareholdersAsset.issuer = id::zero();
-			locals.transferInput.dividendAmount = static_cast<sint64>(locals.dividendAmount);
-			locals.transferInput.shareholdersTotalShares = NUMBER_OF_COMPUTORS;
-			CALL(TransferAssetDividendToShareholders, locals.transferInput, locals.transferOutput);
-			prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::WAPR_DIVIDENDS,
-			           qpi.invocator());
-			locals.logger.templateId = input.templateId;
-			locals.logger.dividendAmount = locals.dividendAmount;
-			locals.logger.distributedAmount = locals.transferOutput.distributedAmount;
-			locals.logger.transferResult = static_cast<sint64>(locals.transferOutput.distributedAmount);
-			if (locals.transferOutput.distributedAmount < locals.dividendAmount)
-			{
-				LOG_ERROR(locals.logger);
-			}
-			else
-			{
-				LOG_DEBUG(locals.logger);
-			}
-		}
-
-		locals.gameTemplate.assetDividendAccrued = locals.gameTemplate.assetDividendAccrued - locals.transferOutput.distributedAmount;
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-
-		output.developer1Amount = locals.developer1Amount;
-		output.developer2Amount = locals.developer2Amount;
-		output.dividendAmount = locals.transferOutput.distributedAmount;
-		output.dividendAccrued = locals.gameTemplate.assetDividendAccrued;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-		prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::SUCCESS, qpi.invocator());
-		locals.logger.templateId = input.templateId;
-		locals.logger.developer1Amount = output.developer1Amount;
-		locals.logger.developer2Amount = output.developer2Amount;
-		locals.logger.retainedDividendAccrued = output.dividendAccrued;
-		locals.logger.returnCode = output.returnCode;
-		LOG_INFO(locals.logger);
+		output.returnCode = locals.foundGame ? EReturnCode::INVALID_ROUND : EReturnCode::INVALID_GAME;
 	}
 
 	/**
-	 * @brief Opens the next round from tick automation after the previous round settled.
-	 * @param input Template id whose next round should be opened.
-	 * @param output New round id and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, `INVALID_STATE`, or `INSUFFICIENT_FUNDS`.
-	 * @note This is not user-callable; reserve checks match publication readiness.
-	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(StartNextRound)
-	{
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		if (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status != ERoundStatus::SETTLED)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			return;
-		}
-		if (!hasRequiredBaseReserve(locals.gameTemplate))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			return;
-		}
-		if (!hasRequiredBonusReserve(locals.gameTemplate))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			return;
-		}
-		if (locals.gameTemplate.roundEndTick > 0 && qpi.tick() > locals.gameTemplate.roundEndTick)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			return;
-		}
-
-		locals.gameTemplate.currentRoundId = sadd(locals.gameTemplate.currentRoundId, 1U);
-		setMemory(locals.round, 0);
-		locals.round.roundId = locals.gameTemplate.currentRoundId;
-		locals.round.startTick = locals.gameTemplate.roundStartTick;
-		locals.round.endTick = locals.gameTemplate.roundEndTick;
-		locals.round.status = ERoundStatus::SELLING;
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-
-		output.roundId = locals.round.roundId;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Reads a full template snapshot.
-	 * @param input Template id to query.
-	 * @param output Template data and status code.
-	 * @return `SUCCESS` or `INVALID_TEMPLATE`.
-	 */
-	PUBLIC_FUNCTION(GetTemplate)
-	{
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		output.gameTemplate = state.get().templates.get(input.templateId);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Reads the current round slot for a template.
-	 * @param input Template id to query.
-	 * @param output Round data and status code.
-	 * @return `SUCCESS` or `INVALID_TEMPLATE`.
-	 */
-	PUBLIC_FUNCTION(GetRound)
-	{
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		output.round = state.get().rounds.get(input.templateId);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Checks whether a template has enough funding and a valid lifecycle state for publication or tick-started rounds.
-	 * @param input Template id to inspect.
-	 * @param output Funding requirements, current reserves, readiness flag, and first blocker.
-	 * @return `SUCCESS` or `INVALID_TEMPLATE`.
-	 * @note For drafts this evaluates `PublishTemplate`; for published settled templates this mirrors tick automation readiness.
-	 */
-	PUBLIC_FUNCTION_WITH_LOCALS(GetTemplateReadiness)
-	{
-		output.requiredPrizeReserve = 0;
-		output.requiredBonusReserve = 0;
-		output.prizeReserve = 0;
-		output.bonusReserve = 0;
-		output.assetPrizeReserve = 0;
-		output.assetBonusReserve = 0;
-		output.currentTick = qpi.tick();
-		output.reasonCode = toReturnCode(EReturnCode::UNKNOWN_ERROR);
-		output.isReady = false;
-
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		output.requiredPrizeReserve = requiredBasePrizeReserve(locals.gameTemplate);
-		output.requiredBonusReserve = requiredBonusReserve(locals.gameTemplate);
-		output.prizeReserve = locals.gameTemplate.prizeReserve;
-		output.bonusReserve = locals.gameTemplate.bonusReserve;
-		output.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve;
-		output.assetBonusReserve = locals.gameTemplate.assetBonusReserve;
-
-		if (locals.gameTemplate.status != ETemplateStatus::DRAFT &&
-		    (locals.gameTemplate.status != ETemplateStatus::PUBLISHED || locals.round.status != ERoundStatus::SETTLED))
-		{
-			output.reasonCode = toReturnCode(EReturnCode::INVALID_STATE);
-			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			return;
-		}
-		if (!hasRequiredBaseReserve(locals.gameTemplate))
-		{
-			output.reasonCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			return;
-		}
-		if (!hasRequiredBonusReserve(locals.gameTemplate))
-		{
-			output.reasonCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
-			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			return;
-		}
-		if (locals.gameTemplate.roundEndTick > 0 && qpi.tick() > locals.gameTemplate.roundEndTick)
-		{
-			output.reasonCode = toReturnCode(EReturnCode::INVALID_STATE);
-			output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-			return;
-		}
-
-		output.reasonCode = toReturnCode(EReturnCode::SUCCESS);
-		output.isReady = true;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Reads a page of created templates for simple on-chain discovery.
-	 * @param input Offset and page limit.
-	 * @param output Template ids, status bytes, total count, and status code.
-	 * @return `SUCCESS` or `INVALID_VALUE`.
-	 */
-	PUBLIC_FUNCTION_WITH_LOCALS(GetTemplates)
-	{
-		setMemory(output.templateIds, 0);
-		setMemory(output.statuses, 0);
-		output.totalTemplates = state.get().templateCount;
-		output.returnedCount = 0;
-
-		if (input.offset > state.get().templateCount)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			return;
-		}
-
-		locals.requestedLimit =
-		    input.limit == 0 || input.limit > output.templateIds.capacity() ? static_cast<uint16>(output.templateIds.capacity()) : input.limit;
-		locals.remaining = state.get().templateCount - input.offset;
-		output.returnedCount = static_cast<uint16>(locals.remaining < locals.requestedLimit ? locals.remaining : locals.requestedLimit);
-
-		for (locals.i = 0; locals.i < output.returnedCount; ++locals.i)
-		{
-			output.templateIds.set(locals.i, static_cast<uint16>(input.offset + locals.i));
-			output.statuses.set(locals.i, static_cast<uint8>(state.get().templates.get(input.offset + locals.i).status));
-		}
-
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Reads a ticket by global ticket index.
-	 * @param input Ticket index returned by `BuyTicket`.
-	 * @param output Ticket data and status code.
-	 * @return `SUCCESS` or `INVALID_VALUE`.
+	 * @brief Reads one globally indexed ticket.
+	 * @param input Generation-aware ticket id.
+	 * @param output Ticket snapshot and result code.
 	 */
 	PUBLIC_FUNCTION(GetTicket)
 	{
-		if (input.ticketIndex >= state.get().ticketCount)
+		if (input.ticketId == 0 || (input.ticketId & PLDT_TICKET_SLOT_MASK) >= state.get().tickets.capacity() ||
+		    state.get().tickets.get(input.ticketId & PLDT_TICKET_SLOT_MASK).ticketId != input.ticketId)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			output.returnCode = EReturnCode::INVALID_TICKET;
 			return;
 		}
-
-		output.ticket = state.get().tickets.get(input.ticketIndex);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		output.ticket = state.get().tickets.get(input.ticketId & PLDT_TICKET_SLOT_MASK);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Reads one chronological page of tickets bought by a player.
-	 * @param input Player id, optional template/round filters, offset, and page size.
-	 * @param output Ticket page, global ticket indexes, total matched count, and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, or `INVALID_VALUE`.
-	 * @note The function scans retained tickets because the MVP stores tickets in one global append-only array.
+	 * @brief Validates digit bounds and the repeated-digit policy.
+	 * @param input Digits and code policy.
+	 * @param output `SUCCESS` or `INVALID_DIGITS`.
+	 */
+	PUBLIC_FUNCTION_WITH_LOCALS(ValidateDigits)
+	{
+		setMemory(locals.seen, 0);
+		if (input.codeLength == 0 || input.codeLength > PLDT_MAX_CODE_LENGTH || input.maxDigit > PLDT_MAX_DIGIT ||
+		    (!input.allowRepeatedDigits && input.maxDigit + 1 < input.codeLength))
+		{
+			output.returnCode = EReturnCode::INVALID_DIGITS;
+			return;
+		}
+		for (locals.i = 0; locals.i < input.codeLength; ++locals.i)
+		{
+			locals.digit = input.digits.get(locals.i);
+			if (locals.digit > input.maxDigit || (!input.allowRepeatedDigits && locals.seen.get(locals.digit) != 0))
+			{
+				output.returnCode = EReturnCode::INVALID_DIGITS;
+				return;
+			}
+			locals.seen.set(locals.digit, 1);
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Pages through ticket ids for one player and round.
+	 * @param input Player, game id, offset, and requested limit.
+	 * @param output Matching indexes, counts, and result code.
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetPlayerTickets)
 	{
-		setMemory(output.tickets, 0);
-		setMemory(output.ticketIndexes, 0);
-		output.totalMatched = 0;
-		output.returnedCount = 0;
-
-		if (input.player == NULL_ID)
+		locals.findInput.gameId = input.roundKey.gameId;
+		locals.findInput.roundNumber = input.roundKey.roundNumber;
+		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
+			output.returnCode = locals.findOutput.returnCode;
 			return;
 		}
-		if (input.useTemplateFilter && !isTemplateIdValid(state, input.templateId))
+		locals.skipped = 0;
+		locals.link = locals.findOutput.firstTicketLink;
+		while (locals.link != 0)
 		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.player == input.player)
+			{
+				++output.totalCount;
+				if (locals.skipped++ >= input.offset && output.returnedCount < input.limit && output.returnedCount < output.ticketIndexes.capacity())
+				{
+					output.ticketIds.set(output.returnedCount, locals.ticket.ticketId);
+					output.ticketIndexes.set(output.returnedCount++, locals.link - 1);
+				}
+			}
+			locals.link = locals.ticket.nextLink;
 		}
-
-		locals.requestedLimit =
-		    input.limit == 0 || input.limit > output.tickets.capacity() ? static_cast<uint16>(output.tickets.capacity()) : input.limit;
-		locals.matchedCount = 0;
-
-		for (locals.i = 0; locals.i < state.get().ticketCount; ++locals.i)
-		{
-			locals.ticket = state.get().tickets.get(locals.i);
-			if (locals.ticket.player != input.player)
-			{
-				continue;
-			}
-			if (input.useTemplateFilter && locals.ticket.templateId != input.templateId)
-			{
-				continue;
-			}
-			if (input.useRoundFilter && locals.ticket.roundId != input.roundId)
-			{
-				continue;
-			}
-
-			if (locals.matchedCount >= input.offset && output.returnedCount < locals.requestedLimit)
-			{
-				output.tickets.set(output.returnedCount, locals.ticket);
-				output.ticketIndexes.set(output.returnedCount, locals.i);
-				++output.returnedCount;
-			}
-			locals.matchedCount = sadd(locals.matchedCount, 1ULL);
-		}
-
-		output.totalMatched = locals.matchedCount;
-		if (input.offset > output.totalMatched)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			return;
-		}
-
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Reads one chronological page from the winner-history ring buffer.
-	 * @param input Offset and requested page size.
-	 * @param output Winner page, counters, and status code.
-	 * @return `SUCCESS` or `INVALID_VALUE` when `offset` is outside the retained history window.
-	 * @note The retained window is capped by `PULSEEDITOR_MAX_WINNERS`; older entries are overwritten.
+	 * @brief Pages through paid winning ticket ids for one round.
+	 * @param input Game id, offset, and requested limit.
+	 * @param output Winning indexes, counts, and result code.
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetWinners)
 	{
-		setMemory(output.winners, 0);
-		output.winnerCounter = state.get().winnerCounter;
-		output.totalStored = state.get().winnerCounter < state.get().winners.capacity() ? state.get().winnerCounter : state.get().winners.capacity();
-		output.returnedCount = 0;
-
-		if (input.offset >= output.totalStored)
+		locals.findInput.gameId = input.roundKey.gameId;
+		locals.findInput.roundNumber = input.roundKey.roundNumber;
+		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			output.returnCode = input.offset == 0 ? toReturnCode(EReturnCode::SUCCESS) : toReturnCode(EReturnCode::INVALID_VALUE);
+			output.returnCode = locals.findOutput.returnCode;
 			return;
 		}
-
-		locals.requestedLimit =
-		    input.limit == 0 || input.limit > output.winners.capacity() ? static_cast<uint16>(output.winners.capacity()) : input.limit;
-		locals.remaining = output.totalStored - input.offset;
-		output.returnedCount = static_cast<uint16>(locals.remaining < locals.requestedLimit ? locals.remaining : locals.requestedLimit);
-		locals.oldestCounter = state.get().winnerCounter - output.totalStored;
-
-		for (locals.i = 0; locals.i < output.returnedCount; ++locals.i)
+		locals.skipped = 0;
+		locals.link = locals.findOutput.firstTicketLink;
+		while (locals.link != 0)
 		{
-			locals.sourceCounter = locals.oldestCounter + input.offset + locals.i;
-			locals.sourceIndex = mod(locals.sourceCounter, state.get().winners.capacity());
-			output.winners.set(locals.i, state.get().winners.get(locals.sourceIndex));
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.status == ETicketStatus::PAID && locals.ticket.payout > 0)
+			{
+				++output.totalCount;
+				if (locals.skipped++ >= input.offset && output.returnedCount < input.limit && output.returnedCount < output.ticketIndexes.capacity())
+				{
+					output.ticketIds.set(output.returnedCount, locals.ticket.ticketId);
+					output.ticketIndexes.set(output.returnedCount++, locals.link - 1);
+				}
+			}
+			locals.link = locals.ticket.nextLink;
 		}
-
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Reads current platform fee recipients and pending accrued balances.
+	 * @brief Reads platform governance, Qubic accruals, and registry counters.
 	 * @param input Empty input.
-	 * @param output Platform owner, developer recipient ids, accrued balances, fee percent, creator limit, and status code.
-	 * @return Always `SUCCESS`.
+	 * @param output Current platform accounting snapshot.
 	 */
 	PUBLIC_FUNCTION(GetPlatformAccounting)
 	{
@@ -5486,473 +3070,728 @@ public:
 		output.developer1Accrued = state.get().developer1Accrued;
 		output.developer2Accrued = state.get().developer2Accrued;
 		output.dividendAccrued = state.get().dividendAccrued;
+		output.roundFee = state.get().roundFee;
+		output.ticketCount = state.get().ticketCount;
+		output.resultCounter = state.get().resultCounter;
+		output.activeGameCount = state.get().activeGameCount;
 		output.platformFeePercent = state.get().platformFeePercent;
 		output.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
 	}
 
 	/**
-	 * @brief Validates a code against length, digit range, and duplicate rules.
-	 * @param input Digits and validation rules.
-	 * @param output Validation result and status code.
-	 * @return `SUCCESS` when valid; otherwise `INVALID_DIGITS`.
-	 * @note Only the first `codeLength` digit slots are checked.
+	 * @brief Pages through active generation-aware game ids.
+	 * @param input Active-game offset and requested limit.
+	 * @param output Active ids, counts, and result code.
 	 */
-	PUBLIC_FUNCTION_WITH_LOCALS(ValidateDigits)
+	PUBLIC_FUNCTION_WITH_LOCALS(GetGames)
 	{
-		output.isValid = false;
-		output.returnCode = toReturnCode(EReturnCode::INVALID_DIGITS);
-		setMemory(locals.seen, 0);
-
-		if (input.codeLength == 0 || input.codeLength > PULSEEDITOR_MAX_CODE_LENGTH || input.maxDigit > PULSEEDITOR_MAX_DIGIT)
+		locals.skipped = 0;
+		output.totalActive = state.get().activeGameCount;
+		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
 		{
-			return;
-		}
-		if (!input.allowRepeatedDigits && input.codeLength > static_cast<uint8>(input.maxDigit + 1))
-		{
-			return;
-		}
-
-		for (locals.i = 0; locals.i < input.codeLength; ++locals.i)
-		{
-			locals.digit = input.digits.get(locals.i);
-			if (locals.digit > input.maxDigit)
+			locals.game = state.get().games.get(locals.i);
+			if (locals.game.status == EGameStatus::EMPTY_SLOT)
 			{
-				return;
+				continue;
 			}
-			if (!input.allowRepeatedDigits)
+			if (locals.skipped++ < input.offset || output.returnedCount >= input.limit || output.returnedCount >= output.gameIds.capacity())
 			{
-				locals.count = locals.seen.get(locals.digit);
-				if (locals.count > 0)
-				{
-					return;
-				}
-				locals.seen.set(locals.digit, 1);
+				continue;
 			}
+			output.gameIds.set(output.returnedCount++, locals.game.gameId);
 		}
-
-		output.isValid = true;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Releases asset share management rights from this contract to another managing contract.
-	 * @param input Asset, share count, and destination managing contract index.
-	 * @param output Number of shares released, or zero on failure.
-	 * @return No separate return code; failure is represented by zero transferred shares.
-	 * @note Attached invocation reward is used as the maximum fee and any unused amount is refunded.
+	 * @brief Sets platform ownership, recipients, and creator-fee limit.
+	 * @param input New governance configuration.
+	 * @param output Result code.
 	 */
-	PUBLIC_PROCEDURE_WITH_LOCALS(TransferShareManagementRights)
+	PUBLIC_PROCEDURE(SetPlatformConfig)
 	{
-		locals.reward = qpi.invocationReward();
-		locals.refundAmount = locals.reward;
-		locals.success = false;
-		output.transferredNumberOfShares = 0;
-		prepareLog(locals.logger, ELogPhase::ENTRY, ELogDetail::ENTRY, qpi.invocator());
-		locals.logger.requestedShares = input.numberOfShares;
-		locals.logger.newManagingContractIndex = input.newManagingContractIndex;
-		locals.logger.asset = input.asset;
-		LOG_DEBUG(locals.logger);
-
-		if (input.numberOfShares <= 0)
+		if (state.get().platformOwner != qpi.invocator())
 		{
-			prepareLog(locals.logger, ELogPhase::VALIDATION, ELogDetail::TSMR_INVALID_COUNT,
-			           qpi.invocator());
-			locals.logger.requestedShares = input.numberOfShares;
-			locals.logger.newManagingContractIndex = input.newManagingContractIndex;
-			locals.logger.asset = input.asset;
-			LOG_WARNING(locals.logger);
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
 		}
-		else
+		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID)
 		{
-			locals.possessedShares =
-			    qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
-			if (locals.possessedShares < input.numberOfShares)
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (input.roundFee == 0 || input.roundFee > PLDT_MAX_TRANSFER_AMOUNT)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (input.maxCreatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		state.mut().platformOwner = input.platformOwner;
+		state.mut().developer1 = input.developer1;
+		state.mut().developer2 = input.developer2;
+		state.mut().roundFee = input.roundFee;
+		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Pays accrued Qubic platform revenue to configured recipients.
+	 * @param input Empty input.
+	 * @param output Amounts paid and result code.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
+	{
+		if (state.get().platformOwner != qpi.invocator())
+		{
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
+		}
+		locals.failed = false;
+		if (state.get().developer1Accrued > 0)
+		{
+			if (state.get().developer1 == NULL_ID)
 			{
-				prepareLog(locals.logger, ELogPhase::VALIDATION,
-				           ELogDetail::TSMR_INSUFFICIENT_SHARES, qpi.invocator());
-				locals.logger.requestedShares = input.numberOfShares;
-				locals.logger.possessedShares = locals.possessedShares;
-				LOG_WARNING(locals.logger);
+				locals.failed = true;
 			}
 			else
 			{
-				locals.result = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
-				                                  input.newManagingContractIndex, locals.reward);
-				if (locals.result != INVALID_AMOUNT && locals.result >= 0)
+				locals.transferResult = qpi.transfer(state.get().developer1, static_cast<sint64>(state.get().developer1Accrued));
+				if (locals.transferResult >= 0)
 				{
-					locals.success = true;
-					locals.refundAmount = locals.reward - locals.result;
+					output.developer1Paid = state.get().developer1Accrued;
+					state.mut().developer1Accrued = 0;
 				}
 				else
 				{
-					prepareLog(locals.logger, ELogPhase::TRANSFER, ELogDetail::TSMR_RELEASE,
-					           qpi.invocator());
-					locals.logger.requestedShares = input.numberOfShares;
-					locals.logger.releaseResult = locals.result;
-					LOG_ERROR(locals.logger);
+					locals.failed = true;
 				}
 			}
 		}
-
-		if (locals.success)
+		if (state.get().developer2Accrued > 0)
 		{
-			output.transferredNumberOfShares = input.numberOfShares;
-			prepareLog(locals.logger, ELogPhase::RESULT, ELogDetail::TSMR_SUCCESS, qpi.invocator());
-			locals.logger.requestedShares = output.transferredNumberOfShares;
-			locals.logger.releaseResult = locals.result;
-			LOG_INFO(locals.logger);
-		}
-
-		if (locals.refundAmount > 0)
-		{
-			qpi.transfer(qpi.invocator(), locals.refundAmount);
-			prepareLog(locals.logger, ELogPhase::REFUND, ELogDetail::TSMR_REFUND, qpi.invocator());
-			locals.logger.refundAmount = locals.refundAmount;
-			LOG_DEBUG(locals.logger);
-		}
-	}
-
-	/**
-	 * @brief Settles the just-purchased ticket for instant-play templates.
-	 * @param input Template id and global ticket index created by the purchase call.
-	 * @param output `SUCCESS` or an internal settlement error.
-	 * @note This private procedure never refunds invocation reward; the caller already accepted the ticket payment.
-	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(SettleInstantTicket)
-	{
-		output.returnCode = toReturnCode(EReturnCode::UNKNOWN_ERROR);
-		if (!isTemplateIdValid(state, input.templateId) || input.ticketIndex >= state.get().ticketCount)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_VALUE);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		locals.ticket = state.get().tickets.get(input.ticketIndex);
-		if (!locals.gameTemplate.instantSettlement || locals.ticket.status != ETicketStatus::ACTIVE || locals.ticket.templateId != input.templateId ||
-		    locals.ticket.roundId != locals.round.roundId)
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_STATE);
-			return;
-		}
-
-		locals.round.status = ERoundStatus::CLOSED;
-		locals.randomData.prevSpectrumDigest = qpi.getPrevSpectrumDigest();
-		locals.randomData.templateId = input.templateId;
-		locals.randomData.roundId = locals.round.roundId;
-		locals.randomData.ticketCount = locals.round.ticketCount;
-		locals.seed = qpi.K12(locals.randomData).u64._0;
-		locals.generateInput.seed = locals.seed;
-		locals.generateInput.codeLength = locals.gameTemplate.codeLength;
-		locals.generateInput.maxDigit = locals.gameTemplate.maxDigit;
-		locals.generateInput.allowRepeatedDigits = locals.gameTemplate.allowRepeatedDigits;
-		CALL(GenerateWinningDigits, locals.generateInput, locals.generateOutput);
-
-		locals.round.winningDigits = locals.generateOutput.digits;
-		locals.countInput.playerDigits = locals.ticket.digits;
-		locals.countInput.winningDigits = locals.round.winningDigits;
-		locals.countInput.codeLength = locals.gameTemplate.codeLength;
-		CALL(CountMatches, locals.countInput, locals.countOutput);
-
-		locals.ticket.exact = locals.countOutput.exact;
-		locals.ticket.misplaced = locals.countOutput.misplaced;
-		locals.payout = locals.gameTemplate.payoutMatrix.get(locals.countOutput.payoutMatrixIndex);
-		locals.bonusPayout = 0;
-		locals.bonusQualified = false;
-
-		if (locals.payout > 0)
-		{
-			locals.round.winnerCount = 1;
-			if (locals.gameTemplate.bonusEnabled && locals.gameTemplate.bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE)
+			if (state.get().developer2 == NULL_ID)
 			{
-				for (locals.bonusAssetIndex = 0; locals.bonusAssetIndex < locals.gameTemplate.bonusAssetCount; ++locals.bonusAssetIndex)
-				{
-					locals.bonusShares = qpi.numberOfPossessedShares(
-					    locals.gameTemplate.bonusAssets.get(locals.bonusAssetIndex).assetName,
-					    locals.gameTemplate.bonusAssets.get(locals.bonusAssetIndex).issuer, locals.ticket.player, locals.ticket.player,
-					    locals.gameTemplate.bonusOwnershipManagingContractIndex, locals.gameTemplate.bonusPossessionManagingContractIndex);
-					if (locals.bonusShares > 0)
-					{
-						locals.bonusQualified = true;
-						break;
-					}
-				}
-				locals.bonusPayout = bonusExtraPayout(locals.payout, locals.gameTemplate.bonusMultiplierBps);
-				if (!locals.bonusQualified ||
-				    !((locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.bonusReserve >= locals.bonusPayout) ||
-				      (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetBonusReserve >= locals.bonusPayout)))
-				{
-					locals.bonusPayout = 0;
-				}
-			}
-
-			locals.totalPayout = sadd(locals.payout, locals.bonusPayout);
-			locals.ticket.payout = locals.gameTemplate.rewardMode == ERewardMode::QUBIC ? locals.totalPayout : 0;
-			locals.ticket.bonusPayout = locals.gameTemplate.rewardMode == ERewardMode::QUBIC ? locals.bonusPayout : 0;
-			locals.ticket.assetPayout = locals.gameTemplate.rewardMode == ERewardMode::ASSET ? locals.totalPayout : 0;
-			locals.ticket.assetBonusPayout = locals.gameTemplate.rewardMode == ERewardMode::ASSET ? locals.bonusPayout : 0;
-
-			if (locals.gameTemplate.rewardMode == ERewardMode::QUBIC && locals.gameTemplate.prizeReserve >= locals.payout)
-			{
-				qpi.transfer(locals.ticket.player, locals.totalPayout);
-				locals.gameTemplate.prizeReserve = locals.gameTemplate.prizeReserve - locals.payout;
-				locals.gameTemplate.bonusReserve = locals.gameTemplate.bonusReserve - locals.bonusPayout;
-				locals.gameTemplate.totalPaid = sadd(locals.gameTemplate.totalPaid, locals.totalPayout);
-				locals.gameTemplate.totalBonusPaid = sadd(locals.gameTemplate.totalBonusPaid, locals.bonusPayout);
-				locals.round.paid = locals.totalPayout;
-				locals.ticket.status = ETicketStatus::PAID;
-			}
-			else if (locals.gameTemplate.rewardMode == ERewardMode::ASSET && locals.gameTemplate.assetPrizeReserve >= locals.payout &&
-			         locals.totalPayout <= static_cast<uint64>(INT64_MAX))
-			{
-				locals.transferResult =
-				    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.rewardAsset.assetName, locals.gameTemplate.rewardAsset.issuer, SELF,
-				                                            SELF, static_cast<sint64>(locals.totalPayout), locals.ticket.player);
-				if (locals.transferResult >= 0)
-				{
-					locals.gameTemplate.assetPrizeReserve = locals.gameTemplate.assetPrizeReserve - locals.payout;
-					locals.gameTemplate.assetBonusReserve = locals.gameTemplate.assetBonusReserve - locals.bonusPayout;
-					locals.gameTemplate.totalAssetPaid = sadd(locals.gameTemplate.totalAssetPaid, locals.totalPayout);
-					locals.gameTemplate.totalBonusPaid = sadd(locals.gameTemplate.totalBonusPaid, locals.bonusPayout);
-					locals.round.paid = locals.totalPayout;
-					locals.ticket.status = ETicketStatus::PAID;
-				}
-			}
-			if (locals.ticket.status != ETicketStatus::PAID)
-			{
-				locals.round.unpaidWinnerCount = 1;
-				locals.ticket.status = ETicketStatus::UNPAID;
+				locals.failed = true;
 			}
 			else
 			{
-				locals.winnerInfo.epoch = qpi.epoch();
-				locals.winnerInfo.tick = qpi.tick();
-				locals.winnerInfo.player = locals.ticket.player;
-				locals.winnerInfo.payout = locals.ticket.payout;
-				locals.winnerInfo.bonusPayout = locals.ticket.bonusPayout;
-				locals.winnerInfo.assetPayout = locals.ticket.assetPayout;
-				locals.winnerInfo.assetBonusPayout = locals.ticket.assetBonusPayout;
-				locals.winnerInfo.roundId = locals.round.roundId;
-				locals.winnerInfo.templateId = input.templateId;
-				locals.winnerInfo.exact = locals.ticket.exact;
-				locals.winnerInfo.misplaced = locals.ticket.misplaced;
-				locals.winnerIndex = mod(state.get().winnerCounter, state.get().winners.capacity());
-				state.mut().winners.set(locals.winnerIndex, locals.winnerInfo);
-				state.mut().winnerCounter = sadd(state.get().winnerCounter, 1ULL);
+				locals.transferResult = qpi.transfer(state.get().developer2, static_cast<sint64>(state.get().developer2Accrued));
+				if (locals.transferResult >= 0)
+				{
+					output.developer2Paid = state.get().developer2Accrued;
+					state.mut().developer2Accrued = 0;
+				}
+				else
+				{
+					locals.failed = true;
+				}
+			}
+		}
+		if (state.get().dividendAccrued >= NUMBER_OF_COMPUTORS &&
+		    qpi.distributeDividends(static_cast<sint64>(div(state.get().dividendAccrued, static_cast<uint64>(NUMBER_OF_COMPUTORS)))))
+		{
+			output.dividendPaid =
+			    smul(div(state.get().dividendAccrued, static_cast<uint64>(NUMBER_OF_COMPUTORS)), static_cast<uint64>(NUMBER_OF_COMPUTORS));
+			state.mut().dividendAccrued -= output.dividendPaid;
+		}
+		else if (state.get().dividendAccrued >= NUMBER_OF_COMPUTORS)
+		{
+			locals.failed = true;
+		}
+		output.returnCode = locals.failed ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Atomically validates payment for and persists up to 16 tickets.
+	 * @param input Game id, ticket count, and submitted digit arrays.
+	 * @param output Accepted generation-aware ticket ids, compatibility slots, and result code.
+	 * @note Economics and rounding are applied independently to every ticket.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTickets)
+	{
+		// Validate the entire batch and aggregate ledger capacity before accepting any individual ticket.
+		if (!isGameIdValid(state, input.gameId))
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (input.ticketCount == 0 || input.ticketCount > PLDT_MAX_BATCH_TICKETS)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.slot = gameSlot(input.gameId);
+		locals.game = state.get().games.get(locals.slot);
+		locals.now = qpi.now();
+		locals.lifecycleInput.game = locals.game;
+		locals.lifecycleInput.now = locals.now;
+		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
+		{
+			locals.refundInput.returnCode = locals.lifecycleOutput.purchaseReturnCode;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.game.status = locals.lifecycleOutput.effectiveStatus;
+		if (locals.game.ticketCount + input.ticketCount > locals.game.ticketLimit ||
+		    input.ticketCount > state.get().freeTicketCount + state.get().tickets.capacity() -
+		                            (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount))
+		{
+			locals.refundInput.returnCode = EReturnCode::TICKET_SOLD_OUT;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.link = locals.game.firstTicketLink;
+		locals.playerTickets = 0;
+		while (locals.link != 0)
+		{
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.player == qpi.invocator())
+			{
+				++locals.playerTickets;
+			}
+			locals.link = locals.ticket.nextLink;
+		}
+		if (locals.playerTickets + input.ticketCount > locals.game.playerTicketLimit)
+		{
+			locals.refundInput.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.validateInput.codeLength = locals.game.codeLength;
+		locals.validateInput.maxDigit = locals.game.maxDigit;
+		locals.validateInput.allowRepeatedDigits = locals.game.allowRepeatedDigits;
+		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
+		{
+			locals.validateInput.digits = input.tickets.get(locals.i);
+			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
+			if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
+			{
+				locals.refundInput.returnCode = locals.validateOutput.returnCode;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+		}
+		locals.bonusInput.game = locals.game;
+		locals.bonusInput.player = qpi.invocator();
+		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
+		locals.totalPrice = smul(locals.game.ticketPrice, static_cast<uint64>(input.ticketCount));
+		if (locals.totalPrice > PLDT_MAX_TRANSFER_AMOUNT)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
+		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		if (locals.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - locals.totalPrice ||
+		    locals.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool ||
+		    smul(locals.economicsOutput.prizeContribution, static_cast<uint64>(input.ticketCount)) >
+		        PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool - locals.game.creatorBalance)
+		{
+			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.developer1Fee = smul(locals.economicsOutput.developer1Fee, static_cast<uint64>(input.ticketCount));
+		locals.developer2Fee = smul(locals.economicsOutput.developer2Fee, static_cast<uint64>(input.ticketCount));
+		locals.dividendFee = smul(locals.economicsOutput.dividendFee, static_cast<uint64>(input.ticketCount));
+		// Custody and burn use aggregate amounts, while ticket economics remain rounded per ticket.
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
+			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
+			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
+			{
+				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
 			}
 		}
 		else
 		{
-			locals.ticket.payout = 0;
-			locals.ticket.bonusPayout = 0;
-			locals.ticket.assetPayout = 0;
-			locals.ticket.assetBonusPayout = 0;
-			locals.ticket.status = ETicketStatus::PAID;
-		}
-
-		locals.round.settledTick = qpi.tick();
-		locals.round.status = ERoundStatus::SETTLED;
-		locals.gameTemplate.lastDrawEpoch = qpi.epoch();
-		state.mut().tickets.set(input.ticketIndex, locals.ticket);
-
-		if (locals.gameTemplate.status == ETemplateStatus::STOP_REQUESTED)
-		{
-			locals.gameTemplate.status = ETemplateStatus::STOPPED;
-		}
-		else if (hasRequiredRoundReserves(locals.gameTemplate))
-		{
-			locals.gameTemplate.currentRoundId = sadd(locals.gameTemplate.currentRoundId, 1U);
-			setMemory(locals.round, 0);
-			locals.round.roundId = locals.gameTemplate.currentRoundId;
-			locals.round.startTick = locals.gameTemplate.roundStartTick;
-			locals.round.endTick = locals.gameTemplate.roundEndTick;
-			locals.round.status = ERoundStatus::SELLING;
-		}
-
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
-	}
-
-	/**
-	 * @brief Refunds template-local balances to the owner and clears an idle template slot.
-	 * @param input Template id selected by lifecycle automation.
-	 * @param output Refunded Qubic/asset amounts and status code.
-	 * @return `SUCCESS`, `INVALID_TEMPLATE`, or `INSUFFICIENT_FUNDS`.
-	 * @note Qubic platform accruals are global and are not part of template-local deletion refunds.
-	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(DeleteIdleTemplate)
-	{
-		output.qubicRefund = 0;
-		output.assetRefund = 0;
-		if (!isTemplateIdValid(state, input.templateId))
-		{
-			output.returnCode = toReturnCode(EReturnCode::INVALID_TEMPLATE);
-			return;
-		}
-
-		locals.gameTemplate = state.get().templates.get(input.templateId);
-		locals.round = state.get().rounds.get(input.templateId);
-		locals.qubicRefund = sadd(sadd(locals.gameTemplate.prizeReserve, locals.gameTemplate.bonusReserve),
-		                          sadd(locals.gameTemplate.creatorRevenue, locals.gameTemplate.burnAccrued));
-		locals.assetRefund = sadd(sadd(locals.gameTemplate.assetPrizeReserve, locals.gameTemplate.assetBonusReserve),
-		                          sadd(sadd(locals.gameTemplate.assetCreatorRevenue, locals.gameTemplate.assetBurnAccrued),
-		                               sadd(locals.gameTemplate.assetDeveloper1Accrued,
-		                                    sadd(locals.gameTemplate.assetDeveloper2Accrued, locals.gameTemplate.assetDividendAccrued))));
-
-		if (locals.assetRefund > 0)
-		{
-			if (locals.gameTemplate.entryMode != EEntryMode::ASSET || locals.assetRefund > static_cast<uint64>(INT64_MAX))
+			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
+			if (locals.assetAccounting.developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
+			    locals.assetAccounting.developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
+			    locals.assetAccounting.dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				output.returnCode = EReturnCode::STORAGE_FULL;
+				return;
+			}
+		}
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (qpi.invocationReward() != locals.totalPrice)
+			{
+				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+		}
+		else
+		{
+			if (qpi.invocationReward() != 0)
+			{
+				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+				return;
+			}
+			locals.possessedShares =
+			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
+			if (locals.possessedShares < static_cast<sint64>(locals.totalPrice))
+			{
+				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 				return;
 			}
 			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.gameTemplate.entryAsset.assetName, locals.gameTemplate.entryAsset.issuer, SELF, SELF,
-			                                            static_cast<sint64>(locals.assetRefund), locals.gameTemplate.owner);
+			    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(),
+			                                            qpi.invocator(), static_cast<sint64>(locals.totalPrice), SELF);
 			if (locals.transferResult < 0)
 			{
-				output.returnCode = toReturnCode(EReturnCode::INSUFFICIENT_FUNDS);
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
 				return;
 			}
 		}
-		if (locals.qubicRefund > 0)
+		locals.burnInput.game = locals.game;
+		locals.burnInput.ticketCount = input.ticketCount;
+		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
+		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			qpi.transfer(locals.gameTemplate.owner, locals.qubicRefund);
+			locals.transferInput.game = locals.game;
+			locals.transferInput.destination = qpi.invocator();
+			locals.transferInput.amount = locals.totalPrice;
+			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
 		}
-
-		setMemory(locals.gameTemplate, 0);
-		setMemory(locals.round, 0);
-		state.mut().templates.set(input.templateId, locals.gameTemplate);
-		state.mut().rounds.set(input.templateId, locals.round);
-
-		output.qubicRefund = locals.qubicRefund;
-		output.assetRefund = locals.assetRefund;
-		output.returnCode = toReturnCode(EReturnCode::SUCCESS);
+		// Persist every ticket only after the shared custody and burn steps have succeeded.
+		state.mut().games.set(locals.slot, locals.game);
+		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
+		{
+			locals.applyInput.gameId = input.gameId;
+			locals.applyInput.digits = input.tickets.get(locals.i);
+			locals.applyInput.bonusQualified = locals.bonusOutput.qualified;
+			CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
+			if (locals.applyOutput.returnCode != EReturnCode::SUCCESS)
+			{
+				output.returnCode = locals.applyOutput.returnCode;
+				return;
+			}
+			output.ticketIds.set(output.acceptedCount, locals.applyOutput.ticketId);
+			output.ticketIndexes.set(output.acceptedCount++, locals.applyOutput.ticketIndex);
+		}
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
-	 * @brief Advances lifecycle automation for a bounded page of templates.
-	 * @param input Empty input; the procedure reads automation cursor and template state.
-	 * @param output Number of inspected template slots and attempted lifecycle actions.
-	 * @note Only published or stop-requested templates can be settled, and only published settled templates can start another round.
+	 * @brief Releases caller-owned managed shares to another managing contract.
+	 * @param input Asset, share count, and destination managing contract.
+	 * @param output Release fee result and status code.
 	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(ProcessLifecycleAutomation)
+	PUBLIC_PROCEDURE(TransferShareManagementRights)
 	{
-		output.inspectedTemplates = 0;
-		output.lifecycleActions = 0;
-		if (state.get().templateCount == 0)
+		output.transferResult = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
+		                                          input.newManagingContractIndex, qpi.invocationReward());
+		output.returnCode = output.transferResult >= 0 ? EReturnCode::SUCCESS : EReturnCode::TRANSFER_FAILED;
+	}
+
+	/**
+	 * @brief Pays platform accruals for one managed asset accounting bucket.
+	 * @param input Asset issuance and its managing contract indexes.
+	 * @param output Developer and shareholder amounts paid plus result code.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
+	{
+		if (state.get().platformOwner != qpi.invocator())
+		{
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
+		}
+		locals.found = false;
+		locals.failed = false;
+		for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
+		{
+			locals.accounting = state.get().assetAccounting.get(locals.i);
+			if (locals.accounting.isActive && locals.accounting.asset.assetName == input.asset.assetName &&
+			    locals.accounting.asset.issuer == input.asset.issuer &&
+			    locals.accounting.ownershipManagingContractIndex == input.ownershipManagingContractIndex &&
+			    locals.accounting.possessionManagingContractIndex == input.possessionManagingContractIndex)
+			{
+				locals.found = true;
+				break;
+			}
+		}
+		if (!locals.found)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (locals.accounting.developer1Accrued > 0)
+		{
+			if (state.get().developer1 == NULL_ID)
+			{
+				locals.failed = true;
+			}
+			else
+			{
+				locals.transferResult =
+				    qpi.transferShareOwnershipAndPossession(locals.accounting.asset.assetName, locals.accounting.asset.issuer, SELF, SELF,
+				                                            static_cast<sint64>(locals.accounting.developer1Accrued), state.get().developer1);
+				if (locals.transferResult >= 0)
+				{
+					output.developer1Paid = locals.accounting.developer1Accrued;
+					locals.accounting.developer1Accrued = 0;
+				}
+				else
+				{
+					locals.failed = true;
+				}
+			}
+		}
+		if (locals.accounting.developer2Accrued > 0)
+		{
+			if (state.get().developer2 == NULL_ID)
+			{
+				locals.failed = true;
+			}
+			else
+			{
+				locals.transferResult =
+				    qpi.transferShareOwnershipAndPossession(locals.accounting.asset.assetName, locals.accounting.asset.issuer, SELF, SELF,
+				                                            static_cast<sint64>(locals.accounting.developer2Accrued), state.get().developer2);
+				if (locals.transferResult >= 0)
+				{
+					output.developer2Paid = locals.accounting.developer2Accrued;
+					locals.accounting.developer2Accrued = 0;
+				}
+				else
+				{
+					locals.failed = true;
+				}
+			}
+		}
+		locals.dividendInput.dividendAsset = locals.accounting.asset;
+		locals.dividendInput.dividendAmount = locals.accounting.dividendAccrued;
+		CALL(TransferAssetDividend, locals.dividendInput, locals.dividendOutput);
+		output.dividendPaid = locals.dividendOutput.distributedAmount;
+		locals.accounting.dividendAccrued -= output.dividendPaid;
+		if (locals.dividendOutput.failed)
+		{
+			locals.failed = true;
+		}
+		if (locals.accounting.activeGameCount == 0 && locals.accounting.developer1Accrued == 0 && locals.accounting.developer2Accrued == 0 &&
+		    locals.accounting.dividendAccrued == 0)
+		{
+			setMemory(locals.accounting, 0);
+		}
+		state.mut().assetAccounting.set(locals.i, locals.accounting);
+		output.returnCode = locals.failed ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
+	}
+
+private:
+	PRIVATE_FUNCTION(CalculateTicketEconomics)
+	{
+		output.platformFee = mulDiv(input.ticketPrice, input.platformFeePercent, 100ULL);
+		output.net = input.ticketPrice - output.platformFee;
+		output.creatorFee = mulDiv(output.net, input.creatorFeePercent, 100ULL);
+		output.burn = mulDiv(output.net, PLDT_BURN_PERCENT, 100ULL);
+		output.prizeContribution = output.net - output.creatorFee - output.burn;
+		output.developer1Fee = mulDiv(output.platformFee, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
+		output.developer2Fee = mulDiv(output.platformFee, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
+		output.dividendFee = output.platformFee - output.developer1Fee - output.developer2Fee;
+	}
+
+	PRIVATE_FUNCTION(EvaluateGameLifecycle)
+	{
+		output.effectiveStatus = input.game.status;
+		output.action = EGameLifecycleAction::NONE;
+		output.purchaseReturnCode = EReturnCode::GAME_CLOSED;
+		output.canCancel = false;
+		if (input.game.status == EGameStatus::SCHEDULED)
+		{
+			if (input.now < input.game.startAt)
+			{
+				output.purchaseReturnCode = EReturnCode::GAME_NOT_STARTED;
+				output.canCancel = true;
+				return;
+			}
+			if (input.now < input.game.drawAt)
+			{
+				output.effectiveStatus = EGameStatus::SELLING;
+				output.action = EGameLifecycleAction::OPEN_SALES;
+				output.purchaseReturnCode = EReturnCode::SUCCESS;
+				return;
+			}
+			output.effectiveStatus = EGameStatus::CLOSED;
+			output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
+			return;
+		}
+		if (input.game.status == EGameStatus::SELLING)
+		{
+			if (input.now < input.game.drawAt)
+			{
+				output.purchaseReturnCode = EReturnCode::SUCCESS;
+				return;
+			}
+			output.effectiveStatus = EGameStatus::CLOSED;
+			output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
+			return;
+		}
+		if (input.game.status == EGameStatus::CLOSED)
+		{
+			output.action = EGameLifecycleAction::BEGIN_SETTLEMENT;
+		}
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(EvaluateBonusQualification)
+	{
+		output.qualified = false;
+		for (locals.i = 0; locals.i < input.game.bonusAssetCount; ++locals.i)
+		{
+			locals.possessedShares = qpi.numberOfPossessedShares(
+			    input.game.bonusAssets.get(locals.i).assetName, input.game.bonusAssets.get(locals.i).issuer, input.player, input.player,
+			    input.game.bonusOwnershipManagingContractIndex, input.game.bonusPossessionManagingContractIndex);
+			if (locals.possessedShares > 0)
+			{
+				output.qualified = true;
+				return;
+			}
+		}
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(FindGameTicketList)
+	{
+		locals.foundGame = false;
+		if (input.gameId == 0 || input.roundNumber == 0)
+		{
+			output.returnCode = EReturnCode::INVALID_ROUND;
+			return;
+		}
+		if (isGameIdValid(state, input.gameId) && state.get().games.get(gameSlot(input.gameId)).roundNumber == input.roundNumber)
+		{
+			output.firstTicketLink = state.get().games.get(gameSlot(input.gameId)).firstTicketLink;
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		locals.available = state.get().resultCounter < PLDT_RESULT_HISTORY_SIZE ? state.get().resultCounter : PLDT_RESULT_HISTORY_SIZE;
+		for (locals.i = 0; locals.i < locals.available; ++locals.i)
+		{
+			locals.counter = state.get().resultCounter - 1 - locals.i;
+			locals.result = state.get().results.get(static_cast<uint16>(mod(locals.counter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE))));
+			if (locals.result.gameId == input.gameId)
+			{
+				locals.foundGame = true;
+				if (locals.result.roundNumber != input.roundNumber)
+				{
+					continue;
+				}
+				if (!locals.result.detailsAvailable)
+				{
+					output.returnCode = EReturnCode::HISTORY_EXPIRED;
+					return;
+				}
+				output.firstTicketLink = locals.result.firstTicketLink;
+				output.returnCode = EReturnCode::SUCCESS;
+				return;
+			}
+		}
+		output.returnCode = locals.foundGame || isGameIdValid(state, input.gameId) ? EReturnCode::INVALID_ROUND : EReturnCode::INVALID_GAME;
+	}
+
+	PRIVATE_PROCEDURE(RefundInvocationReward)
+	{
+		output.returnCode = input.returnCode;
+		if (qpi.invocationReward() > 0 && qpi.transfer(qpi.invocator(), qpi.invocationReward()) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+		}
+	}
+
+	PRIVATE_PROCEDURE(TransferGameCurrency)
+	{
+		output.transferResult = 0;
+		if (input.amount == 0)
 		{
 			return;
 		}
-
-		locals.templatesToInspect = state.get().templateCount < PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK ? state.get().templateCount
-		                                                                                                  : PULSEEDITOR_AUTOMATION_TEMPLATES_PER_TICK;
-		for (locals.i = 0; locals.i < locals.templatesToInspect; ++locals.i)
+		if (input.game.currencyMode == ECurrencyMode::QUBIC)
 		{
-			locals.templateIndex = mod(sadd(static_cast<uint64>(state.get().automationCursor), locals.i), state.get().templateCount);
-			locals.gameTemplate = state.get().templates.get(locals.templateIndex);
-			locals.round = state.get().rounds.get(locals.templateIndex);
-			++output.inspectedTemplates;
-
-			if (locals.gameTemplate.status == ETemplateStatus::EMPTY_SLOT)
-			{
-				continue;
-			}
-
-			if (static_cast<uint64>(qpi.epoch()) >=
-			    sadd(static_cast<uint64>(locals.gameTemplate.lastDrawEpoch), static_cast<uint64>(PULSEEDITOR_TEMPLATE_IDLE_EPOCH_LIMIT)))
-			{
-				locals.deleteInput.templateId = static_cast<uint16>(locals.templateIndex);
-				CALL(DeleteIdleTemplate, locals.deleteInput, locals.deleteOutput);
-				++output.lifecycleActions;
-				continue;
-			}
-
-			if (locals.gameTemplate.status != ETemplateStatus::PUBLISHED && locals.gameTemplate.status != ETemplateStatus::STOP_REQUESTED)
-			{
-				continue;
-			}
-
-			if (locals.round.status == ERoundStatus::CLOSED ||
-			    (locals.round.status == ERoundStatus::SELLING &&
-			     (locals.round.ticketCount >= locals.gameTemplate.ticketLimit || (locals.round.endTick > 0 && qpi.tick() > locals.round.endTick))))
-			{
-				locals.settleInput.templateId = static_cast<uint16>(locals.templateIndex);
-				CALL(SettleRound, locals.settleInput, locals.settleOutput);
-				++output.lifecycleActions;
-			}
-
-			locals.gameTemplate = state.get().templates.get(locals.templateIndex);
-			locals.round = state.get().rounds.get(locals.templateIndex);
-			if (locals.gameTemplate.status == ETemplateStatus::PUBLISHED && locals.round.status == ERoundStatus::SETTLED)
-			{
-				locals.startInput.templateId = static_cast<uint16>(locals.templateIndex);
-				CALL(StartNextRound, locals.startInput, locals.startOutput);
-				++output.lifecycleActions;
-			}
+			output.transferResult = qpi.transfer(input.destination, static_cast<sint64>(input.amount));
+			return;
 		}
-
-		state.mut().automationCursor =
-		    static_cast<uint16>(mod(sadd(static_cast<uint64>(state.get().automationCursor), locals.templatesToInspect), state.get().templateCount));
+		output.transferResult = qpi.transferShareOwnershipAndPossession(input.game.currencyAsset.assetName, input.game.currencyAsset.issuer, SELF,
+		                                                                SELF, static_cast<sint64>(input.amount), input.destination);
 	}
 
-	/**
-	 * @brief Transfers managed asset dividends to contract-share holders.
-	 * @param input Dividend asset, contract-share asset, dividend amount, and total share count.
-	 * @param output Number of asset shares scheduled for distribution.
-	 * @note Remainder below one share per contract share is retained by the caller.
-	 */
-	PRIVATE_PROCEDURE_WITH_LOCALS(TransferAssetDividendToShareholders)
+	PRIVATE_PROCEDURE_WITH_LOCALS(BurnCollectedTicketPayment)
+	{
+		locals.economicsInput.ticketPrice = input.game.ticketPrice;
+		locals.economicsInput.creatorFeePercent = input.game.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		locals.totalBurn = smul(locals.economicsOutput.burn, static_cast<uint64>(input.ticketCount));
+		if (locals.totalBurn == 0)
+		{
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		if (input.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			output.returnCode = qpi.burn(static_cast<sint64>(locals.totalBurn)) < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
+			return;
+		}
+		locals.transferInput.game = input.game;
+		locals.transferInput.destination = NULL_ID;
+		locals.transferInput.amount = locals.totalBurn;
+		CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+		output.returnCode = locals.transferOutput.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(ApplyAcceptedTicket)
+	{
+		// Preconditions are validated for the complete purchase before burn, so this commit path has no fallible transfers.
+		locals.slot = gameSlot(input.gameId);
+		locals.game = state.get().games.get(locals.slot);
+		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
+		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		output.prizeContribution = locals.economicsOutput.prizeContribution;
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.economicsOutput.developer1Fee);
+			state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.economicsOutput.developer2Fee);
+			state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.economicsOutput.dividendFee);
+		}
+		else
+		{
+			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
+			locals.assetAccounting.developer1Accrued = sadd(locals.assetAccounting.developer1Accrued, locals.economicsOutput.developer1Fee);
+			locals.assetAccounting.developer2Accrued = sadd(locals.assetAccounting.developer2Accrued, locals.economicsOutput.developer2Fee);
+			locals.assetAccounting.dividendAccrued = sadd(locals.assetAccounting.dividendAccrued, locals.economicsOutput.dividendFee);
+			state.mut().assetAccounting.set(locals.game.assetAccountingLink - 1, locals.assetAccounting);
+		}
+		locals.game.creatorRevenue = sadd(locals.game.creatorRevenue, locals.economicsOutput.creatorFee);
+		locals.game.prizePool = sadd(locals.game.prizePool, output.prizeContribution);
+		locals.game.totalRevenue = sadd(locals.game.totalRevenue, locals.game.ticketPrice);
+		setMemory(locals.ticket, 0);
+		locals.ticket.digits = input.digits;
+		locals.ticket.player = qpi.invocator();
+		locals.ticket.gameId = input.gameId;
+		locals.ticket.bonusQualified = input.bonusQualified;
+		locals.ticket.status = ETicketStatus::ACTIVE;
+		if (state.get().freeTicketHead != 0)
+		{
+			locals.ticketSlot = state.get().freeTicketHead - 1;
+			locals.previousTicket = state.get().tickets.get(locals.ticketSlot);
+			state.mut().freeTicketHead = locals.previousTicket.nextLink;
+			state.mut().freeTicketCount = state.get().freeTicketCount - 1;
+			locals.ticketGeneration = (locals.previousTicket.ticketId >> PLDT_TICKET_SLOT_BITS) + 1;
+		}
+		else
+		{
+			locals.ticketSlot = state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount;
+			locals.ticketGeneration = 1;
+			state.mut().nextUnusedTicketSlot = locals.ticketSlot + 1;
+		}
+		output.ticketIndex = locals.ticketSlot;
+		output.ticketId = (locals.ticketGeneration << PLDT_TICKET_SLOT_BITS) | locals.ticketSlot;
+		locals.ticket.ticketId = output.ticketId;
+		state.mut().tickets.set(locals.ticketSlot, locals.ticket);
+		if (locals.game.lastTicketLink != 0)
+		{
+			locals.previousTicket = state.get().tickets.get(locals.game.lastTicketLink - 1);
+			locals.previousTicket.nextLink = output.ticketIndex + 1;
+			state.mut().tickets.set(locals.game.lastTicketLink - 1, locals.previousTicket);
+		}
+		else
+		{
+			locals.game.firstTicketLink = output.ticketIndex + 1;
+		}
+		locals.game.lastTicketLink = output.ticketIndex + 1;
+		++locals.game.ticketCount;
+		state.mut().ticketCount = state.get().ticketCount + 1;
+		if (locals.game.ticketCount >= locals.game.ticketLimit)
+		{
+			locals.game.status = EGameStatus::CLOSED;
+		}
+		state.mut().games.set(locals.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(TransferAssetDividend)
 	{
 		output.distributedAmount = 0;
-		if (input.dividendAmount <= 0 || input.shareholdersTotalShares <= 0 || input.dividendAsset.assetName == 0 ||
-		    input.shareholdersAsset.assetName == 0)
+		output.failed = false;
+		if (input.dividendAmount == 0)
 		{
 			return;
 		}
-
-		locals.dividendPerShare = div<sint64>(input.dividendAmount, input.shareholdersTotalShares);
-		if (locals.dividendPerShare <= 0)
-		{
-			return;
-		}
-
-		locals.shareholdersIter.begin(input.shareholdersAsset);
+		locals.shareholdersAsset.issuer = id::zero();
+		locals.shareholdersAsset.assetName = PLDT_CONTRACT_ASSET_NAME;
+		locals.dividendPerShare = static_cast<sint64>(div(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS)));
+		locals.remainder = mod(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS));
+		locals.targetDistribution = input.dividendAmount;
+		locals.shareholdersIter.begin(locals.shareholdersAsset);
 		while (!locals.shareholdersIter.reachedEnd())
 		{
 			locals.holderShares = locals.shareholdersIter.numberOfPossessedShares();
 			if (locals.holderShares > 0)
 			{
 				locals.holderDividend = smul(locals.holderShares, locals.dividendPerShare);
-				locals.transferResult = qpi.transferShareOwnershipAndPossession(input.dividendAsset.assetName, input.dividendAsset.issuer, SELF, SELF,
-				                                                                locals.holderDividend, locals.shareholdersIter.possessor());
-				if (locals.transferResult >= 0)
+				locals.holderRemainder =
+				    static_cast<uint64>(locals.holderShares) < locals.remainder ? static_cast<uint64>(locals.holderShares) : locals.remainder;
+				locals.holderDividend = static_cast<sint64>(sadd(static_cast<uint64>(locals.holderDividend), locals.holderRemainder));
+				locals.remainder -= locals.holderRemainder;
+				if (locals.holderDividend > 0)
 				{
-					output.distributedAmount = sadd(output.distributedAmount, static_cast<uint64>(locals.holderDividend));
+					locals.transferResult = qpi.transferShareOwnershipAndPossession(input.dividendAsset.assetName, input.dividendAsset.issuer, SELF,
+					                                                                SELF, locals.holderDividend, locals.shareholdersIter.possessor());
+					if (locals.transferResult >= 0)
+					{
+						output.distributedAmount = sadd(output.distributedAmount, static_cast<uint64>(locals.holderDividend));
+					}
+					else
+					{
+						output.failed = true;
+					}
 				}
 			}
 			locals.shareholdersIter.next();
 		}
+		if (output.distributedAmount != locals.targetDistribution)
+		{
+			output.failed = true;
+		}
 	}
 
-	/**
-	 * @brief Counts exact and misplaced matches between player and winning digits.
-	 * @param input Player code, winning code, and active code length.
-	 * @param output Exact count, misplaced count, and payout matrix index.
-	 * @return Internal output struct filled deterministically.
-	 * @note Exact matches are removed before misplaced counts to prevent double counting repeated digits.
-	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(CountMatches)
 	{
-		output.exact = 0;
-		output.misplaced = 0;
-		output.payoutMatrixIndex = 0;
 		setMemory(locals.playerCounts, 0);
 		setMemory(locals.winningCounts, 0);
-
+		output.tierIndex = 0;
+		output.exact = 0;
+		output.misplaced = 0;
 		for (locals.i = 0; locals.i < input.codeLength; ++locals.i)
 		{
 			locals.playerDigit = input.playerDigits.get(locals.i);
@@ -5967,44 +3806,38 @@ public:
 				locals.winningCounts.set(locals.winningDigit, locals.winningCounts.get(locals.winningDigit) + 1);
 			}
 		}
-
-		for (locals.i = 0; locals.i <= PULSEEDITOR_MAX_DIGIT; ++locals.i)
+		for (locals.i = 0; locals.i <= PLDT_MAX_DIGIT; ++locals.i)
 		{
 			locals.playerCount = locals.playerCounts.get(locals.i);
 			locals.winningCount = locals.winningCounts.get(locals.i);
-			output.misplaced += (locals.playerCount < locals.winningCount) ? locals.playerCount : locals.winningCount;
+			output.misplaced += locals.playerCount < locals.winningCount ? locals.playerCount : locals.winningCount;
 		}
-
-		output.payoutMatrixIndex = static_cast<uint16>(
-		    sadd(static_cast<uint64>(output.misplaced),
-		         div(smul(static_cast<uint64>(output.exact), static_cast<uint64>((PULSEEDITOR_MAX_CODE_LENGTH * 2) + 3 - output.exact)), 2ULL)));
+		output.tierIndex = payoutMatrixIndex(output.exact, output.misplaced);
 	}
 
-	/**
-	 * @brief Generates winning digits from a deterministic seed.
-	 * @param input Seed, code length, digit range, and duplicate policy.
-	 * @param output Generated winning code.
-	 * @return Internal output struct with QPI-aligned digit storage.
-	 * @note If unique generation repeatedly collides, the function falls back to the first unused digit.
-	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(GenerateWinningDigits)
 	{
 		setMemory(locals.used, 0);
 		setMemory(output.digits, 0);
-
 		for (locals.index = 0; locals.index < input.codeLength; ++locals.index)
 		{
-			deriveOne(input.seed, locals.index, locals.tempValue);
-			locals.candidate = static_cast<uint8>(mod(locals.tempValue, sadd(static_cast<uint64>(input.maxDigit), 1ULL)));
+			locals.value = input.seed ^ (0x9e3779b97f4a7c15ULL * (locals.index + 1));
+			locals.value ^= locals.value >> 30;
+			locals.value *= 0xbf58476d1ce4e5b9ULL;
+			locals.value ^= locals.value >> 27;
+			locals.value *= 0x94d049bb133111ebULL;
+			locals.value ^= locals.value >> 31;
+			locals.candidate = static_cast<uint8>(mod(locals.value, static_cast<uint64>(input.maxDigit + 1)));
 			locals.attempts = 0;
-
-			while (!input.allowRepeatedDigits && locals.used.get(locals.candidate) > 0 && locals.attempts < PULSEEDITOR_RANDOM_RETRY_LIMIT)
+			while (!input.allowRepeatedDigits && locals.used.get(locals.candidate) != 0 && locals.attempts < PLDT_RANDOM_RETRY_LIMIT)
 			{
 				++locals.attempts;
-				mix64(locals.tempValue, locals.tempValue);
-				locals.candidate = static_cast<uint8>(mod(locals.tempValue, sadd(static_cast<uint64>(input.maxDigit), 1ULL)));
+				locals.value ^= locals.value << 13;
+				locals.value ^= locals.value >> 7;
+				locals.value ^= locals.value << 17;
+				locals.candidate = static_cast<uint8>(mod(locals.value, static_cast<uint64>(input.maxDigit + 1)));
 			}
-			if (!input.allowRepeatedDigits && locals.used.get(locals.candidate) > 0)
+			if (!input.allowRepeatedDigits && locals.used.get(locals.candidate) != 0)
 			{
 				for (locals.fallback = 0; locals.fallback <= input.maxDigit; ++locals.fallback)
 				{
@@ -6015,336 +3848,572 @@ public:
 					}
 				}
 			}
-
 			output.digits.set(locals.index, locals.candidate);
 			locals.used.set(locals.candidate, 1);
 		}
 	}
 
-	/**
-	 * @brief Checks whether a template id points to an initialized template.
-	 * @param state Contract state.
-	 * @param templateId Template index to validate.
-	 * @return True when the id is inside the created range and the template slot is not empty.
-	 */
-	static bool isTemplateIdValid(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, const uint16 templateId)
+	PRIVATE_PROCEDURE_WITH_LOCALS(BeginSettlement)
 	{
-		return templateId < state.get().templateCount && state.get().templates.get(templateId).status != ETemplateStatus::EMPTY_SLOT;
+		// Snapshot immutable round inputs before any budgeted ticket classification begins.
+		locals.game = state.get().games.get(input.slot);
+		if (locals.game.status != EGameStatus::CLOSED)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		setMemory(locals.progress, 0);
+		locals.randomData.prevSpectrumDigest = qpi.getPrevSpectrumDigest();
+		locals.randomData.gameId = locals.game.gameId;
+		locals.randomData.roundNumber = locals.game.roundNumber;
+		locals.randomData.ticketCount = locals.game.ticketCount;
+		locals.seed = qpi.K12(locals.randomData).u64._0;
+		locals.generateInput.seed = locals.seed;
+		locals.generateInput.codeLength = locals.game.codeLength;
+		locals.generateInput.maxDigit = locals.game.maxDigit;
+		locals.generateInput.allowRepeatedDigits = locals.game.allowRepeatedDigits;
+		CALL(GenerateWinningDigits, locals.generateInput, locals.generateOutput);
+		locals.progress.winningDigits = locals.generateOutput.digits;
+		locals.progress.cursorLink = locals.game.firstTicketLink;
+		locals.progress.prizePoolSnapshot = locals.game.prizePool;
+		locals.game.status = EGameStatus::COUNTING;
+		state.mut().settlements.set(input.slot, locals.progress);
+		state.mut().games.set(input.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	/**
-	 * @brief Clears and initializes one public-procedure diagnostic event.
-	 * @param logger Event storage to reset.
-	 * @param phase Current invocation stage.
-	 * @param detail Stable checkpoint or failure reason.
-	 * @param invocator Invocation identity.
-	 * @note `_type` stores the `ELogProcedure` value assigned by the concrete overload.
-	 */
-#define PULSEEDITOR_PREPARE_LOG_OVERLOAD(LogStruct, ProcedureValue)                                                                        \
-	static void prepareLog(LogStruct& logger, const ELogPhase phase, const ELogDetail detail, const id& invocator)                         \
-	{                                                                                                                                       \
-		setMemory(logger, 0);                                                                                                                \
-		logger._contractIndex = CONTRACT_INDEX;                                                                                              \
-		logger._type = static_cast<uint32>(ELogProcedure::ProcedureValue);                                                                   \
-		logger.invocator = invocator;                                                                                                        \
-		logger.phase = static_cast<uint8>(phase);                                                                                            \
-		logger.detail = static_cast<uint16>(detail);                                                                                         \
+	PRIVATE_PROCEDURE_WITH_LOCALS(AdvanceSettlement)
+	{
+		locals.slot = input.slot;
+		locals.game = state.get().games.get(locals.slot);
+		locals.progress = state.get().settlements.get(locals.slot);
+		locals.budget = input.actionBudget;
+		// Phase 1 classifies tickets and persists the cursor so work can resume on a later tick.
+		while (locals.budget > 0 && locals.game.status == EGameStatus::COUNTING && locals.progress.cursorLink != 0)
+		{
+			locals.link = locals.progress.cursorLink;
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			locals.matchInput.playerDigits = locals.ticket.digits;
+			locals.matchInput.winningDigits = locals.progress.winningDigits;
+			locals.matchInput.codeLength = locals.game.codeLength;
+			CALL(CountMatches, locals.matchInput, locals.matchOutput);
+			locals.ticket.exact = locals.matchOutput.exact;
+			locals.ticket.misplaced = locals.matchOutput.misplaced;
+			locals.ticket.tierIndex = locals.matchOutput.tierIndex;
+			if (locals.game.tierWeightsBps.get(locals.ticket.tierIndex) > 0)
+			{
+				locals.ticket.winnerWeight = locals.ticket.bonusQualified ? locals.game.bonusMultiplierBps : PLDT_BONUS_MULTIPLIER_SCALE;
+				locals.progress.tierWinnerCount.set(locals.ticket.tierIndex, locals.progress.tierWinnerCount.get(locals.ticket.tierIndex) + 1);
+				if (locals.ticket.bonusQualified)
+				{
+					locals.progress.tierBonusCount.set(locals.ticket.tierIndex, locals.progress.tierBonusCount.get(locals.ticket.tierIndex) + 1);
+				}
+				++locals.progress.winnerCount;
+			}
+			else
+			{
+				locals.ticket.status = ETicketStatus::LOST;
+			}
+			locals.progress.cursorLink = locals.ticket.nextLink;
+			state.mut().tickets.set(locals.link - 1, locals.ticket);
+			--locals.budget;
+		}
+		// Phase 2 allocates the complete pool only across populated tiers using largest-remainder rounding.
+		if (locals.game.status == EGameStatus::COUNTING && locals.progress.cursorLink == 0)
+		{
+			if (locals.progress.winnerCount == 0)
+			{
+				state.mut().settlements.set(locals.slot, locals.progress);
+				locals.finalizeInput.slot = locals.slot;
+				locals.finalizeInput.reason = EGameTerminalReason::NO_WINNERS;
+				CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+				output.actionsUsed = input.actionBudget - locals.budget;
+				output.returnCode = locals.finalizeOutput.returnCode;
+				return;
+			}
+			locals.progress.activeTierBps = 0;
+			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+			{
+				if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0)
+				{
+					locals.progress.activeTierBps += locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i));
+				}
+			}
+			locals.progress.allocatedPool = 0;
+			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+			{
+				if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) == 0)
+				{
+					continue;
+				}
+				locals.tierPool = mulDiv(locals.progress.prizePoolSnapshot, locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
+				                         locals.progress.activeTierBps);
+				locals.fraction = mulMod(locals.progress.prizePoolSnapshot, locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
+				                         locals.progress.activeTierBps);
+				locals.progress.tierPools.set(static_cast<uint16>(locals.i), locals.tierPool);
+				locals.progress.tierFractions.set(static_cast<uint16>(locals.i), locals.fraction);
+				locals.progress.allocatedPool = sadd(locals.progress.allocatedPool, locals.tierPool);
+			}
+			locals.remainder = locals.progress.prizePoolSnapshot - locals.progress.allocatedPool;
+			while (locals.remainder > 0)
+			{
+				locals.foundTier = false;
+				locals.bestFraction = 0;
+				locals.bestTier = 0;
+				for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+				{
+					locals.fraction = locals.progress.tierFractions.get(static_cast<uint16>(locals.i));
+					if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0 && locals.fraction != PLDT_UINT64_SENTINEL &&
+					    (!locals.foundTier || locals.fraction > locals.bestFraction))
+					{
+						locals.foundTier = true;
+						locals.bestFraction = locals.fraction;
+						locals.bestTier = static_cast<uint16>(locals.i);
+					}
+				}
+				locals.progress.tierPools.set(locals.bestTier, locals.progress.tierPools.get(locals.bestTier) + 1);
+				locals.progress.tierFractions.set(locals.bestTier, PLDT_UINT64_SENTINEL);
+				--locals.remainder;
+			}
+			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+			{
+				locals.count = locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i));
+				if (locals.count == 0)
+				{
+					continue;
+				}
+				locals.bonusCount = locals.progress.tierBonusCount.get(static_cast<uint16>(locals.i));
+				locals.totalWeight = smul(locals.count - locals.bonusCount, static_cast<uint64>(PLDT_BONUS_MULTIPLIER_SCALE));
+				locals.totalWeight = sadd(locals.totalWeight, smul(locals.bonusCount, static_cast<uint64>(locals.game.bonusMultiplierBps)));
+				locals.tierPool = locals.progress.tierPools.get(static_cast<uint16>(locals.i));
+				locals.progress.normalPayout.set(static_cast<uint16>(locals.i),
+				                                 mulDiv(locals.tierPool, PLDT_BONUS_MULTIPLIER_SCALE, locals.totalWeight));
+				locals.progress.bonusPayout.set(static_cast<uint16>(locals.i),
+				                                mulDiv(locals.tierPool, locals.game.bonusMultiplierBps, locals.totalWeight));
+				locals.floorSum = smul(locals.count - locals.bonusCount, locals.progress.normalPayout.get(static_cast<uint16>(locals.i)));
+				locals.floorSum = sadd(locals.floorSum, smul(locals.bonusCount, locals.progress.bonusPayout.get(static_cast<uint16>(locals.i))));
+				locals.progress.tierRemainder.set(static_cast<uint16>(locals.i), locals.tierPool - locals.floorSum);
+			}
+			locals.progress.cursorLink = locals.game.firstTicketLink;
+			locals.game.winnerCount = locals.progress.winnerCount;
+			locals.game.status = EGameStatus::PAYING;
+		}
+		// Phase 3 transfers bounded winner payouts and advances only after each transfer succeeds.
+		while (locals.budget > 0 && locals.game.status == EGameStatus::PAYING && locals.progress.cursorLink != 0)
+		{
+			locals.link = locals.progress.cursorLink;
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.winnerWeight == 0)
+			{
+				locals.ticket.status = ETicketStatus::LOST;
+			}
+			else
+			{
+				locals.payout = locals.ticket.bonusQualified ? locals.progress.bonusPayout.get(locals.ticket.tierIndex)
+				                                             : locals.progress.normalPayout.get(locals.ticket.tierIndex);
+				if (locals.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
+				{
+					++locals.payout;
+				}
+				locals.transferInput.game = locals.game;
+				locals.transferInput.destination = locals.ticket.player;
+				locals.transferInput.amount = locals.payout;
+				CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+				if (locals.transferOutput.transferResult < 0)
+				{
+					state.mut().settlements.set(locals.slot, locals.progress);
+					state.mut().games.set(locals.slot, locals.game);
+					output.actionsUsed = input.actionBudget - locals.budget;
+					output.returnCode = EReturnCode::TRANSFER_FAILED;
+					return;
+				}
+				locals.ticket.payout = locals.payout;
+				locals.ticket.status = ETicketStatus::PAID;
+				locals.game.totalPaid = sadd(locals.game.totalPaid, locals.payout);
+				if (locals.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
+				{
+					locals.progress.tierRemainder.set(locals.ticket.tierIndex, locals.progress.tierRemainder.get(locals.ticket.tierIndex) - 1);
+				}
+			}
+			locals.progress.cursorLink = locals.ticket.nextLink;
+			state.mut().tickets.set(locals.link - 1, locals.ticket);
+			--locals.budget;
+		}
+		// A settled round must distribute the snapshot exactly before terminal accounting can begin.
+		state.mut().settlements.set(locals.slot, locals.progress);
+		state.mut().games.set(locals.slot, locals.game);
+		if (locals.game.status == EGameStatus::PAYING && locals.progress.cursorLink == 0)
+		{
+			if (locals.game.totalPaid != locals.progress.prizePoolSnapshot)
+			{
+				output.actionsUsed = input.actionBudget - locals.budget;
+				output.returnCode = EReturnCode::UNKNOWN_ERROR;
+				return;
+			}
+			locals.finalizeInput.slot = locals.slot;
+			locals.finalizeInput.reason = EGameTerminalReason::SETTLED;
+			CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+			output.actionsUsed = input.actionBudget - locals.budget;
+			output.returnCode = locals.finalizeOutput.returnCode;
+			return;
+		}
+		output.actionsUsed = input.actionBudget - locals.budget;
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(CreateTemplateLog, CREATE_TEMPLATE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(UpdateTemplateLog, UPDATE_TEMPLATE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositPrizeReserveLog, DEPOSIT_PRIZE_RESERVE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositBonusReserveLog, DEPOSIT_BONUS_RESERVE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(DepositAssetReserveLog, DEPOSIT_ASSET_RESERVE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(PublishTemplateLog, PUBLISH_TEMPLATE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(BuyTicketLog, BUY_TICKET)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(BuyTicketsLog, BUY_TICKETS)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(RequestStopLog, REQUEST_STOP)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawCreatorRevenueLog, WITHDRAW_CREATOR_REVENUE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(SetPlatformConfigLog, SET_PLATFORM_CONFIG)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawPlatformRevenueLog, WITHDRAW_PLATFORM_REVENUE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(WithdrawAssetPlatformRevenueLog, WITHDRAW_ASSET_PLATFORM_REVENUE)
-	PULSEEDITOR_PREPARE_LOG_OVERLOAD(TransferShareManagementRightsLog, TRANSFER_SHARE_MANAGEMENT_RIGHTS)
-
-#undef PULSEEDITOR_PREPARE_LOG_OVERLOAD
-
-	/**
-	 * @brief Validates the optional scheduled selling window.
-	 * @param startTick First tick that accepts purchases; zero means no lower bound.
-	 * @param endTick Last tick that accepts purchases; zero disables time-based auto-close.
-	 * @return True when the optional bounds are monotonic.
-	 */
-	static bool isScheduleConfigValid(const uint32 startTick, const uint32 endTick) { return endTick == 0 || startTick <= endTick; }
-
-	/**
-	 * @brief Encodes QPI calendar fields into a compact bootstrap-time guard stamp.
-	 * @param year Current QPI year value.
-	 * @param month Current QPI month value.
-	 * @param day Current QPI day value.
-	 * @param result Encoded sortable stamp.
-	 */
-	static void makeDateStamp(const uint8 year, const uint8 month, const uint8 day, uint32& result)
+	PRIVATE_PROCEDURE_WITH_LOCALS(FinalizeGame)
 	{
-		result = static_cast<uint32>(year << 9 | month << 5 | day);
+		// Reserve a result slot before transfers so unreclaimed ticket chains can never become unreachable.
+		locals.game = state.get().games.get(input.slot);
+		locals.progress = state.get().settlements.get(input.slot);
+		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
+		locals.previousResult = state.get().results.get(static_cast<uint16>(locals.resultIndex));
+		if (locals.previousResult.resultSequence != 0 && locals.previousResult.detailsAvailable && locals.previousResult.firstTicketLink != 0)
+		{
+			// Preserve the only link to unreclaimed tickets; background reclamation will unblock finalization.
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		// Finalization is resumable for both modes: ledgers are frozen once, then pending transfers are retried safely.
+		if (locals.game.status != EGameStatus::FINALIZING)
+		{
+			locals.game.finalizingRoundReason = input.reason;
+			locals.game.finalizingStopReason = EGameStopReason::NONE;
+			if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
+			    input.reason == EGameTerminalReason::OWNER_CANCELLED)
+			{
+				// The purchase and funding guards preserve creatorBalance + prizePool <= MAX_AMOUNT.
+				locals.game.creatorBalance = sadd(locals.game.creatorBalance, locals.game.prizePool);
+			}
+			if (locals.game.creatorRevenueMode == ECreatorRevenueMode::REINVEST)
+			{
+				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.game.creatorBalance;
+				locals.amountToCredit = locals.game.creatorRevenue < locals.availableCredit ? locals.game.creatorRevenue : locals.availableCredit;
+				locals.game.creatorBalance = sadd(locals.game.creatorBalance, locals.amountToCredit);
+				locals.game.pendingCreatorCurrencyPayout =
+				    sadd(locals.game.pendingCreatorCurrencyPayout, locals.game.creatorRevenue - locals.amountToCredit);
+			}
+			else
+			{
+				locals.game.pendingCreatorCurrencyPayout = sadd(locals.game.pendingCreatorCurrencyPayout, locals.game.creatorRevenue);
+			}
+			locals.game.creatorRevenue = 0;
+			if (locals.game.stopRequested || input.reason == EGameTerminalReason::OWNER_CANCELLED)
+			{
+				locals.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
+			}
+			else if (locals.game.mode == EGameMode::ONE_SHOT)
+			{
+				locals.game.finalizingStopReason = EGameStopReason::ONE_SHOT_COMPLETE;
+			}
+			else
+			{
+				if (locals.game.pendingEconomics.isSet)
+				{
+					locals.game.ticketPrice = locals.game.pendingEconomics.ticketPrice;
+					locals.game.creatorPrizeSeed = locals.game.pendingEconomics.creatorPrizeSeed;
+					locals.game.ticketLimit = locals.game.pendingEconomics.ticketLimit;
+					locals.game.playerTicketLimit = locals.game.pendingEconomics.playerTicketLimit;
+					locals.game.creatorFeePercent = locals.game.pendingEconomics.creatorFeePercent;
+					locals.game.creatorRevenueMode = locals.game.pendingEconomics.creatorRevenueMode;
+					setMemory(locals.game.pendingEconomics, 0);
+				}
+				if (locals.game.runCredit < locals.game.roundFeeSnapshot || locals.game.creatorBalance < locals.game.creatorPrizeSeed)
+				{
+					locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
+				}
+			}
+			if (locals.game.finalizingStopReason != EGameStopReason::NONE)
+			{
+				locals.game.pendingRunCreditPayout = locals.game.runCredit;
+				locals.game.runCredit = 0;
+				locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
+				locals.game.creatorBalance = 0;
+			}
+			locals.game.status = EGameStatus::FINALIZING;
+			state.mut().games.set(input.slot, locals.game);
+		}
+		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
+		{
+			locals.nextStartAt = qpi.now();
+			locals.nextDrawAt = locals.nextStartAt;
+			if (!locals.nextDrawAt.addMicrosec(static_cast<sint64>(locals.game.roundDurationMicroseconds)))
+			{
+				locals.game.finalizingStopReason = EGameStopReason::SCHEDULE_EXHAUSTED;
+				locals.game.pendingRunCreditPayout = locals.game.runCredit;
+				locals.game.runCredit = 0;
+				locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
+				locals.game.creatorBalance = 0;
+				state.mut().games.set(input.slot, locals.game);
+			}
+		}
+		// Drain owner payouts individually; a failed transfer leaves its pending ledger intact for the next tick.
+		if (locals.game.pendingCreatorCurrencyPayout > 0)
+		{
+			locals.transferInput.game = locals.game;
+			locals.transferInput.destination = locals.game.owner;
+			locals.transferInput.amount = locals.game.pendingCreatorCurrencyPayout;
+			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+			if (locals.transferOutput.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+			locals.game.pendingCreatorCurrencyPayout = 0;
+			state.mut().games.set(input.slot, locals.game);
+		}
+		if (locals.game.pendingCreatorBalancePayout > 0)
+		{
+			locals.transferInput.game = locals.game;
+			locals.transferInput.destination = locals.game.owner;
+			locals.transferInput.amount = locals.game.pendingCreatorBalancePayout;
+			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+			if (locals.transferOutput.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+			locals.game.pendingCreatorBalancePayout = 0;
+			state.mut().games.set(input.slot, locals.game);
+		}
+		if (locals.game.pendingRunCreditPayout > 0)
+		{
+			locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(locals.game.pendingRunCreditPayout));
+			if (locals.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+			locals.game.pendingRunCreditPayout = 0;
+			state.mut().games.set(input.slot, locals.game);
+		}
+		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
+		{
+			locals.developer1Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
+			locals.developer2Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
+			locals.dividendFee = locals.game.roundFeeSnapshot - locals.developer1Fee - locals.developer2Fee;
+			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
+			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
+			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
+			{
+				output.returnCode = EReturnCode::STORAGE_FULL;
+				return;
+			}
+		}
+		// Publish the completed round before either clearing the game or committing its successor.
+		setMemory(locals.result, 0);
+		locals.result.tierWeightsBps = locals.game.tierWeightsBps;
+		locals.result.winningDigits = locals.progress.winningDigits;
+		locals.result.currencyAsset = locals.game.currencyAsset;
+		locals.result.owner = locals.game.owner;
+		locals.result.startAt = locals.game.startAt;
+		locals.result.drawAt = locals.game.drawAt;
+		locals.result.gameId = locals.game.gameId;
+		locals.result.roundNumber = locals.game.roundNumber;
+		locals.result.resultSequence = state.get().resultCounter + 1;
+		locals.result.prizePool = locals.game.prizePool;
+		locals.result.totalPaid = locals.game.totalPaid;
+		locals.result.firstTicketLink = locals.game.firstTicketLink;
+		locals.result.settledTick = qpi.tick();
+		locals.result.ticketCount = locals.game.ticketCount;
+		locals.result.winnerCount = locals.game.winnerCount;
+		locals.result.codeLength = locals.game.codeLength;
+		locals.result.currencyMode = locals.game.currencyMode;
+		locals.result.mode = locals.game.mode;
+		locals.result.terminalReason = locals.game.finalizingRoundReason;
+		locals.result.detailsAvailable = true;
+		locals.result.gameStopReason = locals.game.finalizingStopReason;
+		if (locals.result.gameStopReason != EGameStopReason::NONE)
+		{
+			locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
+			state.mut().results.set(locals.resultIndex, locals.result);
+			state.mut().resultCounter = state.get().resultCounter + 1;
+			locals.clearInput.slot = input.slot;
+			CALL(ClearGameSlot, locals.clearInput, locals.clearOutput);
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
+		state.mut().results.set(locals.resultIndex, locals.result);
+		state.mut().resultCounter = state.get().resultCounter + 1;
+		// Charge and initialize the next round only after result publication and all terminal transfers succeed.
+		locals.game.runCredit -= locals.game.roundFeeSnapshot;
+		locals.game.creatorBalance -= locals.game.creatorPrizeSeed;
+		locals.developer1Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
+		locals.developer2Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
+		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
+		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
+		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.game.roundFeeSnapshot - locals.developer1Fee - locals.developer2Fee);
+		++locals.game.roundNumber;
+		locals.game.startAt = locals.nextStartAt;
+		locals.game.drawAt = locals.nextDrawAt;
+		locals.game.prizePool = locals.game.creatorPrizeSeed;
+		locals.game.totalRevenue = 0;
+		locals.game.totalPaid = 0;
+		locals.game.firstTicketLink = 0;
+		locals.game.lastTicketLink = 0;
+		locals.game.ticketCount = 0;
+		locals.game.winnerCount = 0;
+		locals.game.status = EGameStatus::SELLING;
+		setMemory(locals.progress, 0);
+		state.mut().settlements.set(input.slot, locals.progress);
+		state.mut().games.set(input.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	/**
-	 * @brief Validates multiplier-bonus settings before storing a template configuration.
-	 * @param bonusEnabled Whether bonus checks are enabled.
-	 * @param bonusMultiplierBps Multiplier in basis points; must be greater than `1.0x` when enabled.
-	 * @param bonusAssetCount Number of qualifying assets configured for the template.
-	 * @param ownershipManagingContractIndex Ownership managing contract used for possession lookup.
-	 * @param possessionManagingContractIndex Possession managing contract used for possession lookup.
-	 * @return True when disabled or when the enabled bonus has at least one asset and a valid multiplier.
-	 */
-	static bool isBonusConfigValid(const bit bonusEnabled, const uint32 bonusMultiplierBps, const uint16 bonusAssetCount,
-	                               const uint16 ownershipManagingContractIndex, const uint16 possessionManagingContractIndex)
+	PRIVATE_PROCEDURE_WITH_LOCALS(ClearGameSlot)
 	{
-		return !bonusEnabled ||
-		       (bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE && bonusMultiplierBps <= PULSEEDITOR_MAX_BONUS_MULTIPLIER_BPS &&
-		        bonusAssetCount > 0 && bonusAssetCount <= PULSEEDITOR_MAX_BONUS_ASSETS && ownershipManagingContractIndex > 0 &&
-		        possessionManagingContractIndex > 0);
+		locals.game = state.get().games.get(input.slot);
+		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.assetAccountingLink > 0)
+		{
+			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
+			if (locals.assetAccounting.activeGameCount > 0)
+			{
+				--locals.assetAccounting.activeGameCount;
+			}
+			if (locals.assetAccounting.activeGameCount == 0 && locals.assetAccounting.developer1Accrued == 0 &&
+			    locals.assetAccounting.developer2Accrued == 0 && locals.assetAccounting.dividendAccrued == 0)
+			{
+				setMemory(locals.assetAccounting, 0);
+			}
+			state.mut().assetAccounting.set(locals.game.assetAccountingLink - 1, locals.assetAccounting);
+		}
+		setMemory(locals.emptyGame, 0);
+		setMemory(locals.emptyProgress, 0);
+		state.mut().games.set(input.slot, locals.emptyGame);
+		state.mut().settlements.set(input.slot, locals.emptyProgress);
+		if (state.get().activeGameCount > 0)
+		{
+			state.mut().activeGameCount = state.get().activeGameCount - 1;
+		}
+		state.mut().allocationCursor = input.slot;
 	}
 
-	/**
-	 * @brief Validates reward-currency settings before storing a template configuration.
-	 * @param rewardMode Qubic or asset-share payout mode.
-	 * @param rewardAsset Asset paid to winners in asset mode.
-	 * @param ownershipManagingContractIndex Ownership managing contract used for reward asset reserve/payout.
-	 * @param possessionManagingContractIndex Possession managing contract used for reward asset reserve/payout.
-	 * @return True when Qubic mode has no extra requirements or asset mode has a valid managed asset identity.
-	 */
-	static bool isRewardConfigValid(const ERewardMode rewardMode, const Asset& rewardAsset, const uint16 ownershipManagingContractIndex,
-	                                const uint16 possessionManagingContractIndex)
+	PRIVATE_PROCEDURE_WITH_LOCALS(ProcessGame)
 	{
-		return rewardMode == ERewardMode::QUBIC || (rewardMode == ERewardMode::ASSET && rewardAsset.assetName != 0 && rewardAsset.issuer != NULL_ID &&
-		                                            ownershipManagingContractIndex > 0 && possessionManagingContractIndex > 0);
+		output.actionsUsed = 0;
+		locals.game = state.get().games.get(input.slot);
+		if (locals.game.status == EGameStatus::FINALIZING)
+		{
+			locals.finalizeInput.slot = input.slot;
+			locals.finalizeInput.reason = locals.game.finalizingRoundReason;
+			CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+			output.returnCode = locals.finalizeOutput.returnCode;
+			return;
+		}
+		locals.now = qpi.now();
+		locals.lifecycleInput.game = locals.game;
+		locals.lifecycleInput.now = locals.now;
+		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		if (locals.lifecycleOutput.action == EGameLifecycleAction::OPEN_SALES)
+		{
+			locals.game.status = locals.lifecycleOutput.effectiveStatus;
+			state.mut().games.set(input.slot, locals.game);
+		}
+		if (locals.lifecycleOutput.action == EGameLifecycleAction::FINALIZE_NO_TICKETS)
+		{
+			locals.finalizeInput.slot = input.slot;
+			locals.finalizeInput.reason = EGameTerminalReason::NO_TICKETS;
+			CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+			output.returnCode = locals.finalizeOutput.returnCode;
+			return;
+		}
+		if (locals.lifecycleOutput.action == EGameLifecycleAction::BEGIN_SETTLEMENT)
+		{
+			locals.game.status = EGameStatus::CLOSED;
+			state.mut().games.set(input.slot, locals.game);
+			locals.beginInput.slot = input.slot;
+			CALL(BeginSettlement, locals.beginInput, locals.beginOutput);
+		}
+		if (input.actionBudget > 0 &&
+		    (state.get().games.get(input.slot).status == EGameStatus::COUNTING || state.get().games.get(input.slot).status == EGameStatus::PAYING))
+		{
+			locals.advanceInput.slot = input.slot;
+			locals.advanceInput.actionBudget = input.actionBudget;
+			CALL(AdvanceSettlement, locals.advanceInput, locals.advanceOutput);
+			output.actionsUsed = locals.advanceOutput.actionsUsed;
+			output.returnCode = locals.advanceOutput.returnCode;
+			return;
+		}
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	/**
-	 * @brief Validates the ticket-payment asset configuration for a template.
-	 * @param entryMode Ticket payment mode.
-	 * @param entryAsset Asset collected from players when `entryMode == ASSET`.
-	 * @param rewardMode Reward payout mode selected by the template.
-	 * @param rewardAsset Asset paid to winners when `rewardMode == ASSET`.
-	 * @param ownershipManagingContractIndex Ownership managing contract used to collect asset ticket payments.
-	 * @param possessionManagingContractIndex Possession managing contract used to collect asset ticket payments.
-	 * @return True when entry and reward currencies are both Qubic or the same managed asset.
-	 * @note Asset-entry templates add collected shares directly to the asset prize reserve, so entry and reward assets must match.
-	 */
-	static bool isEntryConfigValid(const EEntryMode entryMode, const Asset& entryAsset, const ERewardMode rewardMode, const Asset& rewardAsset,
-	                               const uint16 ownershipManagingContractIndex, const uint16 possessionManagingContractIndex)
+	PRIVATE_PROCEDURE_WITH_LOCALS(ReclaimCompletedTickets)
 	{
-		return (entryMode == EEntryMode::QUBIC && rewardMode == ERewardMode::QUBIC) ||
-		       (entryMode == EEntryMode::ASSET && rewardMode == ERewardMode::ASSET && entryAsset.assetName != 0 && entryAsset.issuer != NULL_ID &&
-		        entryAsset.assetName == rewardAsset.assetName && entryAsset.issuer == rewardAsset.issuer && ownershipManagingContractIndex > 0 &&
-		        possessionManagingContractIndex > 0);
+		// Preserve the guaranteed history window unless ticket pressure requires reclaiming older details.
+		output.actionsUsed = 0;
+		if (!state.get().reclaimingTickets &&
+		    (state.get().freeTicketCount > 0 || state.get().nextUnusedTicketSlot < state.get().tickets.capacity()) &&
+		    state.get().resultCounter - state.get().reclaimResultCounter < PLDT_RESULT_HISTORY_SIZE)
+		{
+			return;
+		}
+		locals.budget = input.actionBudget;
+		locals.resultScans = 0;
+		// Mark a result's details unavailable before recycling its ticket chain, preserving lookup consistency.
+		while (locals.budget > 0 && locals.resultScans < PLDT_SETTLEMENT_ACTION_BUDGET)
+		{
+			while (!state.get().reclaimingTickets && state.get().reclaimResultCounter < state.get().resultCounter &&
+			       locals.resultScans < PLDT_SETTLEMENT_ACTION_BUDGET)
+			{
+				locals.resultIndex = mod(state.get().reclaimResultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
+				locals.result = state.get().results.get(static_cast<uint16>(locals.resultIndex));
+				++locals.resultScans;
+				if (locals.result.resultSequence == state.get().reclaimResultCounter + 1 && locals.result.detailsAvailable &&
+				    locals.result.firstTicketLink != 0)
+				{
+					locals.result.detailsAvailable = false;
+					state.mut().results.set(static_cast<uint16>(locals.resultIndex), locals.result);
+					state.mut().reclaimTicketLink = locals.result.firstTicketLink;
+					state.mut().reclaimingTickets = true;
+					break;
+				}
+				state.mut().reclaimResultCounter = state.get().reclaimResultCounter + 1;
+			}
+			if (!state.get().reclaimingTickets)
+			{
+				break;
+			}
+			while (state.get().reclaimTicketLink != 0 && locals.budget > 0)
+			{
+				locals.ticketSlot = state.get().reclaimTicketLink - 1;
+				locals.ticket = state.get().tickets.get(locals.ticketSlot);
+				locals.nextLink = locals.ticket.nextLink;
+				locals.ticket.nextLink = state.get().freeTicketHead;
+				state.mut().tickets.set(locals.ticketSlot, locals.ticket);
+				state.mut().freeTicketHead = locals.ticketSlot + 1;
+				state.mut().freeTicketCount = state.get().freeTicketCount + 1;
+				state.mut().reclaimTicketLink = locals.nextLink;
+				--locals.budget;
+			}
+			if (state.get().reclaimTicketLink == 0)
+			{
+				state.mut().reclaimingTickets = false;
+				state.mut().reclaimResultCounter = state.get().reclaimResultCounter + 1;
+			}
+		}
+		output.actionsUsed = input.actionBudget - locals.budget;
 	}
 
-	/**
-	 * @brief Computes the base reserve required before opening a round.
-	 * @param gameTemplate Template whose funding requirement is evaluated.
-	 * @return Minimum deposited reserve required before a round can start.
-	 * @note Asset-entry templates collect and split one ticket before instant settlement, so the prize portion can cover part of the base payout.
-	 */
-	static uint64 requiredBasePrizeReserve(const GameTemplate& gameTemplate)
+	/** Extracts the fixed game slot encoded in a generation-aware game id. */
+	static constexpr uint16 gameSlot(const uint64 gameId) { return static_cast<uint16>(gameId & (PLDT_MAX_GAMES - 1)); }
+
+	/** Verifies that a game id still names the active generation occupying its encoded slot. */
+	static bool isGameIdValid(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, const uint64 gameId)
 	{
-		return gameTemplate.entryMode == EEntryMode::ASSET && gameTemplate.rewardMode == ERewardMode::ASSET
-		           ? (gameTemplate.maxSinglePayout > assetEntryPrizeContribution(gameTemplate)
-		                  ? gameTemplate.maxSinglePayout - assetEntryPrizeContribution(gameTemplate)
-		                  : 0)
-		           : gameTemplate.maxSinglePayout;
+		return gameId > 0 && state.get().games.get(gameSlot(gameId)).status != EGameStatus::EMPTY_SLOT &&
+		       state.get().games.get(gameSlot(gameId)).gameId == gameId;
 	}
 
-	/**
-	 * @brief Computes the maximum bonus reserve required by the configured multiplier.
-	 * @param gameTemplate Template whose maximum base payout and multiplier are evaluated.
-	 * @return Extra reserve needed to pay one maximum base win with the multiplier applied.
-	 */
-	static uint64 requiredBonusReserve(const GameTemplate& gameTemplate)
+	/** Computes floor(value * multiplier / divisor) without overflowing the intermediate product. */
+	static uint64 mulDiv(const uint64 value, const uint64 multiplier, const uint64 divisor)
 	{
-		return gameTemplate.bonusEnabled ? bonusExtraPayout(gameTemplate.maxSinglePayout, gameTemplate.bonusMultiplierBps) : 0;
+		return sadd(smul(div(value, divisor), multiplier), div(smul(mod(value, divisor), multiplier), divisor));
 	}
 
-	/**
-	 * @brief Computes the extra payout added by a multiplier.
-	 * @param basePayout Base payout before the bonus.
-	 * @param bonusMultiplierBps Multiplier in basis points.
-	 * @return Extra amount above `basePayout`; for `12000` and `300`, returns `60`.
-	 */
-	static uint64 bonusExtraPayout(const uint64 basePayout, const uint32 bonusMultiplierBps)
+	/** Computes (value * multiplier) mod divisor without overflowing the intermediate product. */
+	static uint64 mulMod(const uint64 value, const uint64 multiplier, const uint64 divisor)
 	{
-		return bonusMultiplierBps > PULSEEDITOR_BONUS_MULTIPLIER_SCALE
-		           ? div<uint64>(smul(basePayout, static_cast<uint64>(bonusMultiplierBps)), static_cast<uint64>(PULSEEDITOR_BONUS_MULTIPLIER_SCALE)) -
-		                 basePayout
-		           : 0;
-	}
-
-	/**
-	 * @brief Computes the prize-reserve share produced by one asset ticket after all asset-entry fees.
-	 * @param gameTemplate Template whose asset ticket economics are evaluated.
-	 * @return Asset shares added to `assetPrizeReserve` by one accepted ticket.
-	 */
-	static uint64 assetEntryPrizeContribution(const GameTemplate& gameTemplate)
-	{
-		return ticketPrizeShare(
-		    ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		    ticketCreatorShare(
-		        ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		        gameTemplate.creatorFeePercent),
-		    ticketBurnShare(ticketNetRevenue(gameTemplate.ticketPrice, ticketPlatformFee(gameTemplate.ticketPrice, PULSEEDITOR_PLATFORM_FEE_PERCENT)),
-		                    gameTemplate.burnPercent));
-	}
-
-	/**
-	 * @brief Computes platform fee from a gross ticket amount.
-	 * @param grossAmount Qubic amount or asset shares paid for one or more tickets.
-	 * @param platformFeePercent Platform fee percentage.
-	 * @return Fee amount rounded down by integer division.
-	 */
-	static uint64 ticketPlatformFee(const uint64 grossAmount, const uint8 platformFeePercent)
-	{
-		return div<uint64>(smul(grossAmount, static_cast<uint64>(platformFeePercent)), 100ULL);
-	}
-
-	/**
-	 * @brief Computes developer 1 share from the platform fee.
-	 * @param platformFee Platform fee amount.
-	 * @return Developer 1 amount rounded down by integer division.
-	 */
-	static uint64 platformDev1Share(const uint64 platformFee)
-	{
-		return div<uint64>(smul(platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV1_SHARE_PERCENT)), 100ULL);
-	}
-
-	/**
-	 * @brief Computes developer 2 share from the platform fee.
-	 * @param platformFee Platform fee amount.
-	 * @return Developer 2 amount rounded down by integer division.
-	 */
-	static uint64 platformDev2Share(const uint64 platformFee)
-	{
-		return div<uint64>(smul(platformFee, static_cast<uint64>(PULSEEDITOR_PLATFORM_DEV2_SHARE_PERCENT)), 100ULL);
-	}
-
-	/**
-	 * @brief Computes revenue remaining after the platform fee.
-	 * @param grossAmount Qubic amount or asset shares paid for tickets.
-	 * @param platformFee Platform fee deducted from the gross amount.
-	 * @return Non-platform revenue.
-	 */
-	static uint64 ticketNetRevenue(const uint64 grossAmount, const uint64 platformFee) { return grossAmount - platformFee; }
-
-	/**
-	 * @brief Computes creator share from non-platform revenue.
-	 * @param netRevenue Revenue after platform fee.
-	 * @param creatorFeePercent Creator percentage.
-	 * @return Creator amount rounded down by integer division.
-	 */
-	static uint64 ticketCreatorShare(const uint64 netRevenue, const uint8 creatorFeePercent)
-	{
-		return div<uint64>(smul(netRevenue, static_cast<uint64>(creatorFeePercent)), 100ULL);
-	}
-
-	/**
-	 * @brief Computes burn share from non-platform revenue.
-	 * @param netRevenue Revenue after platform fee.
-	 * @param burnPercent Burn percentage.
-	 * @return Burn amount rounded down by integer division.
-	 */
-	static uint64 ticketBurnShare(const uint64 netRevenue, const uint8 burnPercent)
-	{
-		return div<uint64>(smul(netRevenue, static_cast<uint64>(burnPercent)), 100ULL);
-	}
-
-	/**
-	 * @brief Computes the prize-reserve share after creator and burn shares.
-	 * @param netRevenue Revenue after platform fee.
-	 * @param creatorAmount Creator share.
-	 * @param burnAmount Burn share.
-	 * @return Amount added to the prize reserve.
-	 */
-	static uint64 ticketPrizeShare(const uint64 netRevenue, const uint64 creatorAmount, const uint64 burnAmount)
-	{
-		return netRevenue - creatorAmount - burnAmount;
-	}
-
-	/**
-	 * @brief Checks whether the selected reward reserve can safely open the next round.
-	 * @param gameTemplate Template whose reserve balance is evaluated.
-	 * @return True when the base reserve satisfies `requiredBasePrizeReserve`.
-	 */
-	static bool hasRequiredBaseReserve(const GameTemplate& gameTemplate)
-	{
-		return (gameTemplate.rewardMode == ERewardMode::QUBIC && gameTemplate.prizeReserve >= requiredBasePrizeReserve(gameTemplate)) ||
-		       (gameTemplate.rewardMode == ERewardMode::ASSET && gameTemplate.assetPrizeReserve >= requiredBasePrizeReserve(gameTemplate));
-	}
-
-	/**
-	 * @brief Checks whether the selected bonus reserve can safely open the next round.
-	 * @param gameTemplate Template whose multiplier-bonus reserve is evaluated.
-	 * @return True when bonuses are disabled or the matching reward-currency bonus reserve is funded.
-	 */
-	static bool hasRequiredBonusReserve(const GameTemplate& gameTemplate)
-	{
-		return !gameTemplate.bonusEnabled ||
-		       (gameTemplate.rewardMode == ERewardMode::QUBIC && gameTemplate.bonusReserve >= requiredBonusReserve(gameTemplate)) ||
-		       (gameTemplate.rewardMode == ERewardMode::ASSET && gameTemplate.assetBonusReserve >= requiredBonusReserve(gameTemplate));
-	}
-
-	/**
-	 * @brief Checks whether base and bonus reserves can open a round.
-	 * @param gameTemplate Template whose reserves are evaluated.
-	 * @return True when all required reserves are funded.
-	 */
-	static bool hasRequiredRoundReserves(const GameTemplate& gameTemplate)
-	{
-		return hasRequiredBaseReserve(gameTemplate) && hasRequiredBonusReserve(gameTemplate);
-	}
-
-	/**
-	 * @brief Validates template configuration bounds before template creation.
-	 * @param codeLength Requested code length.
-	 * @param maxDigit Requested maximum digit.
-	 * @param ticketPrice Required price per ticket.
-	 * @param ticketLimit Per-round ticket cap.
-	 * @param playerTicketLimit Per-player ticket cap within a round.
-	 * @param creatorFeePercent Creator share of non-platform revenue.
-	 * @param burnPercent Burn share of non-platform revenue.
-	 * @param maxCreatorFeePercent Current platform creator-fee limit.
-	 * @return True when all values fit MVP bounds and economic percentages are safe.
-	 */
-	static bool isTemplateConfigValid(const uint8 codeLength, const uint8 maxDigit, const uint64 ticketPrice, const uint16 ticketLimit,
-	                                  const uint16 playerTicketLimit, const uint8 creatorFeePercent, const uint8 burnPercent,
-	                                  const uint8 maxCreatorFeePercent)
-	{
-		return codeLength > 0 && codeLength <= PULSEEDITOR_MAX_CODE_LENGTH && maxDigit <= PULSEEDITOR_MAX_DIGIT && ticketPrice > 0 &&
-		       ticketLimit > 0 && ticketLimit <= PULSEEDITOR_MAX_TICKETS && playerTicketLimit > 0 && playerTicketLimit <= ticketLimit &&
-		       creatorFeePercent <= maxCreatorFeePercent && burnPercent <= PULSEEDITOR_MAX_BURN_PERCENT &&
-		       sadd(static_cast<uint64>(creatorFeePercent), static_cast<uint64>(burnPercent)) <= 100ULL;
-	}
-
-	/**
-	 * @brief Derives one deterministic pseudo-random value from a base seed and index.
-	 * @param r Base seed.
-	 * @param idx Derivation index.
-	 * @param outValue Mixed output value.
-	 */
-	static void deriveOne(const uint64& r, const uint64& idx, uint64& outValue) { mix64(r + 0x9e3779b97f4a7c15ULL * (idx + 1), outValue); }
-
-	/**
-	 * @brief Applies SplitMix64-style mixing to a 64-bit value.
-	 * @param x Input value.
-	 * @param outValue Mixed output value.
-	 * @note Raw multiplication is intentional here because wraparound is part of the mixing algorithm.
-	 */
-	static void mix64(const uint64& x, uint64& outValue)
-	{
-		outValue = x;
-		outValue ^= outValue >> 30;
-		outValue *= 0xbf58476d1ce4e5b9ULL;
-		outValue ^= outValue >> 27;
-		outValue *= 0x94d049bb133111ebULL;
-		outValue ^= outValue >> 31;
+		return mod(smul(mod(value, divisor), multiplier), divisor);
 	}
 };
