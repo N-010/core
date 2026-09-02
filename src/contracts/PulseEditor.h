@@ -61,10 +61,22 @@ constexpr uint8 PLDT_PLATFORM_DEV2_SHARE_PERCENT = 25;
 constexpr uint8 PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
 /** Default Qubic automation fee reserved per game round. */
 constexpr uint64 PLDT_DEFAULT_ROUND_FEE = 10000;
+/** Default non-refundable service credit required to open a creator wallet. */
+constexpr uint64 PLDT_DEFAULT_WALLET_CREATION_FEE = 1000000;
+/** Maximum number of creator wallets retained in contract state. */
+constexpr uint16 PLDT_MAX_WALLETS = 1024;
+/** Internal power-of-two wallet map capacity kept below its high-load range. */
+constexpr uint16 PLDT_WALLET_MAP_CAPACITY = 2048;
+/** Maximum distinct managed assets tracked by one creator wallet. */
+constexpr uint8 PLDT_MAX_WALLET_ASSETS = 16;
 /** Tick interval between automated lifecycle scans. */
 constexpr uint32 PLDT_TICK_UPDATE_PERIOD = 100;
 /** Number of game slots inspected during one automation pass. */
 constexpr uint16 PLDT_AUTOMATION_GAMES_PER_TICK = 32;
+/** Number of wallet-map slots inspected during one periodic automation pass. */
+constexpr uint16 PLDT_AUTOMATION_WALLETS_PER_TICK = 32;
+/** Maximum managed-asset positions released or detached per wallet automation pass. */
+constexpr uint8 PLDT_WALLET_EXPIRY_ASSET_ACTION_BUDGET = 16;
 /** Maximum settlement or reclamation actions executed per scan. */
 constexpr uint16 PLDT_SETTLEMENT_ACTION_BUDGET = 64;
 /** Maximum collision retries while generating unique winning digits. */
@@ -166,6 +178,17 @@ public:
 		HISTORY_EXPIRED,
 		/** An internal invariant failed without a more specific public code. */
 		UNKNOWN_ERROR,
+	};
+
+	/** Lifecycle state of a creator wallet. */
+	enum class EWalletStatus : uint8
+	{
+		/** Zero state used only for absent records. */
+		ABSENT,
+		/** Wallet accepts deposits and may fund games. */
+		OPEN,
+		/** Wallet is being removed by bounded background processing. */
+		EXPIRING,
 	};
 
 	/** Determines whether a game ends once or schedules successive rounds. */
@@ -342,6 +365,8 @@ public:
 		uint64 pendingCreatorBalancePayout;
 		/** Unused Qubic run credit waiting for stop transfer. */
 		uint64 pendingRunCreditPayout;
+		/** Non-refundable creator-wallet credit still contained in Qubic game ledgers. */
+		uint64 serviceCreditBalance;
 		/** Fixed start-to-draw interval reused by permanent rounds. */
 		uint64 roundDurationMicroseconds;
 		/** One-based round sequence within a game generation. */
@@ -528,9 +553,45 @@ public:
 		bit isActive;
 	};
 
+	/** One asset balance tracked inside a creator wallet. */
+	struct WalletAssetBalance
+	{
+		/** Asset whose management rights are held by PulseEditor. */
+		Asset asset;
+		/** Shares available to fund games or transfer management rights. */
+		uint64 balance;
+		/** Active games that keep this asset position addressable at zero balance. */
+		uint16 activeGameReferences;
+		/** Whether this fixed-capacity position is allocated. */
+		bit isActive;
+	};
+
+	/** Creator-owned funding ledger used by all game-creation operations. */
+	struct CreatorWallet
+	{
+		/** Fixed-capacity managed-asset ledger. */
+		Array<WalletAssetBalance, PLDT_MAX_WALLET_ASSETS> assets;
+		/** Non-refundable QU consumed before refundable QU when funding games. */
+		uint64 serviceCredit;
+		/** QU that may fund games or be withdrawn by the wallet owner. */
+		uint64 refundableQubic;
+		/** Number of game slots currently owned by this wallet. */
+		uint16 activeGameCount;
+		/** Epoch of the most recent successful game creation. */
+		uint16 lastGameCreationEpoch;
+		/** Number of allocated entries in assets. */
+		uint8 assetCount;
+		/** Next asset position considered during bounded expiry. */
+		uint8 expiryAssetCursor;
+		/** Current wallet lifecycle state. */
+		EWalletStatus status;
+	};
+
 	/** All consensus-persistent PulseEditor state; field order is ABI-sensitive. */
 	struct StateData
 	{
+		/** Creator funding ledgers indexed by creator identity. */
+		HashMap<id, CreatorWallet, PLDT_WALLET_MAP_CAPACITY> wallets;
 		/** Generation-aware game records indexed by game slot. */
 		Array<Game, PLDT_MAX_GAMES> games;
 		/** Per-game resumable settlement progress. */
@@ -557,6 +618,8 @@ public:
 		uint64 dividendAccrued;
 		/** Qubic charged from run credit for each automated round. */
 		uint64 roundFee;
+		/** Service credit retained when a new creator wallet is opened. */
+		uint64 walletCreationFee;
 		/** Number of tickets accepted for the current request or round. */
 		uint64 ticketCount;
 		/** First ticket slot that has never been allocated, or zero before initialization. */
@@ -577,12 +640,88 @@ public:
 		uint16 allocationCursor;
 		/** Next game slot from which the periodic scan resumes. */
 		uint16 automationCursor;
+		/** Next raw wallet-map slot from which the periodic scan resumes. */
+		uint16 walletAutomationCursor;
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
 		/** Owner-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
 		/** Whether background cleanup is traversing this result's ticket chain. */
 		bit reclaimingTickets;
+	};
+
+	/** Empty request used to create the invocator's creator wallet. */
+	struct CreateWallet_input
+	{
+	};
+
+	/** Result of creating a creator wallet. */
+	struct CreateWallet_output
+	{
+		/** Non-refundable service credit assigned to the wallet. */
+		uint64 serviceCredit;
+		/** Excess invocation reward retained as withdrawable wallet QU. */
+		uint64 refundableQubic;
+		/** Public outcome describing success or why the wallet was not created. */
+		EReturnCode returnCode;
+	};
+
+	/** Identifies the creator wallet to read. */
+	struct GetWallet_input
+	{
+		/** Wallet owner whose ledger is requested. */
+		id owner;
+	};
+
+	/** Public snapshot of a creator wallet. */
+	struct GetWallet_output
+	{
+		/** Managed-asset positions, including positions retained by active games. */
+		Array<WalletAssetBalance, PLDT_MAX_WALLET_ASSETS> assets;
+		/** Non-refundable QU available for game funding. */
+		uint64 serviceCredit;
+		/** Withdrawable QU available for game funding. */
+		uint64 refundableQubic;
+		/** Number of game slots currently owned by this wallet. */
+		uint16 activeGameCount;
+		/** Epoch of the latest successful game creation. */
+		uint16 lastGameCreationEpoch;
+		/** Number of allocated asset positions. */
+		uint8 assetCount;
+		/** Current wallet lifecycle state. */
+		EWalletStatus status;
+		/** Whether the requested owner has a wallet. */
+		bit found;
+	};
+
+	/** Empty request used to deposit the invocation reward into a wallet. */
+	struct DepositWalletQubic_input
+	{
+	};
+
+	/** Result of a refundable-Qubic wallet deposit. */
+	struct DepositWalletQubic_output
+	{
+		/** Updated refundable balance after a successful deposit. */
+		uint64 refundableQubic;
+		/** Public outcome describing success or why no deposit was retained. */
+		EReturnCode returnCode;
+	};
+
+	/** Requests refundable Qubic from the invocator's wallet. */
+	struct WithdrawWalletQubic_input
+	{
+		/** Amount of refundable Qubic to return to the wallet owner. */
+		uint64 amount;
+	};
+
+	/** Result of withdrawing refundable wallet Qubic. */
+	struct WithdrawWalletQubic_output
+	{
+		/** Amount transferred successfully. */
+		uint64 amountPaid;
+		/** Public outcome describing success or why no withdrawal occurred. */
+		EReturnCode returnCode;
 	};
 
 	/** Validated data consumed by the create game operation. */
@@ -661,6 +800,7 @@ public:
 		/** Additional game currency added to the creator-balance ledger. */
 		uint64 creatorBalanceTopUp;
 	};
+
 	/** Result data produced by the fund game operation. */
 	struct FundGame_output
 	{
@@ -686,6 +826,7 @@ public:
 		/** Selects payout or reinvestment of creator fees. */
 		ECreatorRevenueMode creatorRevenueMode;
 	};
+
 	/** Result data produced by the update game economics operation. */
 	struct UpdateGameEconomics_output
 	{
@@ -699,6 +840,7 @@ public:
 		/** Generation-aware identifier of a game slot. */
 		uint64 gameId;
 	};
+
 	/** Result data produced by the stop game operation. */
 	struct StopGame_output
 	{
@@ -716,6 +858,7 @@ public:
 		/** Creator balance requested for withdrawal. */
 		uint64 creatorBalanceAmount;
 	};
+
 	/** Result data produced by the withdraw game balance operation. */
 	struct WithdrawGameBalance_output
 	{
@@ -755,6 +898,7 @@ public:
 		/** Generation-aware identifier of a game slot. */
 		uint64 gameId;
 	};
+
 	/** Result data produced by the get game operation. */
 	struct GetGame_output
 	{
@@ -772,13 +916,16 @@ public:
 		/** One-based round sequence within a game generation. */
 		uint64 roundNumber;
 	};
+
 	using RoundResult = GameResult;
+
 	/** Validated data consumed by the get round result operation. */
 	struct GetRoundResult_input
 	{
 		/** Game and round pair used to identify immutable result history. */
 		RoundKey roundKey;
 	};
+
 	/** Result data produced by the get round result operation. */
 	struct GetRoundResult_output
 	{
@@ -789,6 +936,7 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	using GetGameResult_input = GetRoundResult_input;
 	using GetGameResult_output = GetRoundResult_output;
 
@@ -798,6 +946,7 @@ public:
 		/** Generation-aware identifier of a ticket slot. */
 		uint64 ticketId;
 	};
+
 	/** Result data produced by the get ticket operation. */
 	struct GetTicket_output
 	{
@@ -819,6 +968,7 @@ public:
 		/** Whether a code may contain the same digit more than once. */
 		bit allowRepeatedDigits;
 	};
+
 	/** Result data produced by the validate digits operation. */
 	struct ValidateDigits_output
 	{
@@ -827,6 +977,7 @@ public:
 	};
 
 	using PreviewGame_input = CreateGame_input;
+
 	/** Result data produced by the preview game operation. */
 	struct PreviewGame_output
 	{
@@ -852,6 +1003,7 @@ public:
 	struct GetPlatformAccounting_input
 	{
 	};
+
 	/** Result data produced by the get platform accounting operation. */
 	struct GetPlatformAccounting_output
 	{
@@ -869,12 +1021,16 @@ public:
 		uint64 dividendAccrued;
 		/** Qubic charged from run credit for each automated round. */
 		uint64 roundFee;
+		/** Service credit required to open a new creator wallet. */
+		uint64 walletCreationFee;
 		/** Number of tickets accepted for the current request or round. */
 		uint64 ticketCount;
 		/** Monotonic sequence used to order and place published results. */
 		uint64 resultCounter;
 		/** Total game slots currently occupied. */
 		uint16 activeGameCount;
+		/** Number of creator wallets currently retained. */
+		uint16 walletCount;
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
 		/** Owner-configurable upper bound for creatorFeePercent. */
@@ -892,9 +1048,12 @@ public:
 		id developer2;
 		/** Qubic charged from run credit for each automated round. */
 		uint64 roundFee;
+		/** Service credit required to open creator wallets after this update. */
+		uint64 walletCreationFee;
 		/** Owner-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
 	};
+
 	/** Result data produced by the set platform config operation. */
 	struct SetPlatformConfig_output
 	{
@@ -906,6 +1065,7 @@ public:
 	struct WithdrawPlatformRevenue_input
 	{
 	};
+
 	/** Result data produced by the withdraw platform revenue operation. */
 	struct WithdrawPlatformRevenue_output
 	{
@@ -929,6 +1089,7 @@ public:
 		/** Number of tickets accepted for the current request or round. */
 		uint16 ticketCount;
 	};
+
 	/** Result data produced by the buy tickets operation. */
 	struct BuyTickets_output
 	{
@@ -954,6 +1115,7 @@ public:
 		/** Maximum number of records requested in the response page. */
 		uint16 limit;
 	};
+
 	/** Result data produced by the get player tickets operation. */
 	struct GetPlayerTickets_output
 	{
@@ -977,6 +1139,7 @@ public:
 		/** Maximum number of records requested in the response page. */
 		uint16 limit;
 	};
+
 	/** Result data produced by the get games operation. */
 	struct GetGames_output
 	{
@@ -1000,6 +1163,7 @@ public:
 		/** Maximum number of records requested in the response page. */
 		uint16 limit;
 	};
+
 	/** Result data produced by the get winners operation. */
 	struct GetWinners_output
 	{
@@ -1025,6 +1189,7 @@ public:
 		/** Contract index that should receive share-management rights. */
 		uint16 newManagingContractIndex;
 	};
+
 	/** Result data produced by the transfer share management rights operation. */
 	struct TransferShareManagementRights_output
 	{
@@ -1044,6 +1209,7 @@ public:
 		/** Contract index required to manage currency-asset possession records. */
 		uint16 possessionManagingContractIndex;
 	};
+
 	/** Result data produced by the withdraw asset platform revenue operation. */
 	struct WithdrawAssetPlatformRevenue_output
 	{
@@ -1056,6 +1222,7 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** Validated data consumed by the transfer asset dividend operation. */
 	struct TransferAssetDividend_input
 	{
@@ -1064,6 +1231,7 @@ public:
 		/** Asset units available for proportional shareholder distribution. */
 		uint64 dividendAmount;
 	};
+
 	/** Result data produced by the transfer asset dividend operation. */
 	struct TransferAssetDividend_output
 	{
@@ -1072,6 +1240,7 @@ public:
 		/** Whether any resumable transfer attempted in this operation failed. */
 		bit failed;
 	};
+
 	/** QPI scratch state for transfer asset dividend; contract routines cannot declare stack locals. */
 	struct TransferAssetDividend_locals
 	{
@@ -1094,6 +1263,21 @@ public:
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
 	};
+
+	/** Validated data consumed by the refund invocation reward operation. */
+	struct RefundInvocationReward_input
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
+	/** Result data produced by the refund invocation reward operation. */
+	struct RefundInvocationReward_output
+	{
+		/** Public outcome describing success or the reason no state change occurred. */
+		EReturnCode returnCode;
+	};
+
 	/** QPI scratch state for withdraw asset platform revenue; contract routines cannot declare stack locals. */
 	struct WithdrawAssetPlatformRevenue_locals
 	{
@@ -1103,6 +1287,10 @@ public:
 		TransferAssetDividend_output dividendOutput;
 		/** Working copy of one asset platform-accrual bucket. */
 		AssetPlatformAccounting accounting;
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
 		/** Loop cursor for the bounded collection being processed. */
 		uint64 i;
 		/** QPI transfer result; a negative value indicates failure. */
@@ -1111,6 +1299,31 @@ public:
 		bit found;
 		/** Whether any resumable transfer attempted in this operation failed. */
 		bit failed;
+	};
+
+	/** QPI scratch state for releasing creator-managed asset rights. */
+	struct TransferShareManagementRights_locals
+	{
+		/** Creator wallet snapshot used while releasing management rights. */
+		CreatorWallet wallet;
+		/** Scratch managed-asset position used during the operation. */
+		WalletAssetBalance walletAsset;
+		/** Scratch bounded-loop index used during the operation. */
+		uint64 i;
+		/** Scratch refundable amount used during the operation. */
+		sint64 refundAmount;
+		/** Scratch refund result used during the operation. */
+		sint64 refundResult;
+		/** Managed shares currently possessed by the caller under this contract. */
+		sint64 possessedShares;
+		/** Tracked wallet shares removed after a successful release. */
+		uint64 walletDebit;
+		/** Scratch wallet asset slot used during the operation. */
+		uint8 walletAssetSlot;
+		/** Scratch wallet lookup-success flag used during the operation. */
+		bit walletFound;
+		/** Scratch wallet asset lookup-success flag used during the operation. */
+		bit walletAssetFound;
 	};
 
 	/** Validated data consumed by the count matches operation. */
@@ -1123,6 +1336,7 @@ public:
 		/** Number of meaningful digits in every code for this game. */
 		uint8 codeLength;
 	};
+
 	/** Result data produced by the count matches operation. */
 	struct CountMatches_output
 	{
@@ -1133,6 +1347,7 @@ public:
 		/** Winning digit values found in a different position. */
 		uint8 misplaced;
 	};
+
 	/** QPI scratch state for count matches; contract routines cannot declare stack locals. */
 	struct CountMatches_locals
 	{
@@ -1164,12 +1379,14 @@ public:
 		/** Whether a code may contain the same digit more than once. */
 		bit allowRepeatedDigits;
 	};
+
 	/** Result data produced by the generate winning digits operation. */
 	struct GenerateWinningDigits_output
 	{
 		/** Submitted, generated, or returned code digits; only codeLength entries are meaningful. */
 		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
 	};
+
 	/** QPI scratch state for generate winning digits; contract routines cannot declare stack locals. */
 	struct GenerateWinningDigits_locals
 	{
@@ -1208,6 +1425,7 @@ public:
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
 	};
+
 	/** Result data produced by the calculate ticket economics operation. */
 	struct CalculateTicketEconomics_output
 	{
@@ -1237,12 +1455,14 @@ public:
 		/** Entity that owns the ticket or is evaluated for bonus eligibility. */
 		id player;
 	};
+
 	/** Result data produced by the evaluate bonus qualification operation. */
 	struct EvaluateBonusQualification_output
 	{
 		/** Whether the player's holdings satisfy any configured bonus asset. */
 		bit qualified;
 	};
+
 	/** QPI scratch state for evaluate bonus qualification; contract routines cannot declare stack locals. */
 	struct EvaluateBonusQualification_locals
 	{
@@ -1260,6 +1480,7 @@ public:
 		/** Current UTC time obtained from QPI for lifecycle decisions. */
 		DateAndTime now;
 	};
+
 	/** Result data produced by the evaluate game lifecycle operation. */
 	struct EvaluateGameLifecycle_output
 	{
@@ -1273,41 +1494,135 @@ public:
 		bit canCancel;
 	};
 
-	/** QPI scratch state for preview game; contract routines cannot declare stack locals. */
-	struct PreviewGame_locals
+	/** Input values consumed by the validate game configuration helper. */
+	struct ValidateGameConfiguration_input
 	{
-		/** Request passed to the economics helper. */
-		CalculateTicketEconomics_input economicsInput;
-		/** Response returned by the economics helper. */
-		CalculateTicketEconomics_output economicsOutput;
-		/** Latest UTC draw allowed by the scheduling horizon. */
+		/** Configuration stored by this structure. */
+		PreviewGame_input configuration;
+	};
+
+	/** Result values produced by the validate game configuration helper. */
+	struct ValidateGameConfiguration_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the validate game configuration helper. */
+	struct ValidateGameConfiguration_locals
+	{
+		/** Max draw at stored by this structure. */
 		DateAndTime maxDrawAt;
-		/** Sum of configured tier weights used to enforce exactly 10000 basis points. */
-		uint64 weightTotal;
-		/** Creator plus prize amount that may need terminal return per ticket. */
-		uint64 refundablePerTicket;
-		/** Loop cursor for the bounded collection being processed. */
+		/** Bounded-loop index stored by this structure. */
 		uint64 i;
-		/** Game-currency shares currently managed by PulseEditor. */
+		/** Managed currency shares stored by this structure. */
 		sint64 managedCurrencyShares;
-		/** Digits that match the winning code in both value and position. */
+	};
+
+	/** Input values consumed by the validate tier configuration helper. */
+	struct ValidateTierConfiguration_input
+	{
+		/** Tier weights bps stored by this structure. */
+		TierWeightMatrix tierWeightsBps;
+		/** Code length stored by this structure. */
+		uint8 codeLength;
+	};
+
+	/** Result values produced by the validate tier configuration helper. */
+	struct ValidateTierConfiguration_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the validate tier configuration helper. */
+	struct ValidateTierConfiguration_locals
+	{
+		/** Weight total stored by this structure. */
+		uint64 weightTotal;
+		/** Index stored by this structure. */
+		uint64 index;
+		/** Exact stored by this structure. */
 		uint8 exact;
-		/** Winning digit values found in a different position. */
+		/** Misplaced stored by this structure. */
 		uint8 misplaced;
 	};
 
-	/** Validated data consumed by the refund invocation reward operation. */
-	struct RefundInvocationReward_input
+	/** Input values consumed by the calculate game preview helper. */
+	struct CalculateGamePreview_input
 	{
-		/** Public outcome describing success or the reason no state change occurred. */
-		EReturnCode returnCode;
+		/** Configuration stored by this structure. */
+		PreviewGame_input configuration;
 	};
-	/** Result data produced by the refund invocation reward operation. */
-	struct RefundInvocationReward_output
+
+	/** Result values produced by the calculate game preview helper. */
+	struct CalculateGamePreview_output
 	{
-		/** Public outcome describing success or the reason no state change occurred. */
-		EReturnCode returnCode;
+		/** Preview stored by this structure. */
+		PreviewGame_output preview;
 	};
+
+	/** QPI scratch state used by the calculate game preview helper. */
+	struct CalculateGamePreview_locals
+	{
+		/** Economics input stored by this structure. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Economics output stored by this structure. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Refundable per ticket stored by this structure. */
+		uint64 refundablePerTicket;
+	};
+
+	/** QPI scratch state for preview game; contract routines cannot declare stack locals. */
+	struct PreviewGame_locals
+	{
+		/** Configuration input stored by this structure. */
+		ValidateGameConfiguration_input configurationInput;
+		/** Configuration output stored by this structure. */
+		ValidateGameConfiguration_output configurationOutput;
+		/** Tier input stored by this structure. */
+		ValidateTierConfiguration_input tierInput;
+		/** Tier output stored by this structure. */
+		ValidateTierConfiguration_output tierOutput;
+		/** Preview input stored by this structure. */
+		CalculateGamePreview_input previewInput;
+		/** Preview output stored by this structure. */
+		CalculateGamePreview_output previewOutput;
+	};
+
+	/** Validated data consumed by the wallet asset credit operation. */
+	struct CreditWalletAsset_input
+	{
+		/** Wallet owner receiving managed asset shares. */
+		id owner;
+		/** Managed asset whose wallet balance may be credited. */
+		Asset asset;
+		/** Number of transferred shares to credit. */
+		uint64 amount;
+	};
+
+	/** Result data produced by the wallet asset credit operation. */
+	struct CreditWalletAsset_output
+	{
+	};
+
+	/** QPI scratch state used by the wallet asset credit operation. */
+	struct CreditWalletAsset_locals
+	{
+		/** Working copy of the destination wallet. */
+		CreatorWallet wallet;
+		/** Working copy of one wallet asset position. */
+		WalletAssetBalance walletAsset;
+		/** Bounded-loop index used to inspect wallet asset slots. */
+		uint64 i;
+		/** First inactive asset slot available for a new position. */
+		uint8 freeSlot;
+		/** Whether the asset already has a wallet position. */
+		bit found;
+		/** Whether an inactive asset slot is available. */
+		bit freeSlotFound;
+	};
+
 	/** Validated data consumed by the transfer game currency operation. */
 	struct TransferGameCurrency_input
 	{
@@ -1318,12 +1633,14 @@ public:
 		/** Currency quantity requested for the current transfer. */
 		uint64 amount;
 	};
+
 	/** Result data produced by the transfer game currency operation. */
 	struct TransferGameCurrency_output
 	{
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
 	};
+
 	/** Validated data consumed by the burn collected ticket payment operation. */
 	struct BurnCollectedTicketPayment_input
 	{
@@ -1332,12 +1649,14 @@ public:
 		/** Number of tickets accepted for the current request or round. */
 		uint16 ticketCount;
 	};
+
 	/** Result data produced by the burn collected ticket payment operation. */
 	struct BurnCollectedTicketPayment_output
 	{
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for burn collected ticket payment; contract routines cannot declare stack locals. */
 	struct BurnCollectedTicketPayment_locals
 	{
@@ -1363,6 +1682,7 @@ public:
 		/** Whether this ticket receives the configured bonus winner weight. */
 		bit bonusQualified;
 	};
+
 	/** Result data produced by the apply accepted ticket operation. */
 	struct ApplyAcceptedTicket_output
 	{
@@ -1375,6 +1695,7 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for apply accepted ticket; contract routines cannot declare stack locals. */
 	struct ApplyAcceptedTicket_locals
 	{
@@ -1398,51 +1719,212 @@ public:
 		uint64 ticketGeneration;
 	};
 
+	/** Input values consumed by the prepare game creation helper. */
+	struct PrepareGameCreation_input
+	{
+		/** Configuration stored by this structure. */
+		CreateGame_input configuration;
+		/** Preview stored by this structure. */
+		PreviewGame_output preview;
+	};
+
+	/** Result values produced by the prepare game creation helper. */
+	struct PrepareGameCreation_output
+	{
+		/** Asset accounting stored by this structure. */
+		AssetPlatformAccounting assetAccounting;
+		/** Developer1 fee stored by this structure. */
+		uint64 developer1Fee;
+		/** Developer2 fee stored by this structure. */
+		uint64 developer2Fee;
+		/** Dividend fee stored by this structure. */
+		uint64 dividendFee;
+		/** Service credit debit stored by this structure. */
+		uint64 serviceCreditDebit;
+		/** Refundable qubic debit stored by this structure. */
+		uint64 refundableQubicDebit;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+		/** Accounting slot stored by this structure. */
+		uint16 accountingSlot;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the prepare game creation helper. */
+	struct PrepareGameCreation_locals
+	{
+		/** Asset accounting stored by this structure. */
+		AssetPlatformAccounting assetAccounting;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Game stored by this structure. */
+		Game game;
+		/** Max draw at stored by this structure. */
+		DateAndTime maxDrawAt;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Candidate slot stored by this structure. */
+		uint16 candidateSlot;
+		/** Creator active games stored by this structure. */
+		uint16 creatorActiveGames;
+		/** Required qubic stored by this structure. */
+		uint64 requiredQubic;
+		/** Wallet free asset slot stored by this structure. */
+		uint8 walletFreeAssetSlot;
+		/** Lookup-success flag stored by this structure. */
+		bit found;
+		/** Accounting found stored by this structure. */
+		bit accountingFound;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
+		/** Wallet free asset slot found stored by this structure. */
+		bit walletFreeAssetSlotFound;
+	};
+
+	/** Input values consumed by the collect initial asset funding helper. */
+	struct CollectInitialAssetFunding_input
+	{
+		/** Configuration stored by this structure. */
+		CreateGame_input configuration;
+	};
+
+	/** Result values produced by the collect initial asset funding helper. */
+	struct CollectInitialAssetFunding_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the collect initial asset funding helper. */
+	struct CollectInitialAssetFunding_locals
+	{
+		/** Possessed shares stored by this structure. */
+		sint64 possessedShares;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
+	};
+
+	/** Input values consumed by the commit created game helper. */
+	struct CommitCreatedGame_input
+	{
+		/** Configuration stored by this structure. */
+		CreateGame_input configuration;
+		/** Prepared stored by this structure. */
+		PrepareGameCreation_output prepared;
+	};
+
+	/** Result values produced by the commit created game helper. */
+	struct CommitCreatedGame_output
+	{
+		/** Game id stored by this structure. */
+		uint64 gameId;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the commit created game helper. */
+	struct CommitCreatedGame_locals
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Asset accounting stored by this structure. */
+		AssetPlatformAccounting assetAccounting;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Generation stored by this structure. */
+		uint64 generation;
+	};
+
 	/** QPI scratch state for create game; contract routines cannot declare stack locals. */
 	struct CreateGame_locals
 	{
-		/** Request passed to the refund helper. */
+		/** Refund input stored by this structure. */
 		RefundInvocationReward_input refundInput;
-		/** Response returned by the refund helper. */
+		/** Refund output stored by this structure. */
 		RefundInvocationReward_output refundOutput;
-		/** Working copy or returned snapshot of a game record. */
-		Game game;
-		/** Request passed to the preview helper. */
+		/** Preview input stored by this structure. */
 		PreviewGame_input previewInput;
-		/** Response returned by the preview helper. */
+		/** Preview output stored by this structure. */
 		PreviewGame_output previewOutput;
-		/** Working copy of the game currency asset's accrual bucket. */
-		AssetPlatformAccounting assetAccounting;
-		/** Latest UTC draw allowed by the scheduling horizon. */
-		DateAndTime maxDrawAt;
-		/** Generation counter preventing stale game ids from aliasing reused slots. */
-		uint64 generation;
-		/** Exact Qubic invocation reward required by the operation. */
-		uint64 expectedReward;
-		/** Amount accrued to the first platform developer. */
-		uint64 developer1Fee;
-		/** Amount accrued to the second platform developer. */
-		uint64 developer2Fee;
-		/** Amount accrued for PLDT shareholder distribution. */
-		uint64 dividendFee;
-		/** Loop cursor for the bounded collection being processed. */
-		uint64 i;
-		/** Managed asset shares currently possessed by the inspected entity. */
-		sint64 possessedShares;
-		/** QPI transfer result; a negative value indicates failure. */
+		/** Prepare input stored by this structure. */
+		PrepareGameCreation_input prepareInput;
+		/** Prepare output stored by this structure. */
+		PrepareGameCreation_output prepareOutput;
+		/** Funding input stored by this structure. */
+		CollectInitialAssetFunding_input fundingInput;
+		/** Funding output stored by this structure. */
+		CollectInitialAssetFunding_output fundingOutput;
+		/** Commit input stored by this structure. */
+		CommitCreatedGame_input commitInput;
+		/** Commit output stored by this structure. */
+		CommitCreatedGame_output commitOutput;
+	};
+
+	/** QPI scratch state for creator-wallet creation. */
+	struct CreateWallet_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Map index stored by this structure. */
+		sint64 mapIndex;
+		/** Transfer result stored by this structure. */
 		sint64 transferResult;
-		/** Zero-based game, ticket, result, or accounting slot under operation. */
-		uint16 slot;
-		/** Potential free slot being checked before allocation. */
-		uint16 candidateSlot;
-		/** Zero-based asset accounting slot selected for the game. */
-		uint16 accountingSlot;
-		/** Per-owner count used to enforce the active-game limit. */
-		uint16 creatorActiveGames;
-		/** Whether the requested record was found during bounded lookup. */
+	};
+
+	/** QPI scratch state for reading a creator wallet. */
+	struct GetWallet_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+	};
+
+	/** QPI scratch state for refundable-Qubic deposits. */
+	struct DepositWalletQubic_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
+	};
+
+	/** QPI scratch state for refundable-Qubic withdrawals. */
+	struct WithdrawWalletQubic_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
+	};
+
+	/** QPI scratch state for validating incoming share-management rights. */
+	struct PRE_ACQUIRE_SHARES_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Asset balance stored by this structure. */
+		WalletAssetBalance assetBalance;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Lookup-success flag stored by this structure. */
 		bit found;
-		/** Whether an existing asset accrual bucket matched the currency tuple. */
-		bit accountingFound;
+	};
+
+	/** QPI scratch state for crediting incoming share-management rights. */
+	struct POST_ACQUIRE_SHARES_locals
+	{
+		/** Request passed to the wallet asset credit helper. */
+		CreditWalletAsset_input creditInput;
+		/** Response returned by the wallet asset credit helper. */
+		CreditWalletAsset_output creditOutput;
 	};
 
 	/** QPI scratch state for fund game; contract routines cannot declare stack locals. */
@@ -1454,14 +1936,26 @@ public:
 		RefundInvocationReward_output refundOutput;
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
 		/** Exact Qubic invocation reward required by the operation. */
 		uint64 expectedReward;
+		/** Service credit debit stored by this structure. */
+		uint64 serviceCreditDebit;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
 		/** Managed asset shares currently possessed by the inspected entity. */
 		sint64 possessedShares;
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
 	};
 
 	/** QPI scratch state for withdraw game balance; contract routines cannot declare stack locals. */
@@ -1469,12 +1963,30 @@ public:
 	{
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Refund input stored by this structure. */
+		RefundInvocationReward_input refundInput;
+		/** Refund output stored by this structure. */
+		RefundInvocationReward_output refundOutput;
+		/** Qubic amount stored by this structure. */
+		uint64 qubicAmount;
+		/** Service credit returned stored by this structure. */
+		uint64 serviceCreditReturned;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
 		/** Whether any resumable transfer attempted in this operation failed. */
 		bit failed;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
 	};
 
 	/** QPI scratch state for update game economics; contract routines cannot declare stack locals. */
@@ -1488,132 +2000,255 @@ public:
 		Game game;
 		/** Validated next-round economics before it is committed. */
 		GameEconomics pending;
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
 		/** Creator plus prize amount that may need terminal return per ticket. */
 		uint64 refundablePerTicket;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
 
-	/** QPI scratch state for buy ticket; contract routines cannot declare stack locals. */
-	struct BuyTicket_locals
+	/** Input values consumed by the execute ticket purchase helper. */
+	struct ExecuteTicketPurchase_input
 	{
-		/** Request passed to the refund helper. */
-		RefundInvocationReward_input refundInput;
-		/** Response returned by the refund helper. */
-		RefundInvocationReward_output refundOutput;
-		/** Request passed to the transfer helper. */
-		TransferGameCurrency_input transferInput;
-		/** Response returned by the transfer helper. */
-		TransferGameCurrency_output transferOutput;
-		/** Request passed to the apply helper. */
-		ApplyAcceptedTicket_input applyInput;
-		/** Response returned by the apply helper. */
-		ApplyAcceptedTicket_output applyOutput;
-		/** Request passed to the burn helper. */
-		BurnCollectedTicketPayment_input burnInput;
-		/** Response returned by the burn helper. */
-		BurnCollectedTicketPayment_output burnOutput;
-		/** Request passed to the lifecycle helper. */
-		EvaluateGameLifecycle_input lifecycleInput;
-		/** Response returned by the lifecycle helper. */
-		EvaluateGameLifecycle_output lifecycleOutput;
-		/** Request passed to the bonus helper. */
-		EvaluateBonusQualification_input bonusInput;
-		/** Response returned by the bonus helper. */
-		EvaluateBonusQualification_output bonusOutput;
-		/** Request passed to the economics helper. */
-		CalculateTicketEconomics_input economicsInput;
-		/** Response returned by the economics helper. */
-		CalculateTicketEconomics_output economicsOutput;
-		/** Working copy or returned snapshot of a game record. */
-		Game game;
-		/** Working copy or returned snapshot of a ticket record. */
-		Ticket ticket;
-		/** Ticket record inspected before linking a newly accepted ticket. */
-		Ticket previousTicket;
-		/** Working copy of the game currency asset's accrual bucket. */
-		AssetPlatformAccounting assetAccounting;
-		/** Request passed to the validate helper. */
-		ValidateDigits_input validateInput;
-		/** Response returned by the validate helper. */
-		ValidateDigits_output validateOutput;
-		/** Current UTC time obtained from QPI for lifecycle decisions. */
-		DateAndTime now;
-		/** Current one-based ticket link during list traversal. */
-		uint64 link;
-		/** Tickets already owned by the invocator in this round. */
-		uint64 playerTickets;
-		/** Managed asset shares currently possessed by the inspected entity. */
-		sint64 possessedShares;
-		/** QPI transfer result; a negative value indicates failure. */
-		sint64 transferResult;
-		/** Zero-based game, ticket, result, or accounting slot under operation. */
-		uint16 slot;
+		/** Purchase stored by this structure. */
+		BuyTickets_input purchase;
+		/** Validate digits before player limit stored by this structure. */
+		bit validateDigitsBeforePlayerLimit;
 	};
 
-	/** QPI scratch state for buy tickets; contract routines cannot declare stack locals. */
+	/** Result values produced by the execute ticket purchase helper. */
+	struct ExecuteTicketPurchase_output
+	{
+		/** Ticket ids stored by this structure. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIds;
+		/** Ticket indexes stored by this structure. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIndexes;
+		/** Prize contribution stored by this structure. */
+		uint64 prizeContribution;
+		/** Accepted count stored by this structure. */
+		uint16 acceptedCount;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** Input values consumed by the prepare ticket purchase helper. */
+	struct PrepareTicketPurchase_input
+	{
+		/** Purchase stored by this structure. */
+		BuyTickets_input purchase;
+		/** Validate digits before player limit stored by this structure. */
+		bit validateDigitsBeforePlayerLimit;
+	};
+
+	/** Result values produced by the prepare ticket purchase helper. */
+	struct PrepareTicketPurchase_output
+	{
+		/** Economics stored by this structure. */
+		CalculateTicketEconomics_output economics;
+		/** Game stored by this structure. */
+		Game game;
+		/** Total price stored by this structure. */
+		uint64 totalPrice;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+		/** Bonus qualified stored by this structure. */
+		bit bonusQualified;
+	};
+
+	/** QPI scratch state used by the prepare ticket purchase helper. */
+	struct PrepareTicketPurchase_locals
+	{
+		/** Lifecycle input stored by this structure. */
+		EvaluateGameLifecycle_input lifecycleInput;
+		/** Lifecycle output stored by this structure. */
+		EvaluateGameLifecycle_output lifecycleOutput;
+		/** Bonus input stored by this structure. */
+		EvaluateBonusQualification_input bonusInput;
+		/** Bonus output stored by this structure. */
+		EvaluateBonusQualification_output bonusOutput;
+		/** Economics input stored by this structure. */
+		CalculateTicketEconomics_input economicsInput;
+		/** Validate input stored by this structure. */
+		ValidateDigits_input validateInput;
+		/** Validate output stored by this structure. */
+		ValidateDigits_output validateOutput;
+		/** Ticket stored by this structure. */
+		Ticket ticket;
+		/** Now stored by this structure. */
+		DateAndTime now;
+		/** One-based storage link stored by this structure. */
+		uint64 link;
+		/** Player tickets stored by this structure. */
+		uint64 playerTickets;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+	};
+
+	/** Input values consumed by the validate purchase accounting capacity helper. */
+	struct ValidatePurchaseAccountingCapacity_input
+	{
+		/** Prepared stored by this structure. */
+		PrepareTicketPurchase_output prepared;
+		/** Ticket count stored by this structure. */
+		uint16 ticketCount;
+	};
+
+	/** Result values produced by the validate purchase accounting capacity helper. */
+	struct ValidatePurchaseAccountingCapacity_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+		/** Refund on failure stored by this structure. */
+		bit refundOnFailure;
+	};
+
+	/** QPI scratch state used by the validate purchase accounting capacity helper. */
+	struct ValidatePurchaseAccountingCapacity_locals
+	{
+		/** Asset accounting stored by this structure. */
+		AssetPlatformAccounting assetAccounting;
+		/** Developer1 fee stored by this structure. */
+		uint64 developer1Fee;
+		/** Developer2 fee stored by this structure. */
+		uint64 developer2Fee;
+		/** Dividend fee stored by this structure. */
+		uint64 dividendFee;
+	};
+
+	/** Input values consumed by the collect ticket payment helper. */
+	struct CollectTicketPayment_input
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Total price stored by this structure. */
+		uint64 totalPrice;
+		/** Ticket count stored by this structure. */
+		uint16 ticketCount;
+	};
+
+	/** Result values produced by the collect ticket payment helper. */
+	struct CollectTicketPayment_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the collect ticket payment helper. */
+	struct CollectTicketPayment_locals
+	{
+		/** Refund input stored by this structure. */
+		RefundInvocationReward_input refundInput;
+		/** Refund output stored by this structure. */
+		RefundInvocationReward_output refundOutput;
+		/** Transfer input stored by this structure. */
+		TransferGameCurrency_input transferInput;
+		/** Transfer output stored by this structure. */
+		TransferGameCurrency_output transferOutput;
+		/** Burn input stored by this structure. */
+		BurnCollectedTicketPayment_input burnInput;
+		/** Burn output stored by this structure. */
+		BurnCollectedTicketPayment_output burnOutput;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Wallet debit stored by this structure. */
+		uint64 walletDebit;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Possessed shares stored by this structure. */
+		sint64 possessedShares;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
+		/** Wallet found stored by this structure. */
+		bit walletFound;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
+	};
+
+	/** Input values consumed by the commit ticket purchase helper. */
+	struct CommitTicketPurchase_input
+	{
+		/** Purchase stored by this structure. */
+		BuyTickets_input purchase;
+		/** Prepared stored by this structure. */
+		PrepareTicketPurchase_output prepared;
+	};
+
+	/** Result values produced by the commit ticket purchase helper. */
+	struct CommitTicketPurchase_output
+	{
+		/** Ticket ids stored by this structure. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIds;
+		/** Ticket indexes stored by this structure. */
+		Array<uint64, PLDT_MAX_BATCH_TICKETS> ticketIndexes;
+		/** Prize contribution stored by this structure. */
+		uint64 prizeContribution;
+		/** Accepted count stored by this structure. */
+		uint16 acceptedCount;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the commit ticket purchase helper. */
+	struct CommitTicketPurchase_locals
+	{
+		/** Apply input stored by this structure. */
+		ApplyAcceptedTicket_input applyInput;
+		/** Apply output stored by this structure. */
+		ApplyAcceptedTicket_output applyOutput;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+	};
+
+	/** QPI scratch state used by the execute ticket purchase helper. */
+	struct ExecuteTicketPurchase_locals
+	{
+		/** Refund input stored by this structure. */
+		RefundInvocationReward_input refundInput;
+		/** Refund output stored by this structure. */
+		RefundInvocationReward_output refundOutput;
+		/** Prepare input stored by this structure. */
+		PrepareTicketPurchase_input prepareInput;
+		/** Prepare output stored by this structure. */
+		PrepareTicketPurchase_output prepareOutput;
+		/** Capacity input stored by this structure. */
+		ValidatePurchaseAccountingCapacity_input capacityInput;
+		/** Capacity output stored by this structure. */
+		ValidatePurchaseAccountingCapacity_output capacityOutput;
+		/** Payment input stored by this structure. */
+		CollectTicketPayment_input paymentInput;
+		/** Payment output stored by this structure. */
+		CollectTicketPayment_output paymentOutput;
+		/** Commit input stored by this structure. */
+		CommitTicketPurchase_input commitInput;
+		/** Commit output stored by this structure. */
+		CommitTicketPurchase_output commitOutput;
+	};
+
+	/** QPI scratch state used by the buy ticket helper. */
+	struct BuyTicket_locals
+	{
+		/** Purchase input stored by this structure. */
+		ExecuteTicketPurchase_input purchaseInput;
+		/** Purchase output stored by this structure. */
+		ExecuteTicketPurchase_output purchaseOutput;
+	};
+
+	/** QPI scratch state used by the buy tickets helper. */
 	struct BuyTickets_locals
 	{
-		/** Request passed to the refund helper. */
-		RefundInvocationReward_input refundInput;
-		/** Response returned by the refund helper. */
-		RefundInvocationReward_output refundOutput;
-		/** Request passed to the transfer helper. */
-		TransferGameCurrency_input transferInput;
-		/** Response returned by the transfer helper. */
-		TransferGameCurrency_output transferOutput;
-		/** Request passed to the apply helper. */
-		ApplyAcceptedTicket_input applyInput;
-		/** Response returned by the apply helper. */
-		ApplyAcceptedTicket_output applyOutput;
-		/** Request passed to the burn helper. */
-		BurnCollectedTicketPayment_input burnInput;
-		/** Response returned by the burn helper. */
-		BurnCollectedTicketPayment_output burnOutput;
-		/** Request passed to the lifecycle helper. */
-		EvaluateGameLifecycle_input lifecycleInput;
-		/** Response returned by the lifecycle helper. */
-		EvaluateGameLifecycle_output lifecycleOutput;
-		/** Request passed to the bonus helper. */
-		EvaluateBonusQualification_input bonusInput;
-		/** Response returned by the bonus helper. */
-		EvaluateBonusQualification_output bonusOutput;
-		/** Request passed to the economics helper. */
-		CalculateTicketEconomics_input economicsInput;
-		/** Response returned by the economics helper. */
-		CalculateTicketEconomics_output economicsOutput;
-		/** Request passed to the validate helper. */
-		ValidateDigits_input validateInput;
-		/** Response returned by the validate helper. */
-		ValidateDigits_output validateOutput;
-		/** Working copy or returned snapshot of a game record. */
-		Game game;
-		/** Working copy or returned snapshot of a ticket record. */
-		Ticket ticket;
-		/** Working copy of the game currency asset's accrual bucket. */
-		AssetPlatformAccounting assetAccounting;
-		/** Current UTC time obtained from QPI for lifecycle decisions. */
-		DateAndTime now;
-		/** Gross price of all tickets in the batch. */
-		uint64 totalPrice;
-		/** Amount accrued to the first platform developer. */
-		uint64 developer1Fee;
-		/** Amount accrued to the second platform developer. */
-		uint64 developer2Fee;
-		/** Amount accrued for PLDT shareholder distribution. */
-		uint64 dividendFee;
-		/** Current one-based ticket link during list traversal. */
-		uint64 link;
-		/** Tickets already owned by the invocator in this round. */
-		uint64 playerTickets;
-		/** Loop cursor for the bounded collection being processed. */
-		uint64 i;
-		/** Managed asset shares currently possessed by the inspected entity. */
-		sint64 possessedShares;
-		/** QPI transfer result; a negative value indicates failure. */
-		sint64 transferResult;
-		/** Zero-based game, ticket, result, or accounting slot under operation. */
-		uint16 slot;
+		/** Purchase input stored by this structure. */
+		ExecuteTicketPurchase_input purchaseInput;
+		/** Purchase output stored by this structure. */
+		ExecuteTicketPurchase_output purchaseOutput;
 	};
 
 	/** Validated data consumed by the finalize game operation. */
@@ -1624,12 +2259,14 @@ public:
 		/** Requested terminal outcome passed to finalization. */
 		EGameTerminalReason reason;
 	};
+
 	/** Result data produced by the finalize game operation. */
 	struct FinalizeGame_output
 	{
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for stop game; contract routines cannot declare stack locals. */
 	struct StopGame_locals
 	{
@@ -1639,15 +2276,21 @@ public:
 		FinalizeGame_output finalizeOutput;
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
+
 	/** Validated data consumed by the clear game slot operation. */
 	struct ClearGameSlot_input
 	{
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
+
 	/** Result data produced by the clear game slot operation. */
 	struct ClearGameSlot_output
 	{
@@ -1689,6 +2332,7 @@ public:
 		/** One-based round sequence within a game generation. */
 		uint64 roundNumber;
 	};
+
 	/** Result data produced by the find game ticket list operation. */
 	struct FindGameTicketList_output
 	{
@@ -1697,6 +2341,7 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for find game ticket list; contract routines cannot declare stack locals. */
 	struct FindGameTicketList_locals
 	{
@@ -1765,18 +2410,21 @@ public:
 		/** Number of tickets accepted for the current request or round. */
 		uint16 ticketCount;
 	};
+
 	/** Validated data consumed by the begin settlement operation. */
 	struct BeginSettlement_input
 	{
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
+
 	/** Result data produced by the begin settlement operation. */
 	struct BeginSettlement_output
 	{
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for begin settlement; contract routines cannot declare stack locals. */
 	struct BeginSettlement_locals
 	{
@@ -1794,43 +2442,206 @@ public:
 		uint64 seed;
 	};
 
+	/** Input values consumed by the freeze finalization state helper. */
+	struct FreezeFinalizationState_input
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+		/** Reason stored by this structure. */
+		EGameTerminalReason reason;
+	};
+
+	/** Result values produced by the freeze finalization state helper. */
+	struct FreezeFinalizationState_output
+	{
+		/** Game stored by this structure. */
+		Game game;
+	};
+
+	/** QPI scratch state used by the freeze finalization state helper. */
+	struct FreezeFinalizationState_locals
+	{
+		/** Available credit stored by this structure. */
+		uint64 availableCredit;
+		/** Amount to credit stored by this structure. */
+		uint64 amountToCredit;
+	};
+
+	/** Input values consumed by the resolve next round schedule helper. */
+	struct ResolveNextRoundSchedule_input
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+	};
+
+	/** Result values produced by the resolve next round schedule helper. */
+	struct ResolveNextRoundSchedule_output
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Next start at stored by this structure. */
+		DateAndTime nextStartAt;
+		/** Next draw at stored by this structure. */
+		DateAndTime nextDrawAt;
+	};
+
+	/** Input values consumed by the drain finalization payouts helper. */
+	struct DrainFinalizationPayouts_input
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+	};
+
+	/** Result values produced by the drain finalization payouts helper. */
+	struct DrainFinalizationPayouts_output
+	{
+		/** Game stored by this structure. */
+		Game game;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the drain finalization payouts helper. */
+	struct DrainFinalizationPayouts_locals
+	{
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Qubic amount stored by this structure. */
+		uint64 qubicAmount;
+		/** Asset amount stored by this structure. */
+		uint64 assetAmount;
+		/** Service credit returned stored by this structure. */
+		uint64 serviceCreditReturned;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
+	};
+
+	/** Input values consumed by the validate round fee capacity helper. */
+	struct ValidateRoundFeeCapacity_input
+	{
+		/** Game stored by this structure. */
+		Game game;
+	};
+
+	/** Result values produced by the validate round fee capacity helper. */
+	struct ValidateRoundFeeCapacity_output
+	{
+		/** Developer1 fee stored by this structure. */
+		uint64 developer1Fee;
+		/** Developer2 fee stored by this structure. */
+		uint64 developer2Fee;
+		/** Dividend fee stored by this structure. */
+		uint64 dividendFee;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** Input values consumed by the build round result helper. */
+	struct BuildRoundResult_input
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+	};
+
+	/** Result values produced by the build round result helper. */
+	struct BuildRoundResult_output
+	{
+		/** Result stored by this structure. */
+		GameResult result;
+	};
+
+	/** Input values consumed by the commit finalized round helper. */
+	struct CommitFinalizedRound_input
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Result stored by this structure. */
+		GameResult result;
+		/** Game stored by this structure. */
+		Game game;
+		/** Next start at stored by this structure. */
+		DateAndTime nextStartAt;
+		/** Next draw at stored by this structure. */
+		DateAndTime nextDrawAt;
+		/** Fees stored by this structure. */
+		ValidateRoundFeeCapacity_output fees;
+		/** Bounded storage slot stored by this structure. */
+		uint16 slot;
+	};
+
+	/** Result values produced by the commit finalized round helper. */
+	struct CommitFinalizedRound_output
+	{
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the commit finalized round helper. */
+	struct CommitFinalizedRound_locals
+	{
+		/** Clear input stored by this structure. */
+		ClearGameSlot_input clearInput;
+		/** Clear output stored by this structure. */
+		ClearGameSlot_output clearOutput;
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** Result index stored by this structure. */
+		uint64 resultIndex;
+	};
+
 	/** QPI scratch state for finalize game; contract routines cannot declare stack locals. */
 	struct FinalizeGame_locals
 	{
-		/** Request passed to the transfer helper. */
-		TransferGameCurrency_input transferInput;
-		/** Response returned by the transfer helper. */
-		TransferGameCurrency_output transferOutput;
-		/** Request passed to the clear helper. */
-		ClearGameSlot_input clearInput;
-		/** Response returned by the clear helper. */
-		ClearGameSlot_output clearOutput;
-		/** Persistent settlement state for the current game slot. */
+		/** Freeze input stored by this structure. */
+		FreezeFinalizationState_input freezeInput;
+		/** Freeze output stored by this structure. */
+		FreezeFinalizationState_output freezeOutput;
+		/** Schedule input stored by this structure. */
+		ResolveNextRoundSchedule_input scheduleInput;
+		/** Schedule output stored by this structure. */
+		ResolveNextRoundSchedule_output scheduleOutput;
+		/** Payouts input stored by this structure. */
+		DrainFinalizationPayouts_input payoutsInput;
+		/** Payouts output stored by this structure. */
+		DrainFinalizationPayouts_output payoutsOutput;
+		/** Fee input stored by this structure. */
+		ValidateRoundFeeCapacity_input feeInput;
+		/** Fee output stored by this structure. */
+		ValidateRoundFeeCapacity_output feeOutput;
+		/** Result input stored by this structure. */
+		BuildRoundResult_input resultInput;
+		/** Result output stored by this structure. */
+		BuildRoundResult_output resultOutput;
+		/** Commit input stored by this structure. */
+		CommitFinalizedRound_input commitInput;
+		/** Commit output stored by this structure. */
+		CommitFinalizedRound_output commitOutput;
+		/** Progress stored by this structure. */
 		SettlementProgress progress;
-		/** Working copy or returned snapshot of a round result. */
-		GameResult result;
-		/** Result slot that may need ticket reclamation before reuse. */
+		/** Previous result stored by this structure. */
 		GameResult previousResult;
-		/** Working copy or returned snapshot of a game record. */
+		/** Game stored by this structure. */
 		Game game;
-		/** Computed UTC opening time for the next permanent round. */
-		DateAndTime nextStartAt;
-		/** Computed UTC draw time for the next permanent round. */
-		DateAndTime nextDrawAt;
-		/** Ring-buffer slot selected for a round result. */
+		/** Result index stored by this structure. */
 		uint64 resultIndex;
-		/** Amount accrued to the first platform developer. */
-		uint64 developer1Fee;
-		/** Amount accrued to the second platform developer. */
-		uint64 developer2Fee;
-		/** Amount accrued for PLDT shareholder distribution. */
-		uint64 dividendFee;
-		/** Remaining capacity in the destination bounded ledger. */
-		uint64 availableCredit;
-		/** Amount that fits in the destination bounded ledger. */
-		uint64 amountToCredit;
-		/** QPI transfer result; a negative value indicates failure. */
-		sint64 transferResult;
 	};
 
 	/** QPI scratch state for clear game slot; contract routines cannot declare stack locals. */
@@ -1840,6 +2651,16 @@ public:
 		AssetPlatformAccounting assetAccounting;
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Wallet asset slot stored by this structure. */
+		uint8 walletAssetSlot;
+		/** Wallet asset found stored by this structure. */
+		bit walletAssetFound;
 		/** Zeroed replacement used when releasing settlement state. */
 		SettlementProgress emptyProgress;
 		/** Zeroed replacement used when releasing a game slot. */
@@ -1854,6 +2675,7 @@ public:
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
+
 	/** Result data produced by the advance settlement operation. */
 	struct AdvanceSettlement_output
 	{
@@ -1862,57 +2684,159 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
+	/** Input values consumed by the classify settlement tickets helper. */
+	struct ClassifySettlementTickets_input
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** Remaining bounded-work budget stored by this structure. */
+		uint64 budget;
+	};
+
+	/** Result values produced by the classify settlement tickets helper. */
+	struct ClassifySettlementTickets_output
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** Remaining bounded-work budget stored by this structure. */
+		uint64 budget;
+	};
+
+	/** QPI scratch state used by the classify settlement tickets helper. */
+	struct ClassifySettlementTickets_locals
+	{
+		/** Match input stored by this structure. */
+		CountMatches_input matchInput;
+		/** Match output stored by this structure. */
+		CountMatches_output matchOutput;
+		/** Ticket stored by this structure. */
+		Ticket ticket;
+		/** One-based storage link stored by this structure. */
+		uint64 link;
+	};
+
+	/** Input values consumed by the allocate settlement payouts helper. */
+	struct AllocateSettlementPayouts_input
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+	};
+
+	/** Result values produced by the allocate settlement payouts helper. */
+	struct AllocateSettlementPayouts_output
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** No winners stored by this structure. */
+		bit noWinners;
+	};
+
+	/** QPI scratch state used by the allocate settlement payouts helper. */
+	struct AllocateSettlementPayouts_locals
+	{
+		/** Count stored by this structure. */
+		uint64 count;
+		/** Bonus count stored by this structure. */
+		uint64 bonusCount;
+		/** Total weight stored by this structure. */
+		uint64 totalWeight;
+		/** Tier pool stored by this structure. */
+		uint64 tierPool;
+		/** Floor sum stored by this structure. */
+		uint64 floorSum;
+		/** Remainder stored by this structure. */
+		uint64 remainder;
+		/** Fraction stored by this structure. */
+		uint64 fraction;
+		/** Best fraction stored by this structure. */
+		uint64 bestFraction;
+		/** Bounded-loop index stored by this structure. */
+		uint64 i;
+		/** Best tier stored by this structure. */
+		uint16 bestTier;
+		/** Found tier stored by this structure. */
+		bit foundTier;
+	};
+
+	/** Input values consumed by the pay settlement tickets helper. */
+	struct PaySettlementTickets_input
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** Remaining bounded-work budget stored by this structure. */
+		uint64 budget;
+	};
+
+	/** Result values produced by the pay settlement tickets helper. */
+	struct PaySettlementTickets_output
+	{
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
+		Game game;
+		/** Remaining bounded-work budget stored by this structure. */
+		uint64 budget;
+		/** Operation result code stored by this structure. */
+		EReturnCode returnCode;
+	};
+
+	/** QPI scratch state used by the pay settlement tickets helper. */
+	struct PaySettlementTickets_locals
+	{
+		/** Request passed to the wallet asset credit helper. */
+		CreditWalletAsset_input creditInput;
+		/** Response returned by the wallet asset credit helper. */
+		CreditWalletAsset_output creditOutput;
+		/** Transfer input stored by this structure. */
+		TransferGameCurrency_input transferInput;
+		/** Transfer output stored by this structure. */
+		TransferGameCurrency_output transferOutput;
+		/** Ticket stored by this structure. */
+		Ticket ticket;
+		/** One-based storage link stored by this structure. */
+		uint64 link;
+		/** Payout stored by this structure. */
+		uint64 payout;
+	};
+
 	/** QPI scratch state for advance settlement; contract routines cannot declare stack locals. */
 	struct AdvanceSettlement_locals
 	{
-		/** Request passed to the transfer helper. */
-		TransferGameCurrency_input transferInput;
-		/** Response returned by the transfer helper. */
-		TransferGameCurrency_output transferOutput;
-		/** Persistent settlement state for the current game slot. */
-		SettlementProgress progress;
-		/** Request passed to the match helper. */
-		CountMatches_input matchInput;
-		/** Response returned by the match helper. */
-		CountMatches_output matchOutput;
-		/** Request passed to the finalize helper. */
+		/** Classify input stored by this structure. */
+		ClassifySettlementTickets_input classifyInput;
+		/** Classify output stored by this structure. */
+		ClassifySettlementTickets_output classifyOutput;
+		/** Allocate input stored by this structure. */
+		AllocateSettlementPayouts_input allocateInput;
+		/** Allocate output stored by this structure. */
+		AllocateSettlementPayouts_output allocateOutput;
+		/** Pay input stored by this structure. */
+		PaySettlementTickets_input payInput;
+		/** Pay output stored by this structure. */
+		PaySettlementTickets_output payOutput;
+		/** Finalize input stored by this structure. */
 		FinalizeGame_input finalizeInput;
-		/** Response returned by the finalize helper. */
+		/** Finalize output stored by this structure. */
 		FinalizeGame_output finalizeOutput;
-		/** Working copy or returned snapshot of a game record. */
+		/** Progress stored by this structure. */
+		SettlementProgress progress;
+		/** Game stored by this structure. */
 		Game game;
-		/** Working copy or returned snapshot of a ticket record. */
-		Ticket ticket;
-		/** Remaining actions available to the resumable operation. */
+		/** Remaining bounded-work budget stored by this structure. */
 		uint64 budget;
-		/** Current one-based ticket link during list traversal. */
-		uint64 link;
-		/** Aggregate count for the tier or collection currently being scanned. */
-		uint64 count;
-		/** Count of bonus-qualified winners in the current tier. */
-		uint64 bonusCount;
-		/** Sum of normal and bonus winner weights in the current tier. */
-		uint64 totalWeight;
-		/** Prize amount assigned to the tier currently being processed. */
-		uint64 tierPool;
-		/** Sum of integer payout floors before remainder distribution. */
-		uint64 floorSum;
-		/** Whole currency units still unallocated after integer division. */
-		uint64 remainder;
-		/** Current candidate's division remainder for deterministic tie-breaking. */
-		uint64 fraction;
-		/** Largest unallocated fractional remainder found in the current pass. */
-		uint64 bestFraction;
-		/** Currency amount assigned or transferred to the current ticket. */
-		uint64 payout;
-		/** Loop cursor for the bounded collection being processed. */
-		uint64 i;
-		/** Tier selected to receive the next rounding unit. */
-		uint16 bestTier;
-		/** Zero-based game, ticket, result, or accounting slot under operation. */
+		/** Bounded storage slot stored by this structure. */
 		uint16 slot;
-		/** Whether an eligible tier was found for a rounding unit. */
-		bit foundTier;
 	};
 
 	/** Validated data consumed by the process game operation. */
@@ -1923,6 +2847,7 @@ public:
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
 	};
+
 	/** Result data produced by the process game operation. */
 	struct ProcessGame_output
 	{
@@ -1931,6 +2856,7 @@ public:
 		/** Public outcome describing success or the reason no state change occurred. */
 		EReturnCode returnCode;
 	};
+
 	/** QPI scratch state for process game; contract routines cannot declare stack locals. */
 	struct ProcessGame_locals
 	{
@@ -1955,18 +2881,21 @@ public:
 		/** Current UTC time obtained from QPI for lifecycle decisions. */
 		DateAndTime now;
 	};
+
 	/** Validated data consumed by the reclaim completed tickets operation. */
 	struct ReclaimCompletedTickets_input
 	{
 		/** Maximum state-changing work allowed in this invocation. */
 		uint64 actionBudget;
 	};
+
 	/** Result data produced by the reclaim completed tickets operation. */
 	struct ReclaimCompletedTickets_output
 	{
 		/** Number of bounded settlement or reclamation actions consumed. */
 		uint64 actionsUsed;
 	};
+
 	/** QPI scratch state for reclaim completed tickets; contract routines cannot declare stack locals. */
 	struct ReclaimCompletedTickets_locals
 	{
@@ -1997,12 +2926,41 @@ public:
 		ReclaimCompletedTickets_input reclaimInput;
 		/** Response returned by the reclaim helper. */
 		ReclaimCompletedTickets_output reclaimOutput;
+		/** Wallet stored by this structure. */
+		CreatorWallet wallet;
+		/** Wallet asset stored by this structure. */
+		WalletAssetBalance walletAsset;
+		/** Wallet owner stored by this structure. */
+		id walletOwner;
 		/** Maximum state-changing work allowed in this invocation. */
 		uint64 actionBudget;
+		/** Wallet index stored by this structure. */
+		uint64 walletIndex;
+		/** Developer1 fee stored by this structure. */
+		uint64 developer1Fee;
+		/** Developer2 fee stored by this structure. */
+		uint64 developer2Fee;
+		/** Dividend fee stored by this structure. */
+		uint64 dividendFee;
+		/** Transfer result stored by this structure. */
+		sint64 transferResult;
 		/** Number of game slots examined during this automation pass. */
 		uint16 inspected;
+		/** Wallets inspected stored by this structure. */
+		uint16 walletsInspected;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
+		/** Wallet actions stored by this structure. */
+		uint8 walletActions;
+	};
+
+	/** QPI scratch state for platform configuration; contract routines cannot declare stack locals. */
+	struct SetPlatformConfig_locals
+	{
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
 	};
 
 	/** QPI scratch state for withdraw platform revenue; contract routines cannot declare stack locals. */
@@ -2010,6 +2968,10 @@ public:
 	{
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
+		/** Request passed to the refund helper. */
+		RefundInvocationReward_input refundInput;
+		/** Response returned by the refund helper. */
+		RefundInvocationReward_output refundOutput;
 		/** Whether any resumable transfer attempted in this operation failed. */
 		bit failed;
 	};
@@ -2017,14 +2979,17 @@ public:
 	REGISTER_USER_FUNCTIONS_AND_PROCEDURES()
 	{
 		REGISTER_USER_PROCEDURE(CreateGame, 1);
+		REGISTER_USER_PROCEDURE(CreateWallet, 2);
 		REGISTER_USER_PROCEDURE(FundGame, 3);
 		REGISTER_USER_PROCEDURE(BuyTicket, 4);
 		REGISTER_USER_PROCEDURE(UpdateGameEconomics, 5);
+		REGISTER_USER_PROCEDURE(DepositWalletQubic, 6);
 		REGISTER_USER_PROCEDURE(StopGame, 7);
 		REGISTER_USER_PROCEDURE(SetPlatformConfig, 8);
 		REGISTER_USER_PROCEDURE(WithdrawPlatformRevenue, 9);
 		REGISTER_USER_PROCEDURE(WithdrawGameBalance, 10);
 		REGISTER_USER_PROCEDURE(TransferShareManagementRights, 11);
+		REGISTER_USER_PROCEDURE(WithdrawWalletQubic, 12);
 		REGISTER_USER_PROCEDURE(BuyTickets, 15);
 		REGISTER_USER_PROCEDURE(WithdrawAssetPlatformRevenue, 16);
 
@@ -2037,6 +3002,7 @@ public:
 		REGISTER_USER_FUNCTION(GetPlayerTickets, 7);
 		REGISTER_USER_FUNCTION(PreviewGame, 8);
 		REGISTER_USER_FUNCTION(GetGames, 9);
+		REGISTER_USER_FUNCTION(GetWallet, 10);
 	}
 
 	INITIALIZE()
@@ -2047,12 +3013,48 @@ public:
 		state.mut().platformFeePercent = PLDT_PLATFORM_FEE_PERCENT;
 		state.mut().maxCreatorFeePercent = PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT;
 		state.mut().roundFee = PLDT_DEFAULT_ROUND_FEE;
+		state.mut().walletCreationFee = PLDT_DEFAULT_WALLET_CREATION_FEE;
 	}
 
-	PRE_ACQUIRE_SHARES()
+	PRE_ACQUIRE_SHARES_WITH_LOCALS()
 	{
 		output.requestedFee = 0;
-		output.allowTransfer = qpi.originator() == input.owner && qpi.originator() == input.possessor;
+		output.allowTransfer = false;
+		if (qpi.originator() != input.owner || qpi.originator() != input.possessor || input.numberOfShares <= 0)
+		{
+			return;
+		}
+		if (!state.get().wallets.get(input.owner, locals.wallet))
+		{
+			output.allowTransfer = true;
+			return;
+		}
+		if (locals.wallet.status != EWalletStatus::OPEN)
+		{
+			return;
+		}
+		locals.found = findWalletAsset(locals.wallet, input.asset, locals.i, locals.assetBalance);
+		if (locals.found)
+		{
+			if (locals.assetBalance.balance <= PLDT_MAX_TRANSFER_AMOUNT - static_cast<uint64>(input.numberOfShares))
+			{
+				output.allowTransfer = true;
+			}
+			return;
+		}
+		output.allowTransfer = locals.wallet.assetCount < PLDT_MAX_WALLET_ASSETS;
+	}
+
+	POST_ACQUIRE_SHARES_WITH_LOCALS()
+	{
+		if (input.numberOfShares <= 0)
+		{
+			return;
+		}
+		locals.creditInput.owner = input.owner;
+		locals.creditInput.asset = input.asset;
+		locals.creditInput.amount = static_cast<uint64>(input.numberOfShares);
+		CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
 	}
 
 	BEGIN_TICK_WITH_LOCALS()
@@ -2061,12 +3063,11 @@ public:
 		{
 			return;
 		}
-		locals.inspected = 0;
+
 		locals.actionBudget = PLDT_SETTLEMENT_ACTION_BUDGET;
-		while (locals.inspected < PLDT_AUTOMATION_GAMES_PER_TICK)
+		for (locals.inspected = 0; locals.inspected < PLDT_AUTOMATION_GAMES_PER_TICK; ++locals.inspected)
 		{
-			locals.slot =
-			    static_cast<uint16>(mod(static_cast<uint64>(state.get().automationCursor + locals.inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
+			locals.slot = automationGameSlot(locals.inspected, state.get().automationCursor);
 			if (state.get().games.get(locals.slot).status != EGameStatus::EMPTY_SLOT)
 			{
 				locals.processInput.slot = locals.slot;
@@ -2076,10 +3077,221 @@ public:
 			}
 			++locals.inspected;
 		}
-		state.mut().automationCursor =
-		    static_cast<uint16>(mod(static_cast<uint64>(state.get().automationCursor + locals.inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
+
+		state.mut().automationCursor = automationGameSlot(locals.inspected, state.get().automationCursor);
 		locals.reclaimInput.actionBudget = locals.actionBudget;
 		CALL(ReclaimCompletedTickets, locals.reclaimInput, locals.reclaimOutput);
+
+		locals.walletsInspected = 0;
+		locals.walletActions = 0;
+		while (locals.walletsInspected < PLDT_AUTOMATION_WALLETS_PER_TICK)
+		{
+			locals.walletIndex =
+			    mod(static_cast<uint64>(state.get().walletAutomationCursor + locals.walletsInspected), static_cast<uint64>(PLDT_WALLET_MAP_CAPACITY));
+			++locals.walletsInspected;
+			if (state.get().wallets.isEmptySlot(static_cast<sint64>(locals.walletIndex)))
+			{
+				continue;
+			}
+			locals.walletOwner = state.get().wallets.key(static_cast<sint64>(locals.walletIndex));
+			locals.wallet = state.get().wallets.value(static_cast<sint64>(locals.walletIndex));
+			if (locals.wallet.status == EWalletStatus::OPEN && locals.wallet.activeGameCount == 0 &&
+			    static_cast<uint32>(qpi.epoch()) >= static_cast<uint32>(locals.wallet.lastGameCreationEpoch) + 2U)
+			{
+				locals.wallet.status = EWalletStatus::EXPIRING;
+				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
+			}
+			while (locals.wallet.status == EWalletStatus::EXPIRING && locals.wallet.expiryAssetCursor < PLDT_MAX_WALLET_ASSETS &&
+			       locals.walletActions < PLDT_WALLET_EXPIRY_ASSET_ACTION_BUDGET)
+			{
+				locals.walletAsset = locals.wallet.assets.get(locals.wallet.expiryAssetCursor);
+				++locals.wallet.expiryAssetCursor;
+				if (!locals.walletAsset.isActive)
+				{
+					continue;
+				}
+				if (locals.walletAsset.balance > 0)
+				{
+					locals.transferResult = qpi.releaseShares(locals.walletAsset.asset, locals.walletOwner, locals.walletOwner,
+					                                          static_cast<sint64>(locals.walletAsset.balance), QX_CONTRACT_INDEX, QX_CONTRACT_INDEX,
+					                                          static_cast<sint64>(locals.wallet.serviceCredit));
+					if (locals.transferResult >= 0 && static_cast<uint64>(locals.transferResult) <= locals.wallet.serviceCredit)
+					{
+						locals.wallet.serviceCredit -= static_cast<uint64>(locals.transferResult);
+					}
+				}
+				setMemory(locals.walletAsset, 0);
+				locals.wallet.assets.set(locals.wallet.expiryAssetCursor - 1, locals.walletAsset);
+				if (locals.wallet.assetCount > 0)
+				{
+					--locals.wallet.assetCount;
+				}
+				++locals.walletActions;
+				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
+			}
+			if (locals.wallet.status != EWalletStatus::EXPIRING || locals.wallet.assetCount != 0)
+			{
+				continue;
+			}
+			calculatePlatformShares(locals.wallet.serviceCredit, locals.developer1Fee, locals.developer2Fee, locals.dividendFee);
+			if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
+			                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
+			{
+				continue;
+			}
+			if (locals.wallet.refundableQubic > 0)
+			{
+				locals.transferResult = qpi.transfer(locals.walletOwner, static_cast<sint64>(locals.wallet.refundableQubic));
+				if (locals.transferResult < 0)
+				{
+					continue;
+				}
+				locals.wallet.refundableQubic = 0;
+			}
+			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
+			state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
+			state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.dividendFee);
+			state.mut().wallets.removeByKey(locals.walletOwner);
+		}
+		state.mut().wallets.cleanupIfNeeded();
+		state.mut().walletAutomationCursor = static_cast<uint16>(
+		    mod(static_cast<uint64>(state.get().walletAutomationCursor + locals.walletsInspected), static_cast<uint64>(PLDT_WALLET_MAP_CAPACITY)));
+	}
+
+	/**
+	 * @brief Opens a creator wallet funded by the invocation reward.
+	 * @param input Empty input; the invocator becomes the wallet owner.
+	 * @param output Service-credit and refundable-Qubic balances plus the result code.
+	 * @note The configured creation fee is retained as non-refundable service credit; any excess remains withdrawable.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(CreateWallet)
+	{
+		if (state.get().wallets.get(qpi.invocator(), locals.wallet))
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (qpi.invocationReward() < static_cast<sint64>(state.get().walletCreationFee))
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (state.get().wallets.population() >= PLDT_MAX_WALLETS)
+		{
+			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::STORAGE_FULL;
+			return;
+		}
+		setMemory(locals.wallet, 0);
+		locals.wallet.serviceCredit = state.get().walletCreationFee;
+		locals.wallet.refundableQubic = static_cast<uint64>(qpi.invocationReward()) - state.get().walletCreationFee;
+		locals.wallet.lastGameCreationEpoch = qpi.epoch();
+		locals.wallet.status = EWalletStatus::OPEN;
+		locals.mapIndex = state.mut().wallets.set(qpi.invocator(), locals.wallet);
+		if (locals.mapIndex < 0)
+		{
+			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::STORAGE_FULL;
+			return;
+		}
+		output.serviceCredit = locals.wallet.serviceCredit;
+		output.refundableQubic = locals.wallet.refundableQubic;
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Returns a public snapshot of a creator wallet.
+	 * @param input Owner identity to query.
+	 * @param output Wallet balances, asset positions, lifecycle fields, and presence flag.
+	 */
+	PUBLIC_FUNCTION_WITH_LOCALS(GetWallet)
+	{
+		output.found = state.get().wallets.get(input.owner, locals.wallet);
+		if (!output.found)
+		{
+			return;
+		}
+		output.assets = locals.wallet.assets;
+		output.serviceCredit = locals.wallet.serviceCredit;
+		output.refundableQubic = locals.wallet.refundableQubic;
+		output.activeGameCount = locals.wallet.activeGameCount;
+		output.lastGameCreationEpoch = locals.wallet.lastGameCreationEpoch;
+		output.assetCount = locals.wallet.assetCount;
+		output.status = locals.wallet.status;
+	}
+
+	/**
+	 * @brief Deposits the full invocation reward as refundable creator-wallet Qubic.
+	 * @param input Empty input; the invocator's open wallet is credited.
+	 * @param output Updated refundable balance and result code.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(DepositWalletQubic)
+	{
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (qpi.invocationReward() <= 0 || locals.wallet.refundableQubic > PLDT_MAX_TRANSFER_AMOUNT - static_cast<uint64>(qpi.invocationReward()))
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_VALUE;
+			return;
+		}
+		locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, static_cast<uint64>(qpi.invocationReward()));
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		output.refundableQubic = locals.wallet.refundableQubic;
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Returns refundable Qubic from the invocator's creator wallet.
+	 * @param input Amount to withdraw; service credit cannot be withdrawn.
+	 * @param output Successfully paid amount and result code.
+	 */
+	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawWalletQubic)
+	{
+		if (qpi.invocationReward() != 0)
+		{
+			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (input.amount == 0 || input.amount > locals.wallet.refundableQubic)
+		{
+			output.returnCode = input.amount == 0 ? EReturnCode::INVALID_VALUE : EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		locals.transferResult = qpi.transfer(qpi.invocator(), static_cast<sint64>(input.amount));
+		if (locals.transferResult < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		locals.wallet.refundableQubic -= input.amount;
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		output.amountPaid = input.amount;
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
@@ -2089,128 +3301,24 @@ public:
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(PreviewGame)
 	{
-		// Validate the scheduling window, bounded configuration, and custody managers without mutating state.
-		output.returnCode = EReturnCode::INVALID_VALUE;
-		locals.weightTotal = 0;
-		locals.managedCurrencyShares = 0;
-		locals.maxDrawAt = qpi.now();
-		if (!locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS))
+		locals.configurationInput.configuration = input;
+		CALL(ValidateGameConfiguration, locals.configurationInput, locals.configurationOutput);
+		if (locals.configurationOutput.returnCode != EReturnCode::SUCCESS)
 		{
+			output.returnCode = locals.configurationOutput.returnCode;
 			return;
 		}
-		if (input.currencyMode == ECurrencyMode::ASSET)
+		locals.tierInput.tierWeightsBps = input.tierWeightsBps;
+		locals.tierInput.codeLength = input.codeLength;
+		CALL(ValidateTierConfiguration, locals.tierInput, locals.tierOutput);
+		if (locals.tierOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.managedCurrencyShares = qpi.numberOfShares(input.currencyAsset, AssetOwnershipSelect::byManagingContract(SELF_INDEX),
-			                                                  AssetPossessionSelect::byManagingContract(SELF_INDEX));
-		}
-		if (input.initialRunCredit < state.get().roundFee || input.initialCreatorBalance < input.creatorPrizeSeed)
-		{
-			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			output.returnCode = locals.tierOutput.returnCode;
 			return;
 		}
-		if (!input.startAt.isValid() || !input.drawAt.isValid() || input.startAt <= qpi.now() || input.drawAt > locals.maxDrawAt ||
-		    input.drawAt <= input.startAt)
-		{
-			return;
-		}
-		if (input.ticketPrice == 0 || input.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT || input.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT ||
-		    input.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT || input.initialCreatorBalance > PLDT_MAX_TRANSFER_AMOUNT ||
-		    (input.currencyMode == ECurrencyMode::QUBIC && input.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT - input.initialCreatorBalance))
-		{
-			return;
-		}
-		if (input.ticketLimit == 0 || input.ticketLimit > PLDT_MAX_TICKETS_PER_GAME || input.playerTicketLimit == 0 ||
-		    input.playerTicketLimit > input.ticketLimit)
-		{
-			return;
-		}
-		if (input.codeLength == 0 || input.codeLength > PLDT_MAX_CODE_LENGTH || input.maxDigit > PLDT_MAX_DIGIT ||
-		    (!input.allowRepeatedDigits && input.maxDigit + 1 < input.codeLength))
-		{
-			return;
-		}
-		if (input.creatorFeePercent > state.get().maxCreatorFeePercent || input.creatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT ||
-		    input.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
-		{
-			return;
-		}
-		if ((input.mode != EGameMode::ONE_SHOT && input.mode != EGameMode::PERMANENT) ||
-		    (input.creatorRevenueMode != ECreatorRevenueMode::PAYOUT && input.creatorRevenueMode != ECreatorRevenueMode::REINVEST) ||
-		    (input.currencyMode != ECurrencyMode::QUBIC && input.currencyMode != ECurrencyMode::ASSET))
-		{
-			return;
-		}
-		if (input.bonusAssetCount > 0 &&
-		    (input.bonusMultiplierBps < PLDT_BONUS_MULTIPLIER_SCALE || input.bonusMultiplierBps > PLDT_MAX_BONUS_MULTIPLIER_BPS))
-		{
-			return;
-		}
-		if (input.currencyMode == ECurrencyMode::ASSET &&
-		    (input.currencyAsset.assetName == 0 || !qpi.isAssetIssued(input.currencyAsset.issuer, input.currencyAsset.assetName) ||
-		     locals.managedCurrencyShares <= 0 || input.ownershipManagingContractIndex != SELF_INDEX ||
-		     input.possessionManagingContractIndex != SELF_INDEX))
-		{
-			return;
-		}
-
-		// Verify every optional bonus asset and the complete payout matrix before calculating economics.
-		for (locals.i = 0; locals.i < input.bonusAssetCount; ++locals.i)
-		{
-			if (input.bonusAssets.get(locals.i).assetName == 0 ||
-			    !qpi.isAssetIssued(input.bonusAssets.get(locals.i).issuer, input.bonusAssets.get(locals.i).assetName))
-			{
-				return;
-			}
-		}
-		for (locals.exact = 0; locals.exact <= PLDT_MAX_CODE_LENGTH; ++locals.exact)
-		{
-			for (locals.misplaced = 0; locals.misplaced <= PLDT_MAX_CODE_LENGTH - locals.exact; ++locals.misplaced)
-			{
-				locals.i = payoutMatrixIndex(locals.exact, locals.misplaced);
-				locals.weightTotal = sadd(locals.weightTotal, static_cast<uint64>(input.tierWeightsBps.get(static_cast<uint16>(locals.i))));
-				if (input.tierWeightsBps.get(static_cast<uint16>(locals.i)) > 0 &&
-				    (locals.exact > input.codeLength || locals.misplaced > input.codeLength - locals.exact ||
-				     (locals.exact + 1 == input.codeLength && locals.misplaced == 1)))
-				{
-					return;
-				}
-			}
-		}
-		if (locals.weightTotal != PLDT_TIER_BPS_SCALE)
-		{
-			return;
-		}
-		// Ensure gross revenue and every terminally refundable amount fit QPI's transfer bound.
-		locals.economicsInput.ticketPrice = input.ticketPrice;
-		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
-		if (input.currencyMode == ECurrencyMode::ASSET && input.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
-		{
-			// QPI intentionally forbids burning issuer-zero contract shares.
-			return;
-		}
-		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
-		if (input.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.ticketLimit)) ||
-		    locals.refundablePerTicket > div(PLDT_MAX_TRANSFER_AMOUNT - input.creatorPrizeSeed, static_cast<uint64>(input.ticketLimit)))
-		{
-			return;
-		}
-		output.platformFee = locals.economicsOutput.platformFee;
-		output.roundFee = state.get().roundFee;
-		if (input.currencyMode == ECurrencyMode::QUBIC)
-		{
-			output.initialQubicRequired = sadd(input.initialRunCredit, input.initialCreatorBalance);
-		}
-		else
-		{
-			output.initialQubicRequired = input.initialRunCredit;
-			output.initialCreatorAssetRequired = input.initialCreatorBalance;
-		}
-		output.creatorFee = locals.economicsOutput.creatorFee;
-		output.burn = locals.economicsOutput.burn;
-		output.prizeContribution = locals.economicsOutput.prizeContribution;
-		output.returnCode = EReturnCode::SUCCESS;
+		locals.previewInput.configuration = input;
+		CALL(CalculateGamePreview, locals.previewInput, locals.previewOutput);
+		output = locals.previewOutput.preview;
 	}
 
 	/**
@@ -2221,12 +3329,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateGame)
 	{
-		// Complete all configuration, payment, and accrual-capacity checks before taking asset custody.
 		output.gameId = 0;
 		output.slot = 0;
 		locals.previewInput = input;
 		CALL(PreviewGame, locals.previewInput, locals.previewOutput);
-		locals.maxDrawAt = qpi.now();
 		if (locals.previewOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.previewOutput.returnCode;
@@ -2234,177 +3340,31 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		if (input.startAt <= qpi.now() || !locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS) || input.drawAt > locals.maxDrawAt)
+		locals.prepareInput.configuration = input;
+		locals.prepareInput.preview = locals.previewOutput;
+		CALL(PrepareGameCreation, locals.prepareInput, locals.prepareOutput);
+		if (locals.prepareOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			locals.refundInput.returnCode = locals.prepareOutput.returnCode;
 			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		locals.expectedReward = locals.previewOutput.initialQubicRequired;
-		if (qpi.invocationReward() != locals.expectedReward)
+		locals.fundingInput.configuration = input;
+		CALL(CollectInitialAssetFunding, locals.fundingInput, locals.fundingOutput);
+		if (locals.fundingOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			locals.refundInput.returnCode = locals.fundingOutput.returnCode;
 			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		locals.developer1Fee = mulDiv(state.get().roundFee, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
-		locals.developer2Fee = mulDiv(state.get().roundFee, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
-		locals.dividendFee = state.get().roundFee - locals.developer1Fee - locals.developer2Fee;
-		if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
-		    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
-		    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
-		{
-			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		// Find a reusable slot while enforcing the creator-wide active-game limit in the same bounded scan.
-		locals.found = false;
-		locals.creatorActiveGames = 0;
-		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
-		{
-			locals.game = state.get().games.get(static_cast<uint16>(locals.i));
-			if (locals.game.status != EGameStatus::EMPTY_SLOT && locals.game.owner == qpi.invocator())
-			{
-				++locals.creatorActiveGames;
-			}
-			locals.candidateSlot = static_cast<uint16>(mod(state.get().allocationCursor + locals.i, static_cast<uint64>(PLDT_MAX_GAMES)));
-			if (!locals.found && state.get().games.get(locals.candidateSlot).status == EGameStatus::EMPTY_SLOT)
-			{
-				locals.slot = locals.candidateSlot;
-				locals.found = true;
-			}
-		}
-		if (!locals.found || locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
-		{
-			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		// Resolve the asset accounting bucket and take creator funding only after every Qubic-side check passes.
-		if (input.currencyMode == ECurrencyMode::ASSET)
-		{
-			locals.accountingFound = false;
-			for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
-			{
-				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
-				if (locals.assetAccounting.isActive && locals.assetAccounting.asset.assetName == input.currencyAsset.assetName &&
-				    locals.assetAccounting.asset.issuer == input.currencyAsset.issuer &&
-				    locals.assetAccounting.ownershipManagingContractIndex == input.ownershipManagingContractIndex &&
-				    locals.assetAccounting.possessionManagingContractIndex == input.possessionManagingContractIndex)
-				{
-					locals.accountingSlot = static_cast<uint16>(locals.i);
-					locals.accountingFound = true;
-					break;
-				}
-			}
-			if (!locals.accountingFound)
-			{
-				for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
-				{
-					locals.assetAccounting = state.get().assetAccounting.get(locals.i);
-					if (!locals.assetAccounting.isActive)
-					{
-						locals.accountingSlot = static_cast<uint16>(locals.i);
-						locals.assetAccounting.asset = input.currencyAsset;
-						locals.assetAccounting.ownershipManagingContractIndex = input.ownershipManagingContractIndex;
-						locals.assetAccounting.possessionManagingContractIndex = input.possessionManagingContractIndex;
-						locals.assetAccounting.isActive = true;
-						locals.accountingFound = true;
-						break;
-					}
-				}
-			}
-			if (!locals.accountingFound)
-			{
-				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-			if (input.initialCreatorBalance > 0)
-			{
-				locals.possessedShares =
-				    qpi.numberOfPossessedShares(input.currencyAsset.assetName, input.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
-				                                input.ownershipManagingContractIndex, input.possessionManagingContractIndex);
-				if (locals.possessedShares < static_cast<sint64>(input.initialCreatorBalance))
-				{
-					locals.refundInput.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
-					CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-					output.returnCode = locals.refundOutput.returnCode;
-					return;
-				}
-				locals.transferResult =
-				    qpi.transferShareOwnershipAndPossession(input.currencyAsset.assetName, input.currencyAsset.issuer, qpi.invocator(),
-				                                            qpi.invocator(), static_cast<sint64>(input.initialCreatorBalance), SELF);
-				if (locals.transferResult < 0)
-				{
-					locals.refundInput.returnCode = EReturnCode::TRANSFER_FAILED;
-					CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-					output.returnCode = locals.refundOutput.returnCode;
-					return;
-				}
-			}
-		}
-		// Commit a fresh slot generation and all accounting together so stale ids cannot alias the new game.
-		locals.generation = sadd(state.get().generations.get(locals.slot), 1ULL);
-		if (locals.generation == 0)
-		{
-			locals.generation = 1;
-		}
-		state.mut().generations.set(locals.slot, locals.generation);
-		setMemory(locals.game, 0);
-		locals.game.tierWeightsBps = input.tierWeightsBps;
-		locals.game.bonusAssets = input.bonusAssets;
-		locals.game.name = input.name;
-		locals.game.currencyAsset = input.currencyAsset;
-		locals.game.owner = qpi.invocator();
-		locals.game.startAt = input.startAt;
-		locals.game.drawAt = input.drawAt;
-		locals.game.gameId = (locals.generation << 10) | locals.slot;
-		locals.game.ticketPrice = input.ticketPrice;
-		locals.game.creatorPrizeSeed = input.creatorPrizeSeed;
-		locals.game.prizePool = input.creatorPrizeSeed;
-		locals.game.roundFeeSnapshot = state.get().roundFee;
-		locals.game.runCredit = input.initialRunCredit - state.get().roundFee;
-		locals.game.creatorBalance = input.initialCreatorBalance - input.creatorPrizeSeed;
-		locals.game.roundDurationMicroseconds = input.startAt.durationMicrosec(input.drawAt);
-		locals.game.bonusMultiplierBps = input.bonusMultiplierBps;
-		locals.game.ticketLimit = input.ticketLimit;
-		locals.game.playerTicketLimit = input.playerTicketLimit;
-		locals.game.bonusAssetCount = input.bonusAssetCount;
-		locals.game.ownershipManagingContractIndex = input.ownershipManagingContractIndex;
-		locals.game.possessionManagingContractIndex = input.possessionManagingContractIndex;
-		locals.game.bonusOwnershipManagingContractIndex = input.bonusOwnershipManagingContractIndex;
-		locals.game.bonusPossessionManagingContractIndex = input.bonusPossessionManagingContractIndex;
-		locals.game.assetAccountingLink = input.currencyMode == ECurrencyMode::ASSET ? locals.accountingSlot + 1 : 0;
-		locals.game.codeLength = input.codeLength;
-		locals.game.maxDigit = input.maxDigit;
-		locals.game.creatorFeePercent = input.creatorFeePercent;
-		locals.game.currencyMode = input.currencyMode;
-		locals.game.mode = input.mode;
-		locals.game.creatorRevenueMode = input.creatorRevenueMode;
-		locals.game.roundNumber = 1;
-		locals.game.allowRepeatedDigits = input.allowRepeatedDigits;
-		locals.game.status = EGameStatus::SCHEDULED;
-		if (input.currencyMode == ECurrencyMode::ASSET)
-		{
-			++locals.assetAccounting.activeGameCount;
-			state.mut().assetAccounting.set(locals.accountingSlot, locals.assetAccounting);
-		}
-		state.mut().games.set(locals.slot, locals.game);
-		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
-		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
-		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, state.get().roundFee - locals.developer1Fee - locals.developer2Fee);
-		state.mut().activeGameCount = state.get().activeGameCount + 1;
-		state.mut().allocationCursor = static_cast<uint16>(mod(static_cast<uint64>(locals.slot + 1), static_cast<uint64>(PLDT_MAX_GAMES)));
-		output.gameId = locals.game.gameId;
-		output.slot = locals.slot;
-		output.returnCode = EReturnCode::SUCCESS;
+		locals.commitInput.configuration = input;
+		locals.commitInput.prepared = locals.prepareOutput;
+		CALL(CommitCreatedGame, locals.commitInput, locals.commitOutput);
+		output.gameId = locals.commitOutput.gameId;
+		output.slot = locals.commitOutput.slot;
+		output.returnCode = locals.commitOutput.returnCode;
 	}
 
 	/**
@@ -2414,19 +3374,17 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(FundGame)
 	{
-		// Authorize and capacity-check both ledgers before taking any asset shares.
-		locals.slot = gameSlot(input.gameId);
-		if (!isGameIdValid(state, input.gameId))
+		// Resolve ownership and wallet funding before changing either currency ledger.
+		locals.refundInput.returnCode = resolveOwnedGame(state, input.gameId, qpi.invocator(), locals.slot, locals.game);
+		if (locals.refundInput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
 			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		locals.game = state.get().games.get(locals.slot);
-		if (locals.game.owner != qpi.invocator())
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
-			locals.refundInput.returnCode = EReturnCode::ACCESS_DENIED;
+			locals.refundInput.returnCode = EReturnCode::INVALID_STATE;
 			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
@@ -2450,11 +3408,17 @@ public:
 			}
 			locals.expectedReward = sadd(locals.expectedReward, input.creatorBalanceTopUp);
 		}
-		if (qpi.invocationReward() != locals.expectedReward)
+		if (qpi.invocationReward() != 0)
 		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
 			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
 			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.serviceCreditDebit = locals.wallet.serviceCredit < locals.expectedReward ? locals.wallet.serviceCredit : locals.expectedReward;
+		if (locals.expectedReward - locals.serviceCreditDebit > locals.wallet.refundableQubic)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
 		if (input.runCreditTopUp > PLDT_MAX_TRANSFER_AMOUNT - locals.game.runCredit ||
@@ -2466,12 +3430,21 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		// Asset creator balance is pulled only after the Qubic invocation reward and all invariants are valid.
+		// Asset custody is the only fallible transfer and therefore precedes the ledger commit.
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && input.creatorBalanceTopUp > 0)
 		{
-			locals.possessedShares =
-			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
-			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
+			locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
+			if (locals.walletAssetFound)
+			{
+				locals.walletAssetSlot = static_cast<uint8>(locals.i);
+			}
+			if (!locals.walletAssetFound || locals.walletAsset.balance < input.creatorBalanceTopUp)
+			{
+				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+				return;
+			}
+			locals.possessedShares = qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer,
+			                                                     qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
 			if (locals.possessedShares < static_cast<sint64>(input.creatorBalanceTopUp))
 			{
 				locals.refundInput.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
@@ -2489,9 +3462,16 @@ public:
 				output.returnCode = locals.refundOutput.returnCode;
 				return;
 			}
+			locals.walletAsset.balance -= input.creatorBalanceTopUp;
+			locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
 		}
+		// Commit the wallet debit and matching game credits as one state transition.
+		locals.wallet.serviceCredit -= locals.serviceCreditDebit;
+		locals.wallet.refundableQubic -= locals.expectedReward - locals.serviceCreditDebit;
 		locals.game.runCredit = sadd(locals.game.runCredit, input.runCreditTopUp);
 		locals.game.creatorBalance = sadd(locals.game.creatorBalance, input.creatorBalanceTopUp);
+		locals.game.serviceCreditBalance = sadd(locals.game.serviceCreditBalance, locals.serviceCreditDebit);
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		state.mut().games.set(locals.slot, locals.game);
 		output.returnCode = EReturnCode::SUCCESS;
 	}
@@ -2503,19 +3483,24 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawGameBalance)
 	{
-		locals.slot = gameSlot(input.gameId);
-		if (!isGameIdValid(state, input.gameId))
+		if (qpi.invocationReward() != 0)
 		{
-			output.returnCode = EReturnCode::INVALID_GAME;
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		locals.game = state.get().games.get(locals.slot);
-		if (locals.game.owner != qpi.invocator())
+		output.returnCode = resolveOwnedGame(state, input.gameId, qpi.invocator(), locals.slot, locals.game);
+		if (output.returnCode != EReturnCode::SUCCESS)
 		{
-			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
 		if (locals.game.status == EGameStatus::FINALIZING)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
@@ -2525,59 +3510,46 @@ public:
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Prove the destination wallet can represent every returned QU before moving assets.
 		locals.failed = false;
+		locals.qubicAmount = input.runCreditAmount;
 		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
 		{
-			if (input.runCreditAmount > 0)
-			{
-				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.runCreditAmount));
-				if (locals.transferResult >= 0)
-				{
-					locals.game.runCredit -= input.runCreditAmount;
-					output.runCreditPaid = input.runCreditAmount;
-				}
-				else
-				{
-					locals.failed = true;
-				}
-			}
-			if (input.creatorBalanceAmount > 0)
-			{
-				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.creatorBalanceAmount));
-				if (locals.transferResult >= 0)
-				{
-					locals.game.creatorBalance -= input.creatorBalanceAmount;
-					output.creatorBalancePaid = input.creatorBalanceAmount;
-				}
-				else
-				{
-					locals.failed = true;
-				}
-			}
+			locals.qubicAmount = sadd(locals.qubicAmount, input.creatorBalanceAmount);
+		}
+		if (!prepareWalletQubicCredit(locals.wallet, locals.qubicAmount, locals.game.serviceCreditBalance, locals.serviceCreditReturned))
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			locals.game.creatorBalance -= input.creatorBalanceAmount;
+			output.creatorBalancePaid = input.creatorBalanceAmount;
 		}
 		else
 		{
-			if (input.runCreditAmount > 0)
-			{
-				locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(input.runCreditAmount));
-				if (locals.transferResult >= 0)
-				{
-					locals.game.runCredit -= input.runCreditAmount;
-					output.runCreditPaid = input.runCreditAmount;
-				}
-				else
-				{
-					locals.failed = true;
-				}
-			}
+			// Asset balances are committed only after the ownership transfer succeeds.
 			if (input.creatorBalanceAmount > 0)
 			{
+				locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
+				if (locals.walletAssetFound)
+				{
+					locals.walletAssetSlot = static_cast<uint8>(locals.i);
+				}
+				if (!locals.walletAssetFound || locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - input.creatorBalanceAmount)
+				{
+					output.returnCode = EReturnCode::STORAGE_FULL;
+					return;
+				}
 				locals.transferResult =
 				    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, SELF, SELF,
 				                                            static_cast<sint64>(input.creatorBalanceAmount), locals.game.owner);
 				if (locals.transferResult >= 0)
 				{
 					locals.game.creatorBalance -= input.creatorBalanceAmount;
+					locals.walletAsset.balance = sadd(locals.walletAsset.balance, input.creatorBalanceAmount);
+					locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
 					output.creatorBalancePaid = input.creatorBalanceAmount;
 				}
 				else
@@ -2586,6 +3558,13 @@ public:
 				}
 			}
 		}
+		// Return QU to its original service/refundable buckets and persist both ledgers together.
+		locals.wallet.serviceCredit = sadd(locals.wallet.serviceCredit, locals.serviceCreditReturned);
+		locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.qubicAmount - locals.serviceCreditReturned);
+		locals.game.serviceCreditBalance -= locals.serviceCreditReturned;
+		locals.game.runCredit -= input.runCreditAmount;
+		output.runCreditPaid = input.runCreditAmount;
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		state.mut().games.set(locals.slot, locals.game);
 		output.returnCode = locals.failed ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
 	}
@@ -2597,6 +3576,13 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateGameEconomics)
 	{
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
 		locals.slot = gameSlot(input.gameId);
 		if (!isGameIdValid(state, input.gameId))
 		{
@@ -2643,7 +3629,7 @@ public:
 		locals.economicsInput.ticketPrice = input.ticketPrice;
 		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -2676,16 +3662,16 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(StopGame)
 	{
-		locals.slot = gameSlot(input.gameId);
-		if (!isGameIdValid(state, input.gameId))
+		if (qpi.invocationReward() != 0)
 		{
-			output.returnCode = EReturnCode::INVALID_GAME;
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		locals.game = state.get().games.get(locals.slot);
-		if (locals.game.owner != qpi.invocator())
+		output.returnCode = resolveOwnedGame(state, input.gameId, qpi.invocator(), locals.slot, locals.game);
+		if (output.returnCode != EReturnCode::SUCCESS)
 		{
-			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
 		if (locals.game.roundNumber == 1 && locals.game.status == EGameStatus::SCHEDULED && qpi.now() < locals.game.startAt)
@@ -2726,167 +3712,20 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTicket)
 	{
-		// Validate lifecycle, storage, digits, player limit, and every bounded ledger before custody.
 		output.ticketIndex = 0;
 		output.prizeContribution = 0;
-		if (!isGameIdValid(state, input.gameId))
+		locals.purchaseInput.purchase.gameId = input.gameId;
+		locals.purchaseInput.purchase.ticketCount = 1;
+		locals.purchaseInput.purchase.tickets.set(0, input.digits);
+		locals.purchaseInput.validateDigitsBeforePlayerLimit = true;
+		CALL(ExecuteTicketPurchase, locals.purchaseInput, locals.purchaseOutput);
+		if (locals.purchaseOutput.acceptedCount == 1)
 		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
+			output.ticketId = locals.purchaseOutput.ticketIds.get(0);
+			output.ticketIndex = locals.purchaseOutput.ticketIndexes.get(0);
+			output.prizeContribution = locals.purchaseOutput.prizeContribution;
 		}
-		locals.slot = gameSlot(input.gameId);
-		locals.game = state.get().games.get(locals.slot);
-		locals.now = qpi.now();
-		locals.lifecycleInput.game = locals.game;
-		locals.lifecycleInput.now = locals.now;
-		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
-		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
-		{
-			locals.refundInput.returnCode = locals.lifecycleOutput.purchaseReturnCode;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.game.status = locals.lifecycleOutput.effectiveStatus;
-		if (locals.game.ticketCount >= locals.game.ticketLimit ||
-		    (state.get().freeTicketCount == 0 &&
-		     (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount) >= state.get().tickets.capacity()))
-		{
-			locals.refundInput.returnCode = EReturnCode::TICKET_SOLD_OUT;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.validateInput.digits = input.digits;
-		locals.validateInput.codeLength = locals.game.codeLength;
-		locals.validateInput.maxDigit = locals.game.maxDigit;
-		locals.validateInput.allowRepeatedDigits = locals.game.allowRepeatedDigits;
-		CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
-		if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
-		{
-			locals.refundInput.returnCode = locals.validateOutput.returnCode;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.link = locals.game.firstTicketLink;
-		locals.playerTickets = 0;
-		while (locals.link != 0)
-		{
-			locals.ticket = state.get().tickets.get(locals.link - 1);
-			if (locals.ticket.player == qpi.invocator())
-			{
-				++locals.playerTickets;
-			}
-			locals.link = locals.ticket.nextLink;
-		}
-		if (locals.playerTickets >= locals.game.playerTicketLimit)
-		{
-			locals.refundInput.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.bonusInput.game = locals.game;
-		locals.bonusInput.player = qpi.invocator();
-		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
-		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
-		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
-		if (locals.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - locals.game.ticketPrice ||
-		    locals.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool ||
-		    locals.economicsOutput.prizeContribution > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool - locals.game.creatorBalance)
-		{
-			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		// Take exactly one currency payment only after the purchase is known to fit atomically.
-		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
-		{
-			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer1Fee ||
-			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer2Fee ||
-			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.dividendFee)
-			{
-				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-		}
-		else
-		{
-			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
-			if (locals.assetAccounting.developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer1Fee ||
-			    locals.assetAccounting.developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.developer2Fee ||
-			    locals.assetAccounting.dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.economicsOutput.dividendFee)
-			{
-				output.returnCode = EReturnCode::STORAGE_FULL;
-				return;
-			}
-		}
-		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
-		{
-			if (qpi.invocationReward() != locals.game.ticketPrice)
-			{
-				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-		}
-		else
-		{
-			if (qpi.invocationReward() != 0)
-			{
-				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-			locals.possessedShares =
-			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
-			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
-			if (locals.possessedShares < static_cast<sint64>(locals.game.ticketPrice))
-			{
-				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
-				return;
-			}
-			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(),
-			                                            qpi.invocator(), static_cast<sint64>(locals.game.ticketPrice), SELF);
-			if (locals.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-		}
-		// Burn first, then commit the ticket and accounting; a failed burn refunds the collected payment.
-		locals.burnInput.game = locals.game;
-		locals.burnInput.ticketCount = 1;
-		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
-		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
-		{
-			locals.transferInput.game = locals.game;
-			locals.transferInput.destination = qpi.invocator();
-			locals.transferInput.amount = locals.game.ticketPrice;
-			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
-			output.returnCode = EReturnCode::TRANSFER_FAILED;
-			return;
-		}
-		state.mut().games.set(locals.slot, locals.game);
-		locals.applyInput.gameId = input.gameId;
-		locals.applyInput.digits = input.digits;
-		locals.applyInput.bonusQualified = locals.bonusOutput.qualified;
-		CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
-		output.ticketIndex = locals.applyOutput.ticketIndex;
-		output.ticketId = locals.applyOutput.ticketId;
-		output.prizeContribution = locals.applyOutput.prizeContribution;
-		output.returnCode = locals.applyOutput.returnCode;
+		output.returnCode = locals.purchaseOutput.returnCode;
 	}
 
 	/**
@@ -2904,7 +3743,7 @@ public:
 		output.game = state.get().games.get(gameSlot(input.gameId));
 		locals.lifecycleInput.game = output.game;
 		locals.lifecycleInput.now = qpi.now();
-		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
 		output.game.status = locals.lifecycleOutput.effectiveStatus;
 		output.returnCode = EReturnCode::SUCCESS;
 	}
@@ -3071,9 +3910,11 @@ public:
 		output.developer2Accrued = state.get().developer2Accrued;
 		output.dividendAccrued = state.get().dividendAccrued;
 		output.roundFee = state.get().roundFee;
+		output.walletCreationFee = state.get().walletCreationFee;
 		output.ticketCount = state.get().ticketCount;
 		output.resultCounter = state.get().resultCounter;
 		output.activeGameCount = state.get().activeGameCount;
+		output.walletCount = static_cast<uint16>(state.get().wallets.population());
 		output.platformFeePercent = state.get().platformFeePercent;
 		output.maxCreatorFeePercent = state.get().maxCreatorFeePercent;
 	}
@@ -3108,8 +3949,15 @@ public:
 	 * @param input New governance configuration.
 	 * @param output Result code.
 	 */
-	PUBLIC_PROCEDURE(SetPlatformConfig)
+	PUBLIC_PROCEDURE_WITH_LOCALS(SetPlatformConfig)
 	{
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
@@ -3120,7 +3968,8 @@ public:
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
-		if (input.roundFee == 0 || input.roundFee > PLDT_MAX_TRANSFER_AMOUNT)
+		if (input.roundFee == 0 || input.roundFee > PLDT_MAX_TRANSFER_AMOUNT || input.walletCreationFee == 0 ||
+		    input.walletCreationFee > PLDT_MAX_TRANSFER_AMOUNT)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
@@ -3134,6 +3983,7 @@ public:
 		state.mut().developer1 = input.developer1;
 		state.mut().developer2 = input.developer2;
 		state.mut().roundFee = input.roundFee;
+		state.mut().walletCreationFee = input.walletCreationFee;
 		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
 		output.returnCode = EReturnCode::SUCCESS;
 	}
@@ -3145,6 +3995,13 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
 	{
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
@@ -3213,194 +4070,13 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(BuyTickets)
 	{
-		// Validate the entire batch and aggregate ledger capacity before accepting any individual ticket.
-		if (!isGameIdValid(state, input.gameId))
-		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_GAME;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		if (input.ticketCount == 0 || input.ticketCount > PLDT_MAX_BATCH_TICKETS)
-		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.slot = gameSlot(input.gameId);
-		locals.game = state.get().games.get(locals.slot);
-		locals.now = qpi.now();
-		locals.lifecycleInput.game = locals.game;
-		locals.lifecycleInput.now = locals.now;
-		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
-		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
-		{
-			locals.refundInput.returnCode = locals.lifecycleOutput.purchaseReturnCode;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.game.status = locals.lifecycleOutput.effectiveStatus;
-		if (locals.game.ticketCount + input.ticketCount > locals.game.ticketLimit ||
-		    input.ticketCount > state.get().freeTicketCount + state.get().tickets.capacity() -
-		                            (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount))
-		{
-			locals.refundInput.returnCode = EReturnCode::TICKET_SOLD_OUT;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.link = locals.game.firstTicketLink;
-		locals.playerTickets = 0;
-		while (locals.link != 0)
-		{
-			locals.ticket = state.get().tickets.get(locals.link - 1);
-			if (locals.ticket.player == qpi.invocator())
-			{
-				++locals.playerTickets;
-			}
-			locals.link = locals.ticket.nextLink;
-		}
-		if (locals.playerTickets + input.ticketCount > locals.game.playerTicketLimit)
-		{
-			locals.refundInput.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.validateInput.codeLength = locals.game.codeLength;
-		locals.validateInput.maxDigit = locals.game.maxDigit;
-		locals.validateInput.allowRepeatedDigits = locals.game.allowRepeatedDigits;
-		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
-		{
-			locals.validateInput.digits = input.tickets.get(locals.i);
-			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
-			if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
-			{
-				locals.refundInput.returnCode = locals.validateOutput.returnCode;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-		}
-		locals.bonusInput.game = locals.game;
-		locals.bonusInput.player = qpi.invocator();
-		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
-		locals.totalPrice = smul(locals.game.ticketPrice, static_cast<uint64>(input.ticketCount));
-		if (locals.totalPrice > PLDT_MAX_TRANSFER_AMOUNT)
-		{
-			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
-		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
-		if (locals.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - locals.totalPrice ||
-		    locals.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool ||
-		    smul(locals.economicsOutput.prizeContribution, static_cast<uint64>(input.ticketCount)) >
-		        PLDT_MAX_TRANSFER_AMOUNT - locals.game.prizePool - locals.game.creatorBalance)
-		{
-			locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.developer1Fee = smul(locals.economicsOutput.developer1Fee, static_cast<uint64>(input.ticketCount));
-		locals.developer2Fee = smul(locals.economicsOutput.developer2Fee, static_cast<uint64>(input.ticketCount));
-		locals.dividendFee = smul(locals.economicsOutput.dividendFee, static_cast<uint64>(input.ticketCount));
-		// Custody and burn use aggregate amounts, while ticket economics remain rounded per ticket.
-		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
-		{
-			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
-			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
-			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
-			{
-				locals.refundInput.returnCode = EReturnCode::STORAGE_FULL;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-		}
-		else
-		{
-			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
-			if (locals.assetAccounting.developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
-			    locals.assetAccounting.developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
-			    locals.assetAccounting.dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
-			{
-				output.returnCode = EReturnCode::STORAGE_FULL;
-				return;
-			}
-		}
-		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
-		{
-			if (qpi.invocationReward() != locals.totalPrice)
-			{
-				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-		}
-		else
-		{
-			if (qpi.invocationReward() != 0)
-			{
-				locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
-				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-				output.returnCode = locals.refundOutput.returnCode;
-				return;
-			}
-			locals.possessedShares =
-			    qpi.numberOfPossessedShares(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
-			                                locals.game.ownershipManagingContractIndex, locals.game.possessionManagingContractIndex);
-			if (locals.possessedShares < static_cast<sint64>(locals.totalPrice))
-			{
-				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
-				return;
-			}
-			locals.transferResult =
-			    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, qpi.invocator(),
-			                                            qpi.invocator(), static_cast<sint64>(locals.totalPrice), SELF);
-			if (locals.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-		}
-		locals.burnInput.game = locals.game;
-		locals.burnInput.ticketCount = input.ticketCount;
-		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
-		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
-		{
-			locals.transferInput.game = locals.game;
-			locals.transferInput.destination = qpi.invocator();
-			locals.transferInput.amount = locals.totalPrice;
-			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
-			output.returnCode = EReturnCode::TRANSFER_FAILED;
-			return;
-		}
-		// Persist every ticket only after the shared custody and burn steps have succeeded.
-		state.mut().games.set(locals.slot, locals.game);
-		for (locals.i = 0; locals.i < input.ticketCount; ++locals.i)
-		{
-			locals.applyInput.gameId = input.gameId;
-			locals.applyInput.digits = input.tickets.get(locals.i);
-			locals.applyInput.bonusQualified = locals.bonusOutput.qualified;
-			CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
-			if (locals.applyOutput.returnCode != EReturnCode::SUCCESS)
-			{
-				output.returnCode = locals.applyOutput.returnCode;
-				return;
-			}
-			output.ticketIds.set(output.acceptedCount, locals.applyOutput.ticketId);
-			output.ticketIndexes.set(output.acceptedCount++, locals.applyOutput.ticketIndex);
-		}
-		output.returnCode = EReturnCode::SUCCESS;
+		locals.purchaseInput.purchase = input;
+		locals.purchaseInput.validateDigitsBeforePlayerLimit = false;
+		CALL(ExecuteTicketPurchase, locals.purchaseInput, locals.purchaseOutput);
+		output.ticketIds = locals.purchaseOutput.ticketIds;
+		output.ticketIndexes = locals.purchaseOutput.ticketIndexes;
+		output.acceptedCount = locals.purchaseOutput.acceptedCount;
+		output.returnCode = locals.purchaseOutput.returnCode;
 	}
 
 	/**
@@ -3408,11 +4084,81 @@ public:
 	 * @param input Asset, share count, and destination managing contract.
 	 * @param output Release fee result and status code.
 	 */
-	PUBLIC_PROCEDURE(TransferShareManagementRights)
+	PUBLIC_PROCEDURE_WITH_LOCALS(TransferShareManagementRights)
 	{
+		if (input.numberOfShares <= 0 || input.newManagingContractIndex == SELF_INDEX)
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.refundResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_VALUE;
+			return;
+		}
+		locals.possessedShares =
+		    qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
+		if (locals.possessedShares < input.numberOfShares)
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = locals.refundResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		locals.walletFound = state.get().wallets.get(qpi.invocator(), locals.wallet);
+		if (locals.walletFound)
+		{
+			if (locals.wallet.status != EWalletStatus::OPEN && locals.wallet.status != EWalletStatus::EXPIRING)
+			{
+				if (qpi.invocationReward() > 0)
+				{
+					locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+				}
+				output.returnCode = locals.refundResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_STATE;
+				return;
+			}
+			locals.walletAssetFound = findWalletAsset(locals.wallet, input.asset, locals.i, locals.walletAsset);
+			if (locals.walletAssetFound)
+			{
+				locals.walletAssetSlot = static_cast<uint8>(locals.i);
+			}
+		}
 		output.transferResult = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
 		                                          input.newManagingContractIndex, qpi.invocationReward());
-		output.returnCode = output.transferResult >= 0 ? EReturnCode::SUCCESS : EReturnCode::TRANSFER_FAILED;
+		if (output.transferResult < 0)
+		{
+			if (qpi.invocationReward() > 0)
+			{
+				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
+			}
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		if (locals.walletFound && locals.walletAssetFound)
+		{
+			locals.walletDebit = locals.walletAsset.balance < static_cast<uint64>(input.numberOfShares) ? locals.walletAsset.balance
+			                                                                                            : static_cast<uint64>(input.numberOfShares);
+			locals.walletAsset.balance -= locals.walletDebit;
+			if (locals.walletAsset.balance == 0 && locals.walletAsset.activeGameReferences == 0)
+			{
+				setMemory(locals.walletAsset, 0);
+				--locals.wallet.assetCount;
+			}
+			locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
+			state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		}
+		locals.refundAmount = qpi.invocationReward() - output.transferResult;
+		if (locals.refundAmount > 0)
+		{
+			locals.refundResult = qpi.transfer(qpi.invocator(), locals.refundAmount);
+			if (locals.refundResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+		}
+		output.returnCode = EReturnCode::SUCCESS;
 	}
 
 	/**
@@ -3422,6 +4168,13 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
 	{
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
@@ -3432,8 +4185,7 @@ public:
 		for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
 		{
 			locals.accounting = state.get().assetAccounting.get(locals.i);
-			if (locals.accounting.isActive && locals.accounting.asset.assetName == input.asset.assetName &&
-			    locals.accounting.asset.issuer == input.asset.issuer &&
+			if (locals.accounting.isActive && isSameAsset(locals.accounting.asset, input.asset) &&
 			    locals.accounting.ownershipManagingContractIndex == input.ownershipManagingContractIndex &&
 			    locals.accounting.possessionManagingContractIndex == input.possessionManagingContractIndex)
 			{
@@ -3509,19 +4261,636 @@ public:
 	}
 
 private:
-	PRIVATE_FUNCTION(CalculateTicketEconomics)
+	PRIVATE_FUNCTION_WITH_LOCALS(ValidateGameConfiguration)
+	{
+		output.returnCode = EReturnCode::INVALID_VALUE;
+		locals.managedCurrencyShares = 0;
+		locals.maxDrawAt = qpi.now();
+		if (!locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS))
+		{
+			return;
+		}
+		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
+		{
+			locals.managedCurrencyShares = qpi.numberOfShares(input.configuration.currencyAsset, AssetOwnershipSelect::byManagingContract(SELF_INDEX),
+			                                                  AssetPossessionSelect::byManagingContract(SELF_INDEX));
+		}
+		if (input.configuration.initialRunCredit < state.get().roundFee ||
+		    input.configuration.initialCreatorBalance < input.configuration.creatorPrizeSeed)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (!input.configuration.startAt.isValid() || !input.configuration.drawAt.isValid() || input.configuration.startAt <= qpi.now() ||
+		    input.configuration.drawAt > locals.maxDrawAt || input.configuration.drawAt <= input.configuration.startAt)
+		{
+			return;
+		}
+		if (input.configuration.ticketPrice == 0 || input.configuration.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT ||
+		    input.configuration.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT || input.configuration.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT ||
+		    input.configuration.initialCreatorBalance > PLDT_MAX_TRANSFER_AMOUNT ||
+		    (input.configuration.currencyMode == ECurrencyMode::QUBIC &&
+		     input.configuration.initialRunCredit > PLDT_MAX_TRANSFER_AMOUNT - input.configuration.initialCreatorBalance))
+		{
+			return;
+		}
+		if (input.configuration.ticketLimit == 0 || input.configuration.ticketLimit > PLDT_MAX_TICKETS_PER_GAME ||
+		    input.configuration.playerTicketLimit == 0 || input.configuration.playerTicketLimit > input.configuration.ticketLimit ||
+		    input.configuration.codeLength == 0 || input.configuration.codeLength > PLDT_MAX_CODE_LENGTH ||
+		    input.configuration.maxDigit > PLDT_MAX_DIGIT ||
+		    (!input.configuration.allowRepeatedDigits && input.configuration.maxDigit + 1 < input.configuration.codeLength))
+		{
+			return;
+		}
+		if (input.configuration.creatorFeePercent > state.get().maxCreatorFeePercent ||
+		    input.configuration.creatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT || input.configuration.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
+		{
+			return;
+		}
+		if ((input.configuration.mode != EGameMode::ONE_SHOT && input.configuration.mode != EGameMode::PERMANENT) ||
+		    (input.configuration.creatorRevenueMode != ECreatorRevenueMode::PAYOUT &&
+		     input.configuration.creatorRevenueMode != ECreatorRevenueMode::REINVEST) ||
+		    (input.configuration.currencyMode != ECurrencyMode::QUBIC && input.configuration.currencyMode != ECurrencyMode::ASSET))
+		{
+			return;
+		}
+		if ((input.configuration.bonusAssetCount > 0 && (input.configuration.bonusMultiplierBps < PLDT_BONUS_MULTIPLIER_SCALE ||
+		                                                 input.configuration.bonusMultiplierBps > PLDT_MAX_BONUS_MULTIPLIER_BPS)) ||
+		    (input.configuration.currencyMode == ECurrencyMode::ASSET &&
+		     (input.configuration.currencyAsset.assetName == 0 ||
+		      !qpi.isAssetIssued(input.configuration.currencyAsset.issuer, input.configuration.currencyAsset.assetName) ||
+		      locals.managedCurrencyShares <= 0 || input.configuration.ownershipManagingContractIndex != SELF_INDEX ||
+		      input.configuration.possessionManagingContractIndex != SELF_INDEX)))
+		{
+			return;
+		}
+		for (locals.i = 0; locals.i < input.configuration.bonusAssetCount; ++locals.i)
+		{
+			if (input.configuration.bonusAssets.get(locals.i).assetName == 0 ||
+			    !qpi.isAssetIssued(input.configuration.bonusAssets.get(locals.i).issuer, input.configuration.bonusAssets.get(locals.i).assetName))
+			{
+				return;
+			}
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(ValidateTierConfiguration)
+	{
+		output.returnCode = EReturnCode::INVALID_VALUE;
+		locals.weightTotal = 0;
+		for (locals.exact = 0; locals.exact <= PLDT_MAX_CODE_LENGTH; ++locals.exact)
+		{
+			for (locals.misplaced = 0; locals.misplaced <= PLDT_MAX_CODE_LENGTH - locals.exact; ++locals.misplaced)
+			{
+				locals.index = payoutMatrixIndex(locals.exact, locals.misplaced);
+				locals.weightTotal = sadd(locals.weightTotal, static_cast<uint64>(input.tierWeightsBps.get(static_cast<uint16>(locals.index))));
+				if (input.tierWeightsBps.get(static_cast<uint16>(locals.index)) > 0 &&
+				    (locals.exact > input.codeLength || locals.misplaced > input.codeLength - locals.exact ||
+				     (locals.exact + 1 == input.codeLength && locals.misplaced == 1)))
+				{
+					return;
+				}
+			}
+		}
+		if (locals.weightTotal == PLDT_TIER_BPS_SCALE)
+		{
+			output.returnCode = EReturnCode::SUCCESS;
+		}
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(CalculateGamePreview)
+	{
+		output.preview.returnCode = EReturnCode::INVALID_VALUE;
+		locals.economicsInput.ticketPrice = input.configuration.ticketPrice;
+		locals.economicsInput.creatorFeePercent = input.configuration.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
+		if (input.configuration.currencyMode == ECurrencyMode::ASSET && input.configuration.currencyAsset.issuer == NULL_ID &&
+		    locals.economicsOutput.burn > 0)
+		{
+			return;
+		}
+		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
+		if (input.configuration.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.configuration.ticketLimit)) ||
+		    locals.refundablePerTicket >
+		        div(PLDT_MAX_TRANSFER_AMOUNT - input.configuration.creatorPrizeSeed, static_cast<uint64>(input.configuration.ticketLimit)))
+		{
+			return;
+		}
+		output.preview.platformFee = locals.economicsOutput.platformFee;
+		output.preview.roundFee = state.get().roundFee;
+		if (input.configuration.currencyMode == ECurrencyMode::QUBIC)
+		{
+			output.preview.initialQubicRequired = sadd(input.configuration.initialRunCredit, input.configuration.initialCreatorBalance);
+		}
+		else
+		{
+			output.preview.initialQubicRequired = input.configuration.initialRunCredit;
+			output.preview.initialCreatorAssetRequired = input.configuration.initialCreatorBalance;
+		}
+		output.preview.creatorFee = locals.economicsOutput.creatorFee;
+		output.preview.burn = locals.economicsOutput.burn;
+		output.preview.prizeContribution = locals.economicsOutput.prizeContribution;
+		output.preview.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(PrepareGameCreation)
+	{
+		output.returnCode = EReturnCode::INVALID_VALUE;
+		locals.maxDrawAt = qpi.now();
+		if (input.configuration.startAt <= qpi.now() || !locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS) ||
+		    input.configuration.drawAt > locals.maxDrawAt)
+		{
+			return;
+		}
+		if (qpi.invocationReward() != 0)
+		{
+			output.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			return;
+		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		// Reserve the exact wallet buckets and platform accrual capacity without mutating state.
+		locals.requiredQubic = input.preview.initialQubicRequired;
+		output.serviceCreditDebit = locals.wallet.serviceCredit < locals.requiredQubic ? locals.wallet.serviceCredit : locals.requiredQubic;
+		output.refundableQubicDebit = locals.requiredQubic - output.serviceCreditDebit;
+		if (output.refundableQubicDebit > locals.wallet.refundableQubic)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		calculatePlatformShares(state.get().roundFee, output.developer1Fee, output.developer2Fee, output.dividendFee);
+		if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
+		                                output.developer1Fee, output.developer2Fee, output.dividendFee))
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		// Select the next reusable game slot while enforcing the creator-level active-game cap.
+		locals.found = false;
+		locals.creatorActiveGames = locals.wallet.activeGameCount;
+		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
+		{
+			locals.candidateSlot = static_cast<uint16>(mod(state.get().allocationCursor + locals.i, static_cast<uint64>(PLDT_MAX_GAMES)));
+			if (!locals.found && state.get().games.get(locals.candidateSlot).status == EGameStatus::EMPTY_SLOT)
+			{
+				output.slot = locals.candidateSlot;
+				locals.found = true;
+			}
+		}
+		if (!locals.found || locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
+		{
+			// Resolve wallet custody and the shared asset-accounting bucket before the commit phase.
+			locals.walletAssetFound = false;
+			locals.walletFreeAssetSlotFound = false;
+			for (locals.i = 0; locals.i < locals.wallet.assets.capacity(); ++locals.i)
+			{
+				locals.walletAsset = locals.wallet.assets.get(locals.i);
+				if (locals.walletAsset.isActive && isSameAsset(locals.walletAsset.asset, input.configuration.currencyAsset))
+				{
+					output.walletAssetSlot = static_cast<uint8>(locals.i);
+					locals.walletAssetFound = true;
+					break;
+				}
+				if (!locals.walletAsset.isActive && !locals.walletFreeAssetSlotFound)
+				{
+					locals.walletFreeAssetSlot = static_cast<uint8>(locals.i);
+					locals.walletFreeAssetSlotFound = true;
+				}
+			}
+			if (!locals.walletAssetFound && input.configuration.initialCreatorBalance == 0 && locals.walletFreeAssetSlotFound &&
+			    locals.wallet.assetCount < PLDT_MAX_WALLET_ASSETS)
+			{
+				output.walletAssetSlot = locals.walletFreeAssetSlot;
+			}
+			else if (!locals.walletAssetFound || locals.walletAsset.balance < input.configuration.initialCreatorBalance)
+			{
+				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+				return;
+			}
+			locals.accountingFound = false;
+			for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
+			{
+				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+				if (locals.assetAccounting.isActive && isSameAsset(locals.assetAccounting.asset, input.configuration.currencyAsset) &&
+				    locals.assetAccounting.ownershipManagingContractIndex == input.configuration.ownershipManagingContractIndex &&
+				    locals.assetAccounting.possessionManagingContractIndex == input.configuration.possessionManagingContractIndex)
+				{
+					output.accountingSlot = static_cast<uint16>(locals.i);
+					output.assetAccounting = locals.assetAccounting;
+					locals.accountingFound = true;
+					break;
+				}
+			}
+			for (locals.i = 0; !locals.accountingFound && locals.i < state.get().assetAccounting.capacity(); ++locals.i)
+			{
+				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+				if (!locals.assetAccounting.isActive)
+				{
+					output.accountingSlot = static_cast<uint16>(locals.i);
+					output.assetAccounting.asset = input.configuration.currencyAsset;
+					output.assetAccounting.ownershipManagingContractIndex = input.configuration.ownershipManagingContractIndex;
+					output.assetAccounting.possessionManagingContractIndex = input.configuration.possessionManagingContractIndex;
+					output.assetAccounting.isActive = true;
+					locals.accountingFound = true;
+				}
+			}
+			if (!locals.accountingFound)
+			{
+				output.returnCode = EReturnCode::STORAGE_FULL;
+				return;
+			}
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(CollectInitialAssetFunding)
+	{
+		output.returnCode = EReturnCode::SUCCESS;
+		if (input.configuration.currencyMode != ECurrencyMode::ASSET || input.configuration.initialCreatorBalance == 0)
+		{
+			return;
+		}
+		locals.possessedShares = qpi.numberOfPossessedShares(input.configuration.currencyAsset.assetName, input.configuration.currencyAsset.issuer,
+		                                                     qpi.invocator(), qpi.invocator(), input.configuration.ownershipManagingContractIndex,
+		                                                     input.configuration.possessionManagingContractIndex);
+		if (locals.possessedShares < static_cast<sint64>(input.configuration.initialCreatorBalance))
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		locals.transferResult = qpi.transferShareOwnershipAndPossession(input.configuration.currencyAsset.assetName,
+		                                                                input.configuration.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+		                                                                static_cast<sint64>(input.configuration.initialCreatorBalance), SELF);
+		if (locals.transferResult < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+		}
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(CommitCreatedGame)
+	{
+		locals.generation = sadd(state.get().generations.get(input.prepared.slot), 1ULL);
+		if (locals.generation == 0)
+		{
+			locals.generation = 1;
+		}
+		state.mut().generations.set(input.prepared.slot, locals.generation);
+		setMemory(locals.game, 0);
+		locals.game.tierWeightsBps = input.configuration.tierWeightsBps;
+		locals.game.bonusAssets = input.configuration.bonusAssets;
+		locals.game.name = input.configuration.name;
+		locals.game.currencyAsset = input.configuration.currencyAsset;
+		locals.game.owner = qpi.invocator();
+		locals.game.startAt = input.configuration.startAt;
+		locals.game.drawAt = input.configuration.drawAt;
+		locals.game.gameId = (locals.generation << 10) | input.prepared.slot;
+		locals.game.ticketPrice = input.configuration.ticketPrice;
+		locals.game.creatorPrizeSeed = input.configuration.creatorPrizeSeed;
+		locals.game.prizePool = input.configuration.creatorPrizeSeed;
+		locals.game.roundFeeSnapshot = state.get().roundFee;
+		locals.game.runCredit = input.configuration.initialRunCredit - state.get().roundFee;
+		locals.game.creatorBalance = input.configuration.initialCreatorBalance - input.configuration.creatorPrizeSeed;
+		locals.game.serviceCreditBalance =
+		    input.prepared.serviceCreditDebit > state.get().roundFee ? input.prepared.serviceCreditDebit - state.get().roundFee : 0;
+		locals.game.roundDurationMicroseconds = input.configuration.startAt.durationMicrosec(input.configuration.drawAt);
+		locals.game.bonusMultiplierBps = input.configuration.bonusMultiplierBps;
+		locals.game.ticketLimit = input.configuration.ticketLimit;
+		locals.game.playerTicketLimit = input.configuration.playerTicketLimit;
+		locals.game.bonusAssetCount = input.configuration.bonusAssetCount;
+		locals.game.ownershipManagingContractIndex = input.configuration.ownershipManagingContractIndex;
+		locals.game.possessionManagingContractIndex = input.configuration.possessionManagingContractIndex;
+		locals.game.bonusOwnershipManagingContractIndex = input.configuration.bonusOwnershipManagingContractIndex;
+		locals.game.bonusPossessionManagingContractIndex = input.configuration.bonusPossessionManagingContractIndex;
+		locals.game.assetAccountingLink = input.configuration.currencyMode == ECurrencyMode::ASSET ? input.prepared.accountingSlot + 1 : 0;
+		locals.game.codeLength = input.configuration.codeLength;
+		locals.game.maxDigit = input.configuration.maxDigit;
+		locals.game.creatorFeePercent = input.configuration.creatorFeePercent;
+		locals.game.currencyMode = input.configuration.currencyMode;
+		locals.game.mode = input.configuration.mode;
+		locals.game.creatorRevenueMode = input.configuration.creatorRevenueMode;
+		locals.game.roundNumber = 1;
+		locals.game.allowRepeatedDigits = input.configuration.allowRepeatedDigits;
+		locals.game.status = EGameStatus::SCHEDULED;
+		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
+		{
+			locals.assetAccounting = input.prepared.assetAccounting;
+			++locals.assetAccounting.activeGameCount;
+			state.mut().assetAccounting.set(input.prepared.accountingSlot, locals.assetAccounting);
+		}
+		state.get().wallets.get(qpi.invocator(), locals.wallet);
+		locals.wallet.serviceCredit -= input.prepared.serviceCreditDebit;
+		locals.wallet.refundableQubic -= input.prepared.refundableQubicDebit;
+		++locals.wallet.activeGameCount;
+		locals.wallet.lastGameCreationEpoch = qpi.epoch();
+		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
+		{
+			locals.walletAsset = locals.wallet.assets.get(input.prepared.walletAssetSlot);
+			if (!locals.walletAsset.isActive)
+			{
+				setMemory(locals.walletAsset, 0);
+				locals.walletAsset.asset = input.configuration.currencyAsset;
+				locals.walletAsset.isActive = true;
+				++locals.wallet.assetCount;
+			}
+			locals.walletAsset.balance -= input.configuration.initialCreatorBalance;
+			++locals.walletAsset.activeGameReferences;
+			locals.wallet.assets.set(input.prepared.walletAssetSlot, locals.walletAsset);
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		state.mut().games.set(input.prepared.slot, locals.game);
+		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, input.prepared.developer1Fee);
+		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, input.prepared.developer2Fee);
+		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, input.prepared.dividendFee);
+		state.mut().activeGameCount = state.get().activeGameCount + 1;
+		state.mut().allocationCursor = static_cast<uint16>(mod(static_cast<uint64>(input.prepared.slot + 1), static_cast<uint64>(PLDT_MAX_GAMES)));
+		output.gameId = locals.game.gameId;
+		output.slot = input.prepared.slot;
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/** Computes one ticket's exact fee and prize split without accessing contract state. */
+	static void calculateTicketEconomics(const CalculateTicketEconomics_input& input, CalculateTicketEconomics_output& output)
 	{
 		output.platformFee = mulDiv(input.ticketPrice, input.platformFeePercent, 100ULL);
 		output.net = input.ticketPrice - output.platformFee;
 		output.creatorFee = mulDiv(output.net, input.creatorFeePercent, 100ULL);
 		output.burn = mulDiv(output.net, PLDT_BURN_PERCENT, 100ULL);
 		output.prizeContribution = output.net - output.creatorFee - output.burn;
-		output.developer1Fee = mulDiv(output.platformFee, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
-		output.developer2Fee = mulDiv(output.platformFee, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
-		output.dividendFee = output.platformFee - output.developer1Fee - output.developer2Fee;
+		calculatePlatformShares(output.platformFee, output.developer1Fee, output.developer2Fee, output.dividendFee);
 	}
 
-	PRIVATE_FUNCTION(EvaluateGameLifecycle)
+	PRIVATE_FUNCTION_WITH_LOCALS(PrepareTicketPurchase)
+	{
+		output.returnCode = EReturnCode::INVALID_GAME;
+		if (!isGameIdValid(state, input.purchase.gameId))
+		{
+			return;
+		}
+		if (input.purchase.ticketCount == 0 || input.purchase.ticketCount > PLDT_MAX_BATCH_TICKETS)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		output.slot = gameSlot(input.purchase.gameId);
+		output.game = state.get().games.get(output.slot);
+		locals.now = qpi.now();
+		locals.lifecycleInput.game = output.game;
+		locals.lifecycleInput.now = locals.now;
+		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
+		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
+		{
+			output.returnCode = locals.lifecycleOutput.purchaseReturnCode;
+			return;
+		}
+		output.game.status = locals.lifecycleOutput.effectiveStatus;
+		if (output.game.ticketCount + input.purchase.ticketCount > output.game.ticketLimit ||
+		    input.purchase.ticketCount > state.get().freeTicketCount + state.get().tickets.capacity() -
+		                                     (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount))
+		{
+			output.returnCode = EReturnCode::TICKET_SOLD_OUT;
+			return;
+		}
+		locals.validateInput.codeLength = output.game.codeLength;
+		locals.validateInput.maxDigit = output.game.maxDigit;
+		locals.validateInput.allowRepeatedDigits = output.game.allowRepeatedDigits;
+		if (input.validateDigitsBeforePlayerLimit)
+		{
+			locals.validateInput.digits = input.purchase.tickets.get(0);
+			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
+			if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
+			{
+				output.returnCode = locals.validateOutput.returnCode;
+				return;
+			}
+		}
+		locals.link = output.game.firstTicketLink;
+		locals.playerTickets = 0;
+		while (locals.link != 0)
+		{
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.player == qpi.invocator())
+			{
+				++locals.playerTickets;
+			}
+			locals.link = locals.ticket.nextLink;
+		}
+		if (locals.playerTickets + input.purchase.ticketCount > output.game.playerTicketLimit)
+		{
+			output.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
+			return;
+		}
+		if (!input.validateDigitsBeforePlayerLimit)
+		{
+			for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
+			{
+				locals.validateInput.digits = input.purchase.tickets.get(locals.i);
+				CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
+				if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
+				{
+					output.returnCode = locals.validateOutput.returnCode;
+					return;
+				}
+			}
+		}
+		locals.bonusInput.game = output.game;
+		locals.bonusInput.player = qpi.invocator();
+		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
+		output.bonusQualified = locals.bonusOutput.qualified;
+		output.totalPrice = smul(output.game.ticketPrice, static_cast<uint64>(input.purchase.ticketCount));
+		if (output.totalPrice > PLDT_MAX_TRANSFER_AMOUNT)
+		{
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		locals.economicsInput.ticketPrice = output.game.ticketPrice;
+		locals.economicsInput.creatorFeePercent = output.game.creatorFeePercent;
+		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		calculateTicketEconomics(locals.economicsInput, output.economics);
+		if (output.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - output.totalPrice ||
+		    output.game.creatorBalance > PLDT_MAX_TRANSFER_AMOUNT - output.game.prizePool ||
+		    smul(output.economics.prizeContribution, static_cast<uint64>(input.purchase.ticketCount)) >
+		        PLDT_MAX_TRANSFER_AMOUNT - output.game.prizePool - output.game.creatorBalance)
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_FUNCTION_WITH_LOCALS(ValidatePurchaseAccountingCapacity)
+	{
+		output.refundOnFailure = true;
+		output.returnCode = EReturnCode::SUCCESS;
+		locals.developer1Fee = smul(input.prepared.economics.developer1Fee, static_cast<uint64>(input.ticketCount));
+		locals.developer2Fee = smul(input.prepared.economics.developer2Fee, static_cast<uint64>(input.ticketCount));
+		locals.dividendFee = smul(input.prepared.economics.dividendFee, static_cast<uint64>(input.ticketCount));
+		if (input.prepared.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
+			                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
+			{
+				output.returnCode = EReturnCode::STORAGE_FULL;
+			}
+			return;
+		}
+		locals.assetAccounting = state.get().assetAccounting.get(input.prepared.game.assetAccountingLink - 1);
+		if (!hasPlatformAccrualCapacity(locals.assetAccounting.developer1Accrued, locals.assetAccounting.developer2Accrued,
+		                                locals.assetAccounting.dividendAccrued, locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			output.refundOnFailure = false;
+		}
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(CollectTicketPayment)
+	{
+		if ((input.game.currencyMode == ECurrencyMode::QUBIC && qpi.invocationReward() != input.totalPrice) ||
+		    (input.game.currencyMode == ECurrencyMode::ASSET && qpi.invocationReward() != 0))
+		{
+			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (input.game.currencyMode == ECurrencyMode::ASSET)
+		{
+			// Take asset custody before burning so a failed transfer leaves every ledger unchanged.
+			locals.possessedShares =
+			    qpi.numberOfPossessedShares(input.game.currencyAsset.assetName, input.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
+			                                input.game.ownershipManagingContractIndex, input.game.possessionManagingContractIndex);
+			if (locals.possessedShares < static_cast<sint64>(input.totalPrice))
+			{
+				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+				return;
+			}
+			locals.transferResult =
+			    qpi.transferShareOwnershipAndPossession(input.game.currencyAsset.assetName, input.game.currencyAsset.issuer, qpi.invocator(),
+			                                            qpi.invocator(), static_cast<sint64>(input.totalPrice), SELF);
+			if (locals.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+		}
+		locals.burnInput.game = input.game;
+		locals.burnInput.ticketCount = input.ticketCount;
+		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
+		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			// Compensate the custody transfer because the ticket batch has not been committed yet.
+			locals.transferInput.game = input.game;
+			locals.transferInput.destination = qpi.invocator();
+			locals.transferInput.amount = input.totalPrice;
+			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		if (input.game.currencyMode == ECurrencyMode::ASSET)
+		{
+			// Wallet accounting follows successful custody and debits only the tracked portion.
+			locals.walletFound = state.get().wallets.get(qpi.invocator(), locals.wallet);
+			if (locals.walletFound && locals.wallet.status == EWalletStatus::OPEN)
+			{
+				locals.walletAssetFound = findWalletAsset(locals.wallet, input.game.currencyAsset, locals.i, locals.walletAsset);
+				if (locals.walletAssetFound)
+				{
+					locals.walletAssetSlot = static_cast<uint8>(locals.i);
+				}
+				if (locals.walletAssetFound)
+				{
+					locals.walletDebit = locals.walletAsset.balance < input.totalPrice ? locals.walletAsset.balance : input.totalPrice;
+					locals.walletAsset.balance -= locals.walletDebit;
+					if (locals.walletAsset.balance == 0 && locals.walletAsset.activeGameReferences == 0)
+					{
+						setMemory(locals.walletAsset, 0);
+						--locals.wallet.assetCount;
+					}
+					locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
+					state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+				}
+			}
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(CommitTicketPurchase)
+	{
+		state.mut().games.set(input.prepared.slot, input.prepared.game);
+		for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
+		{
+			locals.applyInput.gameId = input.purchase.gameId;
+			locals.applyInput.digits = input.purchase.tickets.get(locals.i);
+			locals.applyInput.bonusQualified = input.prepared.bonusQualified;
+			CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
+			if (locals.applyOutput.returnCode != EReturnCode::SUCCESS)
+			{
+				output.returnCode = locals.applyOutput.returnCode;
+				return;
+			}
+			output.ticketIds.set(output.acceptedCount, locals.applyOutput.ticketId);
+			output.ticketIndexes.set(output.acceptedCount++, locals.applyOutput.ticketIndex);
+			output.prizeContribution = locals.applyOutput.prizeContribution;
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(ExecuteTicketPurchase)
+	{
+		locals.prepareInput.purchase = input.purchase;
+		locals.prepareInput.validateDigitsBeforePlayerLimit = input.validateDigitsBeforePlayerLimit;
+		CALL(PrepareTicketPurchase, locals.prepareInput, locals.prepareOutput);
+		if (locals.prepareOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			locals.refundInput.returnCode = locals.prepareOutput.returnCode;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		locals.capacityInput.prepared = locals.prepareOutput;
+		locals.capacityInput.ticketCount = input.purchase.ticketCount;
+		CALL(ValidatePurchaseAccountingCapacity, locals.capacityInput, locals.capacityOutput);
+		if (locals.capacityOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			output.returnCode = locals.capacityOutput.returnCode;
+			if (locals.capacityOutput.refundOnFailure)
+			{
+				locals.refundInput.returnCode = locals.capacityOutput.returnCode;
+				CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+				output.returnCode = locals.refundOutput.returnCode;
+			}
+			return;
+		}
+		locals.paymentInput.game = locals.prepareOutput.game;
+		locals.paymentInput.totalPrice = locals.prepareOutput.totalPrice;
+		locals.paymentInput.ticketCount = input.purchase.ticketCount;
+		CALL(CollectTicketPayment, locals.paymentInput, locals.paymentOutput);
+		if (locals.paymentOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			output.returnCode = locals.paymentOutput.returnCode;
+			return;
+		}
+		locals.commitInput.purchase = input.purchase;
+		locals.commitInput.prepared = locals.prepareOutput;
+		CALL(CommitTicketPurchase, locals.commitInput, locals.commitOutput);
+		output.ticketIds = locals.commitOutput.ticketIds;
+		output.ticketIndexes = locals.commitOutput.ticketIndexes;
+		output.prizeContribution = locals.commitOutput.prizeContribution;
+		output.acceptedCount = locals.commitOutput.acceptedCount;
+		output.returnCode = locals.commitOutput.returnCode;
+	}
+
+	/** Derives the effective game status and next action without accessing contract state. */
+	static void evaluateGameLifecycle(const EvaluateGameLifecycle_input& input, EvaluateGameLifecycle_output& output)
 	{
 		output.effectiveStatus = input.game.status;
 		output.action = EGameLifecycleAction::NONE;
@@ -3627,6 +4996,54 @@ private:
 		}
 	}
 
+	PRIVATE_PROCEDURE_WITH_LOCALS(CreditWalletAsset)
+	{
+		if (input.amount == 0 || input.amount > PLDT_MAX_TRANSFER_AMOUNT || !state.get().wallets.get(input.owner, locals.wallet) ||
+		    locals.wallet.status != EWalletStatus::OPEN)
+		{
+			return;
+		}
+
+		locals.found = false;
+		locals.freeSlotFound = false;
+		for (locals.i = 0; locals.i < locals.wallet.assets.capacity(); ++locals.i)
+		{
+			locals.walletAsset = locals.wallet.assets.get(locals.i);
+			if (locals.walletAsset.isActive && isSameAsset(locals.walletAsset.asset, input.asset))
+			{
+				if (locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - input.amount)
+				{
+					return;
+				}
+
+				locals.walletAsset.balance = sadd(locals.walletAsset.balance, input.amount);
+				locals.wallet.assets.set(locals.i, locals.walletAsset);
+				locals.found = true;
+				break;
+			}
+
+			if (!locals.walletAsset.isActive && !locals.freeSlotFound)
+			{
+				locals.freeSlot = static_cast<uint8>(locals.i);
+				locals.freeSlotFound = true;
+			}
+		}
+		if (!locals.found)
+		{
+			if (!locals.freeSlotFound || locals.wallet.assetCount >= PLDT_MAX_WALLET_ASSETS)
+			{
+				return;
+			}
+			setMemory(locals.walletAsset, 0);
+			locals.walletAsset.asset = input.asset;
+			locals.walletAsset.balance = input.amount;
+			locals.walletAsset.isActive = true;
+			locals.wallet.assets.set(locals.freeSlot, locals.walletAsset);
+			++locals.wallet.assetCount;
+		}
+		state.mut().wallets.replace(input.owner, locals.wallet);
+	}
+
 	PRIVATE_PROCEDURE(TransferGameCurrency)
 	{
 		output.transferResult = 0;
@@ -3648,7 +5065,7 @@ private:
 		locals.economicsInput.ticketPrice = input.game.ticketPrice;
 		locals.economicsInput.creatorFeePercent = input.game.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		locals.totalBurn = smul(locals.economicsOutput.burn, static_cast<uint64>(input.ticketCount));
 		if (locals.totalBurn == 0)
 		{
@@ -3675,7 +5092,7 @@ private:
 		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
 		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
-		CALL(CalculateTicketEconomics, locals.economicsInput, locals.economicsOutput);
+		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		output.prizeContribution = locals.economicsOutput.prizeContribution;
 		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
 		{
@@ -3882,46 +5299,197 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	PRIVATE_PROCEDURE_WITH_LOCALS(ClassifySettlementTickets)
+	{
+		output.game = input.game;
+		output.progress = input.progress;
+		output.budget = input.budget;
+		while (output.budget > 0 && output.game.status == EGameStatus::COUNTING && output.progress.cursorLink != 0)
+		{
+			locals.link = output.progress.cursorLink;
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			locals.matchInput.playerDigits = locals.ticket.digits;
+			locals.matchInput.winningDigits = output.progress.winningDigits;
+			locals.matchInput.codeLength = output.game.codeLength;
+			CALL(CountMatches, locals.matchInput, locals.matchOutput);
+			locals.ticket.exact = locals.matchOutput.exact;
+			locals.ticket.misplaced = locals.matchOutput.misplaced;
+			locals.ticket.tierIndex = locals.matchOutput.tierIndex;
+			if (output.game.tierWeightsBps.get(locals.ticket.tierIndex) > 0)
+			{
+				locals.ticket.winnerWeight = locals.ticket.bonusQualified ? output.game.bonusMultiplierBps : PLDT_BONUS_MULTIPLIER_SCALE;
+				output.progress.tierWinnerCount.set(locals.ticket.tierIndex, output.progress.tierWinnerCount.get(locals.ticket.tierIndex) + 1);
+				if (locals.ticket.bonusQualified)
+				{
+					output.progress.tierBonusCount.set(locals.ticket.tierIndex, output.progress.tierBonusCount.get(locals.ticket.tierIndex) + 1);
+				}
+				++output.progress.winnerCount;
+			}
+			else
+			{
+				locals.ticket.status = ETicketStatus::LOST;
+			}
+			output.progress.cursorLink = locals.ticket.nextLink;
+			state.mut().tickets.set(locals.link - 1, locals.ticket);
+			--output.budget;
+		}
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(AllocateSettlementPayouts)
+	{
+		output.game = input.game;
+		output.progress = input.progress;
+		output.noWinners = output.progress.winnerCount == 0;
+		if (output.noWinners)
+		{
+			return;
+		}
+		output.progress.activeTierBps = 0;
+		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+		{
+			if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0)
+			{
+				output.progress.activeTierBps += output.game.tierWeightsBps.get(static_cast<uint16>(locals.i));
+			}
+		}
+		output.progress.allocatedPool = 0;
+		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+		{
+			if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) == 0)
+			{
+				continue;
+			}
+			locals.tierPool = mulDiv(output.progress.prizePoolSnapshot, output.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
+			                         output.progress.activeTierBps);
+			locals.fraction = mulMod(output.progress.prizePoolSnapshot, output.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
+			                         output.progress.activeTierBps);
+			output.progress.tierPools.set(static_cast<uint16>(locals.i), locals.tierPool);
+			output.progress.tierFractions.set(static_cast<uint16>(locals.i), locals.fraction);
+			output.progress.allocatedPool = sadd(output.progress.allocatedPool, locals.tierPool);
+		}
+		locals.remainder = output.progress.prizePoolSnapshot - output.progress.allocatedPool;
+		while (locals.remainder > 0)
+		{
+			locals.foundTier = false;
+			locals.bestFraction = 0;
+			locals.bestTier = 0;
+			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+			{
+				locals.fraction = output.progress.tierFractions.get(static_cast<uint16>(locals.i));
+				if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0 && locals.fraction != PLDT_UINT64_SENTINEL &&
+				    (!locals.foundTier || locals.fraction > locals.bestFraction))
+				{
+					locals.foundTier = true;
+					locals.bestFraction = locals.fraction;
+					locals.bestTier = static_cast<uint16>(locals.i);
+				}
+			}
+			output.progress.tierPools.set(locals.bestTier, output.progress.tierPools.get(locals.bestTier) + 1);
+			output.progress.tierFractions.set(locals.bestTier, PLDT_UINT64_SENTINEL);
+			--locals.remainder;
+		}
+		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
+		{
+			locals.count = output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i));
+			if (locals.count == 0)
+			{
+				continue;
+			}
+			locals.bonusCount = output.progress.tierBonusCount.get(static_cast<uint16>(locals.i));
+			locals.totalWeight = smul(locals.count - locals.bonusCount, static_cast<uint64>(PLDT_BONUS_MULTIPLIER_SCALE));
+			locals.totalWeight = sadd(locals.totalWeight, smul(locals.bonusCount, static_cast<uint64>(output.game.bonusMultiplierBps)));
+			locals.tierPool = output.progress.tierPools.get(static_cast<uint16>(locals.i));
+			output.progress.normalPayout.set(static_cast<uint16>(locals.i), mulDiv(locals.tierPool, PLDT_BONUS_MULTIPLIER_SCALE, locals.totalWeight));
+			output.progress.bonusPayout.set(static_cast<uint16>(locals.i),
+			                                mulDiv(locals.tierPool, output.game.bonusMultiplierBps, locals.totalWeight));
+			locals.floorSum = smul(locals.count - locals.bonusCount, output.progress.normalPayout.get(static_cast<uint16>(locals.i)));
+			locals.floorSum = sadd(locals.floorSum, smul(locals.bonusCount, output.progress.bonusPayout.get(static_cast<uint16>(locals.i))));
+			output.progress.tierRemainder.set(static_cast<uint16>(locals.i), locals.tierPool - locals.floorSum);
+		}
+		output.progress.cursorLink = output.game.firstTicketLink;
+		output.game.winnerCount = output.progress.winnerCount;
+		output.game.status = EGameStatus::PAYING;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(PaySettlementTickets)
+	{
+		output.game = input.game;
+		output.progress = input.progress;
+		output.budget = input.budget;
+		output.returnCode = EReturnCode::SUCCESS;
+		while (output.budget > 0 && output.game.status == EGameStatus::PAYING && output.progress.cursorLink != 0)
+		{
+			locals.link = output.progress.cursorLink;
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			if (locals.ticket.winnerWeight == 0)
+			{
+				locals.ticket.status = ETicketStatus::LOST;
+			}
+			else
+			{
+				locals.payout = locals.ticket.bonusQualified ? output.progress.bonusPayout.get(locals.ticket.tierIndex)
+				                                             : output.progress.normalPayout.get(locals.ticket.tierIndex);
+				if (output.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
+				{
+					++locals.payout;
+				}
+				locals.transferInput.game = output.game;
+				locals.transferInput.destination = locals.ticket.player;
+				locals.transferInput.amount = locals.payout;
+				CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+				if (locals.transferOutput.transferResult < 0)
+				{
+					output.returnCode = EReturnCode::TRANSFER_FAILED;
+					return;
+				}
+				if (output.game.currencyMode == ECurrencyMode::ASSET)
+				{
+					// The QPI transfer does not invoke management-right callbacks, so mirror successful payouts in open wallets.
+					locals.creditInput.owner = locals.ticket.player;
+					locals.creditInput.asset = output.game.currencyAsset;
+					locals.creditInput.amount = locals.payout;
+					CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
+				}
+				locals.ticket.payout = locals.payout;
+				locals.ticket.status = ETicketStatus::PAID;
+				output.game.totalPaid = sadd(output.game.totalPaid, locals.payout);
+				if (output.game.currencyMode == ECurrencyMode::QUBIC)
+				{
+					output.game.serviceCreditBalance -=
+					    output.game.serviceCreditBalance < locals.payout ? output.game.serviceCreditBalance : locals.payout;
+				}
+				if (output.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
+				{
+					output.progress.tierRemainder.set(locals.ticket.tierIndex, output.progress.tierRemainder.get(locals.ticket.tierIndex) - 1);
+				}
+			}
+			output.progress.cursorLink = locals.ticket.nextLink;
+			state.mut().tickets.set(locals.link - 1, locals.ticket);
+			--output.budget;
+		}
+	}
+
 	PRIVATE_PROCEDURE_WITH_LOCALS(AdvanceSettlement)
 	{
 		locals.slot = input.slot;
 		locals.game = state.get().games.get(locals.slot);
 		locals.progress = state.get().settlements.get(locals.slot);
 		locals.budget = input.actionBudget;
-		// Phase 1 classifies tickets and persists the cursor so work can resume on a later tick.
-		while (locals.budget > 0 && locals.game.status == EGameStatus::COUNTING && locals.progress.cursorLink != 0)
-		{
-			locals.link = locals.progress.cursorLink;
-			locals.ticket = state.get().tickets.get(locals.link - 1);
-			locals.matchInput.playerDigits = locals.ticket.digits;
-			locals.matchInput.winningDigits = locals.progress.winningDigits;
-			locals.matchInput.codeLength = locals.game.codeLength;
-			CALL(CountMatches, locals.matchInput, locals.matchOutput);
-			locals.ticket.exact = locals.matchOutput.exact;
-			locals.ticket.misplaced = locals.matchOutput.misplaced;
-			locals.ticket.tierIndex = locals.matchOutput.tierIndex;
-			if (locals.game.tierWeightsBps.get(locals.ticket.tierIndex) > 0)
-			{
-				locals.ticket.winnerWeight = locals.ticket.bonusQualified ? locals.game.bonusMultiplierBps : PLDT_BONUS_MULTIPLIER_SCALE;
-				locals.progress.tierWinnerCount.set(locals.ticket.tierIndex, locals.progress.tierWinnerCount.get(locals.ticket.tierIndex) + 1);
-				if (locals.ticket.bonusQualified)
-				{
-					locals.progress.tierBonusCount.set(locals.ticket.tierIndex, locals.progress.tierBonusCount.get(locals.ticket.tierIndex) + 1);
-				}
-				++locals.progress.winnerCount;
-			}
-			else
-			{
-				locals.ticket.status = ETicketStatus::LOST;
-			}
-			locals.progress.cursorLink = locals.ticket.nextLink;
-			state.mut().tickets.set(locals.link - 1, locals.ticket);
-			--locals.budget;
-		}
-		// Phase 2 allocates the complete pool only across populated tiers using largest-remainder rounding.
+		locals.classifyInput.game = locals.game;
+		locals.classifyInput.progress = locals.progress;
+		locals.classifyInput.budget = locals.budget;
+		CALL(ClassifySettlementTickets, locals.classifyInput, locals.classifyOutput);
+		locals.game = locals.classifyOutput.game;
+		locals.progress = locals.classifyOutput.progress;
+		locals.budget = locals.classifyOutput.budget;
 		if (locals.game.status == EGameStatus::COUNTING && locals.progress.cursorLink == 0)
 		{
-			if (locals.progress.winnerCount == 0)
+			locals.allocateInput.game = locals.game;
+			locals.allocateInput.progress = locals.progress;
+			CALL(AllocateSettlementPayouts, locals.allocateInput, locals.allocateOutput);
+			locals.game = locals.allocateOutput.game;
+			locals.progress = locals.allocateOutput.progress;
+			if (locals.allocateOutput.noWinners)
 			{
 				state.mut().settlements.set(locals.slot, locals.progress);
 				locals.finalizeInput.slot = locals.slot;
@@ -3931,113 +5499,21 @@ private:
 				output.returnCode = locals.finalizeOutput.returnCode;
 				return;
 			}
-			locals.progress.activeTierBps = 0;
-			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
-			{
-				if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0)
-				{
-					locals.progress.activeTierBps += locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i));
-				}
-			}
-			locals.progress.allocatedPool = 0;
-			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
-			{
-				if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) == 0)
-				{
-					continue;
-				}
-				locals.tierPool = mulDiv(locals.progress.prizePoolSnapshot, locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
-				                         locals.progress.activeTierBps);
-				locals.fraction = mulMod(locals.progress.prizePoolSnapshot, locals.game.tierWeightsBps.get(static_cast<uint16>(locals.i)),
-				                         locals.progress.activeTierBps);
-				locals.progress.tierPools.set(static_cast<uint16>(locals.i), locals.tierPool);
-				locals.progress.tierFractions.set(static_cast<uint16>(locals.i), locals.fraction);
-				locals.progress.allocatedPool = sadd(locals.progress.allocatedPool, locals.tierPool);
-			}
-			locals.remainder = locals.progress.prizePoolSnapshot - locals.progress.allocatedPool;
-			while (locals.remainder > 0)
-			{
-				locals.foundTier = false;
-				locals.bestFraction = 0;
-				locals.bestTier = 0;
-				for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
-				{
-					locals.fraction = locals.progress.tierFractions.get(static_cast<uint16>(locals.i));
-					if (locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0 && locals.fraction != PLDT_UINT64_SENTINEL &&
-					    (!locals.foundTier || locals.fraction > locals.bestFraction))
-					{
-						locals.foundTier = true;
-						locals.bestFraction = locals.fraction;
-						locals.bestTier = static_cast<uint16>(locals.i);
-					}
-				}
-				locals.progress.tierPools.set(locals.bestTier, locals.progress.tierPools.get(locals.bestTier) + 1);
-				locals.progress.tierFractions.set(locals.bestTier, PLDT_UINT64_SENTINEL);
-				--locals.remainder;
-			}
-			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
-			{
-				locals.count = locals.progress.tierWinnerCount.get(static_cast<uint16>(locals.i));
-				if (locals.count == 0)
-				{
-					continue;
-				}
-				locals.bonusCount = locals.progress.tierBonusCount.get(static_cast<uint16>(locals.i));
-				locals.totalWeight = smul(locals.count - locals.bonusCount, static_cast<uint64>(PLDT_BONUS_MULTIPLIER_SCALE));
-				locals.totalWeight = sadd(locals.totalWeight, smul(locals.bonusCount, static_cast<uint64>(locals.game.bonusMultiplierBps)));
-				locals.tierPool = locals.progress.tierPools.get(static_cast<uint16>(locals.i));
-				locals.progress.normalPayout.set(static_cast<uint16>(locals.i),
-				                                 mulDiv(locals.tierPool, PLDT_BONUS_MULTIPLIER_SCALE, locals.totalWeight));
-				locals.progress.bonusPayout.set(static_cast<uint16>(locals.i),
-				                                mulDiv(locals.tierPool, locals.game.bonusMultiplierBps, locals.totalWeight));
-				locals.floorSum = smul(locals.count - locals.bonusCount, locals.progress.normalPayout.get(static_cast<uint16>(locals.i)));
-				locals.floorSum = sadd(locals.floorSum, smul(locals.bonusCount, locals.progress.bonusPayout.get(static_cast<uint16>(locals.i))));
-				locals.progress.tierRemainder.set(static_cast<uint16>(locals.i), locals.tierPool - locals.floorSum);
-			}
-			locals.progress.cursorLink = locals.game.firstTicketLink;
-			locals.game.winnerCount = locals.progress.winnerCount;
-			locals.game.status = EGameStatus::PAYING;
 		}
-		// Phase 3 transfers bounded winner payouts and advances only after each transfer succeeds.
-		while (locals.budget > 0 && locals.game.status == EGameStatus::PAYING && locals.progress.cursorLink != 0)
+		locals.payInput.game = locals.game;
+		locals.payInput.progress = locals.progress;
+		locals.payInput.budget = locals.budget;
+		CALL(PaySettlementTickets, locals.payInput, locals.payOutput);
+		locals.game = locals.payOutput.game;
+		locals.progress = locals.payOutput.progress;
+		locals.budget = locals.payOutput.budget;
+		if (locals.payOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.link = locals.progress.cursorLink;
-			locals.ticket = state.get().tickets.get(locals.link - 1);
-			if (locals.ticket.winnerWeight == 0)
-			{
-				locals.ticket.status = ETicketStatus::LOST;
-			}
-			else
-			{
-				locals.payout = locals.ticket.bonusQualified ? locals.progress.bonusPayout.get(locals.ticket.tierIndex)
-				                                             : locals.progress.normalPayout.get(locals.ticket.tierIndex);
-				if (locals.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
-				{
-					++locals.payout;
-				}
-				locals.transferInput.game = locals.game;
-				locals.transferInput.destination = locals.ticket.player;
-				locals.transferInput.amount = locals.payout;
-				CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
-				if (locals.transferOutput.transferResult < 0)
-				{
-					state.mut().settlements.set(locals.slot, locals.progress);
-					state.mut().games.set(locals.slot, locals.game);
-					output.actionsUsed = input.actionBudget - locals.budget;
-					output.returnCode = EReturnCode::TRANSFER_FAILED;
-					return;
-				}
-				locals.ticket.payout = locals.payout;
-				locals.ticket.status = ETicketStatus::PAID;
-				locals.game.totalPaid = sadd(locals.game.totalPaid, locals.payout);
-				if (locals.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
-				{
-					locals.progress.tierRemainder.set(locals.ticket.tierIndex, locals.progress.tierRemainder.get(locals.ticket.tierIndex) - 1);
-				}
-			}
-			locals.progress.cursorLink = locals.ticket.nextLink;
-			state.mut().tickets.set(locals.link - 1, locals.ticket);
-			--locals.budget;
+			state.mut().settlements.set(locals.slot, locals.progress);
+			state.mut().games.set(locals.slot, locals.game);
+			output.actionsUsed = input.actionBudget - locals.budget;
+			output.returnCode = locals.payOutput.returnCode;
+			return;
 		}
 		// A settled round must distribute the snapshot exactly before terminal accounting can begin.
 		state.mut().settlements.set(locals.slot, locals.progress);
@@ -4061,6 +5537,239 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	PRIVATE_PROCEDURE_WITH_LOCALS(FreezeFinalizationState)
+	{
+		output.game = input.game;
+		if (output.game.status == EGameStatus::FINALIZING)
+		{
+			return;
+		}
+		output.game.finalizingRoundReason = input.reason;
+		output.game.finalizingStopReason = EGameStopReason::NONE;
+		if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
+		    input.reason == EGameTerminalReason::OWNER_CANCELLED)
+		{
+			output.game.creatorBalance = sadd(output.game.creatorBalance, output.game.prizePool);
+		}
+		if (output.game.creatorRevenueMode == ECreatorRevenueMode::REINVEST)
+		{
+			locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - output.game.creatorBalance;
+			locals.amountToCredit = output.game.creatorRevenue < locals.availableCredit ? output.game.creatorRevenue : locals.availableCredit;
+			output.game.creatorBalance = sadd(output.game.creatorBalance, locals.amountToCredit);
+			output.game.pendingCreatorCurrencyPayout =
+			    sadd(output.game.pendingCreatorCurrencyPayout, output.game.creatorRevenue - locals.amountToCredit);
+		}
+		else
+		{
+			output.game.pendingCreatorCurrencyPayout = sadd(output.game.pendingCreatorCurrencyPayout, output.game.creatorRevenue);
+		}
+		output.game.creatorRevenue = 0;
+		if (output.game.stopRequested || input.reason == EGameTerminalReason::OWNER_CANCELLED)
+		{
+			output.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
+		}
+		else if (output.game.mode == EGameMode::ONE_SHOT)
+		{
+			output.game.finalizingStopReason = EGameStopReason::ONE_SHOT_COMPLETE;
+		}
+		else
+		{
+			if (output.game.pendingEconomics.isSet)
+			{
+				output.game.ticketPrice = output.game.pendingEconomics.ticketPrice;
+				output.game.creatorPrizeSeed = output.game.pendingEconomics.creatorPrizeSeed;
+				output.game.ticketLimit = output.game.pendingEconomics.ticketLimit;
+				output.game.playerTicketLimit = output.game.pendingEconomics.playerTicketLimit;
+				output.game.creatorFeePercent = output.game.pendingEconomics.creatorFeePercent;
+				output.game.creatorRevenueMode = output.game.pendingEconomics.creatorRevenueMode;
+				setMemory(output.game.pendingEconomics, 0);
+			}
+			if (output.game.runCredit < output.game.roundFeeSnapshot || output.game.creatorBalance < output.game.creatorPrizeSeed)
+			{
+				output.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
+			}
+		}
+		if (output.game.finalizingStopReason != EGameStopReason::NONE)
+		{
+			output.game.pendingRunCreditPayout = output.game.runCredit;
+			output.game.runCredit = 0;
+			output.game.pendingCreatorBalancePayout = output.game.creatorBalance;
+			output.game.creatorBalance = 0;
+		}
+		output.game.status = EGameStatus::FINALIZING;
+		state.mut().games.set(input.slot, output.game);
+	}
+
+	PRIVATE_PROCEDURE(ResolveNextRoundSchedule)
+	{
+		output.game = input.game;
+		if (output.game.finalizingStopReason != EGameStopReason::NONE)
+		{
+			return;
+		}
+		output.nextStartAt = qpi.now();
+		output.nextDrawAt = output.nextStartAt;
+		if (!output.nextDrawAt.addMicrosec(static_cast<sint64>(output.game.roundDurationMicroseconds)))
+		{
+			output.game.finalizingStopReason = EGameStopReason::SCHEDULE_EXHAUSTED;
+			output.game.pendingRunCreditPayout = output.game.runCredit;
+			output.game.runCredit = 0;
+			output.game.pendingCreatorBalancePayout = output.game.creatorBalance;
+			output.game.creatorBalance = 0;
+			state.mut().games.set(input.slot, output.game);
+		}
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(DrainFinalizationPayouts)
+	{
+		output.game = input.game;
+		if (output.game.currencyMode == ECurrencyMode::QUBIC && output.game.pendingCreatorCurrencyPayout > 0)
+		{
+			locals.transferResult = qpi.transfer(output.game.owner, static_cast<sint64>(output.game.pendingCreatorCurrencyPayout));
+			if (locals.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+			// Persist the completed payout before later retryable wallet operations to prevent duplicate transfers.
+			output.game.pendingCreatorCurrencyPayout = 0;
+			state.mut().games.set(input.slot, output.game);
+		}
+		if (!state.get().wallets.get(output.game.owner, locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		// Validate wallet capacity before the remaining creator ledgers are transferred or cleared.
+		locals.qubicAmount = output.game.pendingRunCreditPayout;
+		locals.assetAmount = 0;
+		if (output.game.currencyMode == ECurrencyMode::QUBIC)
+		{
+			locals.qubicAmount = sadd(locals.qubicAmount, output.game.pendingCreatorBalancePayout);
+		}
+		else
+		{
+			locals.assetAmount = sadd(output.game.pendingCreatorCurrencyPayout, output.game.pendingCreatorBalancePayout);
+		}
+		if (!prepareWalletQubicCredit(locals.wallet, locals.qubicAmount, output.game.serviceCreditBalance, locals.serviceCreditReturned))
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		if (output.game.currencyMode == ECurrencyMode::ASSET && locals.assetAmount > 0)
+		{
+			// Keep the pending payout intact until both the asset transfer and wallet credit succeed.
+			locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
+			if (locals.walletAssetFound)
+			{
+				locals.walletAssetSlot = static_cast<uint8>(locals.i);
+			}
+			if (!locals.walletAssetFound || locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - locals.assetAmount)
+			{
+				output.returnCode = EReturnCode::STORAGE_FULL;
+				return;
+			}
+			locals.transferResult = qpi.transferShareOwnershipAndPossession(output.game.currencyAsset.assetName, output.game.currencyAsset.issuer,
+			                                                                SELF, SELF, static_cast<sint64>(locals.assetAmount), output.game.owner);
+			if (locals.transferResult < 0)
+			{
+				output.returnCode = EReturnCode::TRANSFER_FAILED;
+				return;
+			}
+			locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.assetAmount);
+			locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
+		}
+		// Clear pending ledgers only in the same commit that credits their destination wallet.
+		locals.wallet.serviceCredit = sadd(locals.wallet.serviceCredit, locals.serviceCreditReturned);
+		locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.qubicAmount - locals.serviceCreditReturned);
+		output.game.serviceCreditBalance -= locals.serviceCreditReturned;
+		output.game.pendingCreatorCurrencyPayout = 0;
+		output.game.pendingCreatorBalancePayout = 0;
+		output.game.pendingRunCreditPayout = 0;
+		state.mut().wallets.replace(output.game.owner, locals.wallet);
+		state.mut().games.set(input.slot, output.game);
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	PRIVATE_FUNCTION(ValidateRoundFeeCapacity)
+	{
+		output.returnCode = EReturnCode::SUCCESS;
+		if (input.game.finalizingStopReason != EGameStopReason::NONE)
+		{
+			return;
+		}
+		calculatePlatformShares(input.game.roundFeeSnapshot, output.developer1Fee, output.developer2Fee, output.dividendFee);
+		if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
+		                                output.developer1Fee, output.developer2Fee, output.dividendFee))
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+		}
+	}
+
+	PRIVATE_FUNCTION(BuildRoundResult)
+	{
+		setMemory(output.result, 0);
+		output.result.tierWeightsBps = input.game.tierWeightsBps;
+		output.result.winningDigits = input.progress.winningDigits;
+		output.result.currencyAsset = input.game.currencyAsset;
+		output.result.owner = input.game.owner;
+		output.result.startAt = input.game.startAt;
+		output.result.drawAt = input.game.drawAt;
+		output.result.gameId = input.game.gameId;
+		output.result.roundNumber = input.game.roundNumber;
+		output.result.resultSequence = state.get().resultCounter + 1;
+		output.result.prizePool = input.game.prizePool;
+		output.result.totalPaid = input.game.totalPaid;
+		output.result.firstTicketLink = input.game.firstTicketLink;
+		output.result.settledTick = qpi.tick();
+		output.result.ticketCount = input.game.ticketCount;
+		output.result.winnerCount = input.game.winnerCount;
+		output.result.codeLength = input.game.codeLength;
+		output.result.currencyMode = input.game.currencyMode;
+		output.result.mode = input.game.mode;
+		output.result.terminalReason = input.game.finalizingRoundReason;
+		output.result.detailsAvailable = true;
+		output.result.gameStopReason = input.game.finalizingStopReason;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(CommitFinalizedRound)
+	{
+		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
+		state.mut().results.set(locals.resultIndex, input.result);
+		state.mut().resultCounter = state.get().resultCounter + 1;
+		if (input.result.gameStopReason != EGameStopReason::NONE)
+		{
+			locals.clearInput.slot = input.slot;
+			CALL(ClearGameSlot, locals.clearInput, locals.clearOutput);
+			output.returnCode = EReturnCode::SUCCESS;
+			return;
+		}
+		locals.game = input.game;
+		locals.game.runCredit -= locals.game.roundFeeSnapshot;
+		locals.game.serviceCreditBalance -=
+		    locals.game.serviceCreditBalance < locals.game.roundFeeSnapshot ? locals.game.serviceCreditBalance : locals.game.roundFeeSnapshot;
+		locals.game.creatorBalance -= locals.game.creatorPrizeSeed;
+		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, input.fees.developer1Fee);
+		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, input.fees.developer2Fee);
+		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, input.fees.dividendFee);
+		++locals.game.roundNumber;
+		locals.game.startAt = input.nextStartAt;
+		locals.game.drawAt = input.nextDrawAt;
+		locals.game.prizePool = locals.game.creatorPrizeSeed;
+		locals.game.totalRevenue = 0;
+		locals.game.totalPaid = 0;
+		locals.game.firstTicketLink = 0;
+		locals.game.lastTicketLink = 0;
+		locals.game.ticketCount = 0;
+		locals.game.winnerCount = 0;
+		locals.game.status = EGameStatus::SELLING;
+		locals.progress = input.progress;
+		setMemory(locals.progress, 0);
+		state.mut().settlements.set(input.slot, locals.progress);
+		state.mut().games.set(input.slot, locals.game);
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
 	PRIVATE_PROCEDURE_WITH_LOCALS(FinalizeGame)
 	{
 		// Reserve a result slot before transfers so unreclaimed ticket chains can never become unreachable.
@@ -4074,196 +5783,77 @@ private:
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
-		// Finalization is resumable for both modes: ledgers are frozen once, then pending transfers are retried safely.
-		if (locals.game.status != EGameStatus::FINALIZING)
+		locals.freezeInput.game = locals.game;
+		locals.freezeInput.slot = input.slot;
+		locals.freezeInput.reason = input.reason;
+		CALL(FreezeFinalizationState, locals.freezeInput, locals.freezeOutput);
+		locals.game = locals.freezeOutput.game;
+		locals.scheduleInput.game = locals.game;
+		locals.scheduleInput.slot = input.slot;
+		CALL(ResolveNextRoundSchedule, locals.scheduleInput, locals.scheduleOutput);
+		locals.game = locals.scheduleOutput.game;
+		locals.payoutsInput.game = locals.game;
+		locals.payoutsInput.slot = input.slot;
+		CALL(DrainFinalizationPayouts, locals.payoutsInput, locals.payoutsOutput);
+		locals.game = locals.payoutsOutput.game;
+		if (locals.payoutsOutput.returnCode != EReturnCode::SUCCESS)
 		{
-			locals.game.finalizingRoundReason = input.reason;
-			locals.game.finalizingStopReason = EGameStopReason::NONE;
-			if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
-			    input.reason == EGameTerminalReason::OWNER_CANCELLED)
-			{
-				// The purchase and funding guards preserve creatorBalance + prizePool <= MAX_AMOUNT.
-				locals.game.creatorBalance = sadd(locals.game.creatorBalance, locals.game.prizePool);
-			}
-			if (locals.game.creatorRevenueMode == ECreatorRevenueMode::REINVEST)
-			{
-				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.game.creatorBalance;
-				locals.amountToCredit = locals.game.creatorRevenue < locals.availableCredit ? locals.game.creatorRevenue : locals.availableCredit;
-				locals.game.creatorBalance = sadd(locals.game.creatorBalance, locals.amountToCredit);
-				locals.game.pendingCreatorCurrencyPayout =
-				    sadd(locals.game.pendingCreatorCurrencyPayout, locals.game.creatorRevenue - locals.amountToCredit);
-			}
-			else
-			{
-				locals.game.pendingCreatorCurrencyPayout = sadd(locals.game.pendingCreatorCurrencyPayout, locals.game.creatorRevenue);
-			}
-			locals.game.creatorRevenue = 0;
-			if (locals.game.stopRequested || input.reason == EGameTerminalReason::OWNER_CANCELLED)
-			{
-				locals.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
-			}
-			else if (locals.game.mode == EGameMode::ONE_SHOT)
-			{
-				locals.game.finalizingStopReason = EGameStopReason::ONE_SHOT_COMPLETE;
-			}
-			else
-			{
-				if (locals.game.pendingEconomics.isSet)
-				{
-					locals.game.ticketPrice = locals.game.pendingEconomics.ticketPrice;
-					locals.game.creatorPrizeSeed = locals.game.pendingEconomics.creatorPrizeSeed;
-					locals.game.ticketLimit = locals.game.pendingEconomics.ticketLimit;
-					locals.game.playerTicketLimit = locals.game.pendingEconomics.playerTicketLimit;
-					locals.game.creatorFeePercent = locals.game.pendingEconomics.creatorFeePercent;
-					locals.game.creatorRevenueMode = locals.game.pendingEconomics.creatorRevenueMode;
-					setMemory(locals.game.pendingEconomics, 0);
-				}
-				if (locals.game.runCredit < locals.game.roundFeeSnapshot || locals.game.creatorBalance < locals.game.creatorPrizeSeed)
-				{
-					locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
-				}
-			}
-			if (locals.game.finalizingStopReason != EGameStopReason::NONE)
-			{
-				locals.game.pendingRunCreditPayout = locals.game.runCredit;
-				locals.game.runCredit = 0;
-				locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
-				locals.game.creatorBalance = 0;
-			}
-			locals.game.status = EGameStatus::FINALIZING;
-			state.mut().games.set(input.slot, locals.game);
-		}
-		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
-		{
-			locals.nextStartAt = qpi.now();
-			locals.nextDrawAt = locals.nextStartAt;
-			if (!locals.nextDrawAt.addMicrosec(static_cast<sint64>(locals.game.roundDurationMicroseconds)))
-			{
-				locals.game.finalizingStopReason = EGameStopReason::SCHEDULE_EXHAUSTED;
-				locals.game.pendingRunCreditPayout = locals.game.runCredit;
-				locals.game.runCredit = 0;
-				locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
-				locals.game.creatorBalance = 0;
-				state.mut().games.set(input.slot, locals.game);
-			}
-		}
-		// Drain owner payouts individually; a failed transfer leaves its pending ledger intact for the next tick.
-		if (locals.game.pendingCreatorCurrencyPayout > 0)
-		{
-			locals.transferInput.game = locals.game;
-			locals.transferInput.destination = locals.game.owner;
-			locals.transferInput.amount = locals.game.pendingCreatorCurrencyPayout;
-			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
-			if (locals.transferOutput.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-			locals.game.pendingCreatorCurrencyPayout = 0;
-			state.mut().games.set(input.slot, locals.game);
-		}
-		if (locals.game.pendingCreatorBalancePayout > 0)
-		{
-			locals.transferInput.game = locals.game;
-			locals.transferInput.destination = locals.game.owner;
-			locals.transferInput.amount = locals.game.pendingCreatorBalancePayout;
-			CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
-			if (locals.transferOutput.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-			locals.game.pendingCreatorBalancePayout = 0;
-			state.mut().games.set(input.slot, locals.game);
-		}
-		if (locals.game.pendingRunCreditPayout > 0)
-		{
-			locals.transferResult = qpi.transfer(locals.game.owner, static_cast<sint64>(locals.game.pendingRunCreditPayout));
-			if (locals.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-			locals.game.pendingRunCreditPayout = 0;
-			state.mut().games.set(input.slot, locals.game);
-		}
-		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
-		{
-			locals.developer1Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
-			locals.developer2Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
-			locals.dividendFee = locals.game.roundFeeSnapshot - locals.developer1Fee - locals.developer2Fee;
-			if (state.get().developer1Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer1Fee ||
-			    state.get().developer2Accrued > PLDT_MAX_TRANSFER_AMOUNT - locals.developer2Fee ||
-			    state.get().dividendAccrued > PLDT_MAX_TRANSFER_AMOUNT - locals.dividendFee)
-			{
-				output.returnCode = EReturnCode::STORAGE_FULL;
-				return;
-			}
-		}
-		// Publish the completed round before either clearing the game or committing its successor.
-		setMemory(locals.result, 0);
-		locals.result.tierWeightsBps = locals.game.tierWeightsBps;
-		locals.result.winningDigits = locals.progress.winningDigits;
-		locals.result.currencyAsset = locals.game.currencyAsset;
-		locals.result.owner = locals.game.owner;
-		locals.result.startAt = locals.game.startAt;
-		locals.result.drawAt = locals.game.drawAt;
-		locals.result.gameId = locals.game.gameId;
-		locals.result.roundNumber = locals.game.roundNumber;
-		locals.result.resultSequence = state.get().resultCounter + 1;
-		locals.result.prizePool = locals.game.prizePool;
-		locals.result.totalPaid = locals.game.totalPaid;
-		locals.result.firstTicketLink = locals.game.firstTicketLink;
-		locals.result.settledTick = qpi.tick();
-		locals.result.ticketCount = locals.game.ticketCount;
-		locals.result.winnerCount = locals.game.winnerCount;
-		locals.result.codeLength = locals.game.codeLength;
-		locals.result.currencyMode = locals.game.currencyMode;
-		locals.result.mode = locals.game.mode;
-		locals.result.terminalReason = locals.game.finalizingRoundReason;
-		locals.result.detailsAvailable = true;
-		locals.result.gameStopReason = locals.game.finalizingStopReason;
-		if (locals.result.gameStopReason != EGameStopReason::NONE)
-		{
-			locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
-			state.mut().results.set(locals.resultIndex, locals.result);
-			state.mut().resultCounter = state.get().resultCounter + 1;
-			locals.clearInput.slot = input.slot;
-			CALL(ClearGameSlot, locals.clearInput, locals.clearOutput);
-			output.returnCode = EReturnCode::SUCCESS;
+			output.returnCode = locals.payoutsOutput.returnCode;
 			return;
 		}
-		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
-		state.mut().results.set(locals.resultIndex, locals.result);
-		state.mut().resultCounter = state.get().resultCounter + 1;
-		// Charge and initialize the next round only after result publication and all terminal transfers succeed.
-		locals.game.runCredit -= locals.game.roundFeeSnapshot;
-		locals.game.creatorBalance -= locals.game.creatorPrizeSeed;
-		locals.developer1Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
-		locals.developer2Fee = mulDiv(locals.game.roundFeeSnapshot, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
-		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
-		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
-		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.game.roundFeeSnapshot - locals.developer1Fee - locals.developer2Fee);
-		++locals.game.roundNumber;
-		locals.game.startAt = locals.nextStartAt;
-		locals.game.drawAt = locals.nextDrawAt;
-		locals.game.prizePool = locals.game.creatorPrizeSeed;
-		locals.game.totalRevenue = 0;
-		locals.game.totalPaid = 0;
-		locals.game.firstTicketLink = 0;
-		locals.game.lastTicketLink = 0;
-		locals.game.ticketCount = 0;
-		locals.game.winnerCount = 0;
-		locals.game.status = EGameStatus::SELLING;
-		setMemory(locals.progress, 0);
-		state.mut().settlements.set(input.slot, locals.progress);
-		state.mut().games.set(input.slot, locals.game);
-		output.returnCode = EReturnCode::SUCCESS;
+		locals.feeInput.game = locals.game;
+		CALL(ValidateRoundFeeCapacity, locals.feeInput, locals.feeOutput);
+		if (locals.feeOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			output.returnCode = locals.feeOutput.returnCode;
+			return;
+		}
+		locals.resultInput.game = locals.game;
+		locals.resultInput.progress = locals.progress;
+		CALL(BuildRoundResult, locals.resultInput, locals.resultOutput);
+		locals.commitInput.game = locals.game;
+		locals.commitInput.progress = locals.progress;
+		locals.commitInput.result = locals.resultOutput.result;
+		locals.commitInput.nextStartAt = locals.scheduleOutput.nextStartAt;
+		locals.commitInput.nextDrawAt = locals.scheduleOutput.nextDrawAt;
+		locals.commitInput.fees = locals.feeOutput;
+		locals.commitInput.slot = input.slot;
+		CALL(CommitFinalizedRound, locals.commitInput, locals.commitOutput);
+		output.returnCode = locals.commitOutput.returnCode;
 	}
 
 	PRIVATE_PROCEDURE_WITH_LOCALS(ClearGameSlot)
 	{
 		locals.game = state.get().games.get(input.slot);
+		if (state.get().wallets.get(locals.game.owner, locals.wallet))
+		{
+			if (locals.wallet.activeGameCount > 0)
+			{
+				--locals.wallet.activeGameCount;
+			}
+			if (locals.game.currencyMode == ECurrencyMode::ASSET)
+			{
+				locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
+				if (locals.walletAssetFound)
+				{
+					locals.walletAssetSlot = static_cast<uint8>(locals.i);
+				}
+				if (locals.walletAssetFound)
+				{
+					if (locals.walletAsset.activeGameReferences > 0)
+					{
+						--locals.walletAsset.activeGameReferences;
+					}
+					if (locals.walletAsset.activeGameReferences == 0 && locals.walletAsset.balance == 0)
+					{
+						setMemory(locals.walletAsset, 0);
+						--locals.wallet.assetCount;
+					}
+					locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
+				}
+			}
+			state.mut().wallets.replace(locals.game.owner, locals.wallet);
+		}
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.assetAccountingLink > 0)
 		{
 			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
@@ -4304,7 +5894,7 @@ private:
 		locals.now = qpi.now();
 		locals.lifecycleInput.game = locals.game;
 		locals.lifecycleInput.now = locals.now;
-		CALL(EvaluateGameLifecycle, locals.lifecycleInput, locals.lifecycleOutput);
+		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
 		if (locals.lifecycleOutput.action == EGameLifecycleAction::OPEN_SALES)
 		{
 			locals.game.status = locals.lifecycleOutput.effectiveStatus;
@@ -4348,6 +5938,7 @@ private:
 		{
 			return;
 		}
+
 		locals.budget = input.actionBudget;
 		locals.resultScans = 0;
 		// Mark a result's details unavailable before recycling its ticket chain, preserving lookup consistency.
@@ -4370,10 +5961,12 @@ private:
 				}
 				state.mut().reclaimResultCounter = state.get().reclaimResultCounter + 1;
 			}
+
 			if (!state.get().reclaimingTickets)
 			{
 				break;
 			}
+
 			while (state.get().reclaimTicketLink != 0 && locals.budget > 0)
 			{
 				locals.ticketSlot = state.get().reclaimTicketLink - 1;
@@ -4386,13 +5979,76 @@ private:
 				state.mut().reclaimTicketLink = locals.nextLink;
 				--locals.budget;
 			}
+
 			if (state.get().reclaimTicketLink == 0)
 			{
 				state.mut().reclaimingTickets = false;
 				state.mut().reclaimResultCounter = state.get().reclaimResultCounter + 1;
 			}
 		}
+
 		output.actionsUsed = input.actionBudget - locals.budget;
+	}
+
+	/** Returns whether two asset descriptors identify the same issuance. */
+	static bool isSameAsset(const Asset& left, const Asset& right) { return left.assetName == right.assetName && left.issuer == right.issuer; }
+
+	/** Finds an active wallet asset and returns its slot and value through caller-owned storage. */
+	static bool findWalletAsset(const CreatorWallet& wallet, const Asset& asset, uint64& index, WalletAssetBalance& walletAsset)
+	{
+		for (index = 0; index < wallet.assets.capacity(); ++index)
+		{
+			walletAsset = wallet.assets.get(index);
+			if (walletAsset.isActive && isSameAsset(walletAsset.asset, asset))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Splits platform revenue while assigning integer-division remainder to dividends. */
+	static void calculatePlatformShares(const uint64 total, uint64& developer1, uint64& developer2, uint64& dividend)
+	{
+		developer1 = mulDiv(total, PLDT_PLATFORM_DEV1_SHARE_PERCENT, 100ULL);
+		developer2 = mulDiv(total, PLDT_PLATFORM_DEV2_SHARE_PERCENT, 100ULL);
+		dividend = total - developer1 - developer2;
+	}
+
+	/** Checks whether three platform accrual buckets can accept their respective increments. */
+	static bool hasPlatformAccrualCapacity(const uint64 developer1Accrued, const uint64 developer2Accrued, const uint64 dividendAccrued,
+	                                       const uint64 developer1Increment, const uint64 developer2Increment, const uint64 dividendIncrement)
+	{
+		return developer1Accrued <= PLDT_MAX_TRANSFER_AMOUNT - developer1Increment &&
+		       developer2Accrued <= PLDT_MAX_TRANSFER_AMOUNT - developer2Increment && dividendAccrued <= PLDT_MAX_TRANSFER_AMOUNT - dividendIncrement;
+	}
+
+	/** Calculates the wallet buckets used for a Qubic credit and validates their capacity. */
+	static bool prepareWalletQubicCredit(const CreatorWallet& wallet, const uint64 amount, const uint64 serviceCreditBalance,
+	                                     uint64& serviceCreditReturned)
+	{
+		serviceCreditReturned = serviceCreditBalance < amount ? serviceCreditBalance : amount;
+		return wallet.serviceCredit <= PLDT_MAX_TRANSFER_AMOUNT - serviceCreditReturned &&
+		       wallet.refundableQubic <= PLDT_MAX_TRANSFER_AMOUNT - (amount - serviceCreditReturned);
+	}
+
+	/** Resolves a currently active game and verifies its owner. */
+	static EReturnCode resolveOwnedGame(const QPI::ContractState<StateData, CONTRACT_INDEX>& state, const uint64 gameId, const id& owner,
+	                                    uint16& slot, Game& game)
+	{
+		slot = gameSlot(gameId);
+		if (!isGameIdValid(state, gameId))
+		{
+			return EReturnCode::INVALID_GAME;
+		}
+		game = state.get().games.get(slot);
+		return game.owner == owner ? EReturnCode::SUCCESS : EReturnCode::ACCESS_DENIED;
+	}
+
+	/** Calculates an automation scan slot relative to the current cursor. */
+	static constexpr uint16 automationGameSlot(const uint16 inspected, const uint16 automationCursor)
+	{
+		return static_cast<uint16>(mod(static_cast<uint64>(automationCursor + inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
 	}
 
 	/** Extracts the fixed game slot encoded in a generation-aware game id. */
