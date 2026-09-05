@@ -278,6 +278,20 @@
 
 #endif
 
+#undef CONTRACT_INDEX
+#undef CONTRACT_STATE_TYPE
+#undef CONTRACT_STATE2_TYPE
+
+#ifdef NO_QUSINO
+#define PLDT_CONTRACT_INDEX 26
+#else
+#define PLDT_CONTRACT_INDEX 27
+#endif
+#define CONTRACT_INDEX PLDT_CONTRACT_INDEX
+#define CONTRACT_STATE_TYPE PLDT
+#define CONTRACT_STATE2_TYPE PLDT2
+#include "contracts/PulseEditor.h"
+
 // new contracts should be added above this line
 
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
@@ -392,6 +406,7 @@ constexpr struct ContractDescription
 #ifndef NO_QUSINO
     {"QUSINO", 208, 10000, sizeof(QUSINO::StateData)}, // proposal in epoch 206, IPO in 207, construction and first use in 208
 #endif
+    {"PLDT", 209, 10000, sizeof(PLDT::StateData)},
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     {"TESTEXA", 138, 10000, sizeof(TESTEXA::StateData)},
@@ -516,6 +531,7 @@ static void initializeContracts()
 #ifndef NO_QUSINO
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QUSINO);
 #endif
+    REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(PLDT);
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXA);

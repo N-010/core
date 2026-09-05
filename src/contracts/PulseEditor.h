@@ -25,14 +25,22 @@ constexpr uint16 PLDT_RESULT_STORAGE_SIZE = PLDT_RESULT_HISTORY_SIZE * 2;
 constexpr uint16 PLDT_MAX_TICKETS_PER_GAME = 1024;
 /** Maximum tickets accepted atomically by one batch purchase. */
 constexpr uint16 PLDT_MAX_BATCH_TICKETS = 16;
+/** Maximum number of unique player summaries returned by one query page. */
+constexpr uint16 PLDT_PLAYERS_PAGE_CAPACITY = 64;
+/** Collision-resolving lookup capacity for unique players in one round. */
+constexpr uint16 PLDT_PLAYER_LOOKUP_CAPACITY = PLDT_MAX_TICKETS_PER_GAME * 2;
 /** Maximum asset holdings that may qualify a player for the bonus multiplier. */
 constexpr uint16 PLDT_MAX_BONUS_ASSETS = 8;
 /** Maximum count of digits in a submitted or winning code. */
 constexpr uint8 PLDT_MAX_CODE_LENGTH = 10;
+/** Minimum code length that keeps the game space non-trivial. */
+constexpr uint8 PLDT_MIN_CODE_LENGTH = 4;
 /** Power-of-two digit-array capacity required by QPI Array. */
 constexpr uint8 PLDT_DIGITS_ALIGNED = 16;
 /** Largest digit value supported by the fixed uniqueness workspace. */
 constexpr uint8 PLDT_MAX_DIGIT = PLDT_MAX_CODE_LENGTH - 1;
+/** Minimum inclusive maximum digit accepted by a game. */
+constexpr uint8 PLDT_MIN_MAX_DIGIT = 7;
 /** Power-of-two capacity of the digit-presence workspace. */
 constexpr uint8 PLDT_DIGIT_BUCKETS = 16;
 /** Number of possible exact/misplaced match tiers for the maximum code length. */
@@ -61,14 +69,18 @@ constexpr uint8 PLDT_PLATFORM_DEV2_SHARE_PERCENT = 25;
 constexpr uint8 PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
 /** Default Qubic automation fee reserved per game round. */
 constexpr uint64 PLDT_DEFAULT_ROUND_FEE = 10000;
-/** Default non-refundable service credit required to open a creator wallet. */
+/** Default restricted service credit required to open a creator wallet. */
 constexpr uint64 PLDT_DEFAULT_WALLET_CREATION_FEE = 1000000;
+/** Fee burned by creator game-management mutations after authorization. */
+constexpr uint64 PLDT_OPERATION_FEE = 100;
 /** Maximum number of creator wallets retained in contract state. */
 constexpr uint16 PLDT_MAX_WALLETS = 1024;
 /** Internal power-of-two wallet map capacity kept below its high-load range. */
 constexpr uint16 PLDT_WALLET_MAP_CAPACITY = 2048;
 /** Maximum distinct managed assets tracked by one creator wallet. */
 constexpr uint8 PLDT_MAX_WALLET_ASSETS = 16;
+/** Power-of-two capacity covering every possible PLDT shareholder recipient. */
+constexpr uint16 PLDT_MAX_DIVIDEND_RECIPIENTS = 1024;
 /** Tick interval between automated lifecycle scans. */
 constexpr uint32 PLDT_TICK_UPDATE_PERIOD = 100;
 /** Number of game slots inspected during one automation pass. */
@@ -200,15 +212,6 @@ public:
 		PERMANENT,
 	};
 
-	/** Determines whether creator fees are paid out or reinvested. */
-	enum class ECreatorRevenueMode : uint8
-	{
-		/** Creator fees are transferred to the owner after the round. */
-		PAYOUT,
-		/** Creator fees replenish the game's unreserved creator balance. */
-		REINVEST,
-	};
-
 	/** Reason a game stops instead of scheduling another round. */
 	enum class EGameStopReason : uint8
 	{
@@ -315,8 +318,6 @@ public:
 		uint16 playerTicketLimit;
 		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
-		/** Selects payout or reinvestment of creator fees. */
-		ECreatorRevenueMode creatorRevenueMode;
 		/** Whether pending economics contain a complete validated replacement. */
 		bit isSet;
 	};
@@ -359,14 +360,14 @@ public:
 		uint64 runCredit;
 		/** Unreserved game currency available for later seeds or terminal return. */
 		uint64 creatorBalance;
-		/** Creator-fee currency waiting for resumable owner transfer. */
+		/** Creator fees awaiting resumable credit to the internal wallet. */
 		uint64 pendingCreatorCurrencyPayout;
-		/** Unused creator-balance currency waiting for stop transfer. */
+		/** Returned pool and unused creator balance awaiting internal wallet credit. */
 		uint64 pendingCreatorBalancePayout;
-		/** Unused Qubic run credit waiting for stop transfer. */
+		/** Unused Qubic run credit awaiting internal wallet credit with preserved provenance. */
 		uint64 pendingRunCreditPayout;
-		/** Non-refundable creator-wallet credit still contained in Qubic game ledgers. */
-		uint64 serviceCreditBalance;
+		/** Service credit provenance still contained exclusively in the run-credit ledger. */
+		uint64 runServiceCredit;
 		/** Fixed start-to-draw interval reused by permanent rounds. */
 		uint64 roundDurationMicroseconds;
 		/** One-based round sequence within a game generation. */
@@ -411,8 +412,6 @@ public:
 		ECurrencyMode currencyMode;
 		/** Game lifetime model: one-shot or permanent. */
 		EGameMode mode;
-		/** Selects payout or reinvestment of creator fees. */
-		ECreatorRevenueMode creatorRevenueMode;
 		/** Round outcome being processed by resumable finalization. */
 		EGameTerminalReason finalizingRoundReason;
 		/** Stop outcome being processed by resumable finalization. */
@@ -571,7 +570,7 @@ public:
 	{
 		/** Fixed-capacity managed-asset ledger. */
 		Array<WalletAssetBalance, PLDT_MAX_WALLET_ASSETS> assets;
-		/** Non-refundable QU consumed before refundable QU when funding games. */
+		/** Restricted QU usable for operation fees/run credit and withdrawable after the last game closes. */
 		uint64 serviceCredit;
 		/** QU that may fund games or be withdrawn by the wallet owner. */
 		uint64 refundableQubic;
@@ -585,6 +584,29 @@ public:
 		uint8 expiryAssetCursor;
 		/** Current wallet lifecycle state. */
 		EWalletStatus status;
+		/** Whether service credit became withdrawable after the wallet's last game closed. */
+		bit serviceCreditUnlocked;
+	};
+
+	/** Snapshot and retry cursor for one in-flight managed-asset dividend. */
+	struct AssetDividendDistribution
+	{
+		/** Shareholders captured before the first external transfer. */
+		Array<id, PLDT_MAX_DIVIDEND_RECIPIENTS> recipients;
+		/** Immutable entitlement paired with each captured shareholder. */
+		Array<uint64, PLDT_MAX_DIVIDEND_RECIPIENTS> amounts;
+		/** Asset whose custody is being distributed. */
+		Asset asset;
+		/** Amount from the snapshot still owed to recipients. */
+		uint64 remainingAmount;
+		/** Asset-accounting slot that owns this liability. */
+		uint16 accountingSlot;
+		/** Number of populated snapshot entries. */
+		uint16 recipientCount;
+		/** First unpaid snapshot entry. */
+		uint16 cursor;
+		/** Whether the snapshot must be resumed before another asset distribution. */
+		bit active;
 	};
 
 	/** All consensus-persistent PulseEditor state; field order is ABI-sensitive. */
@@ -598,12 +620,16 @@ public:
 		Array<SettlementProgress, PLDT_MAX_GAMES> settlements;
 		/** Per-slot generation counters used to create fresh game ids. */
 		Array<uint64, PLDT_MAX_GAMES> generations;
+		/** One-based links connecting cleared game slots for constant-time reuse. */
+		Array<uint16, PLDT_MAX_GAMES> freeGameNext;
 		/** Generation-aware ticket records shared by all games. */
 		Array<Ticket, PLDT_MAX_TICKETS> tickets;
 		/** Bounded ring of published round results. */
 		Array<GameResult, PLDT_RESULT_STORAGE_SIZE> results;
 		/** Working copy of the game currency asset's accrual bucket. */
 		Array<AssetPlatformAccounting, PLDT_MAX_GAMES> assetAccounting;
+		/** Single resumable dividend snapshot; platform withdrawals are serialized around it. */
+		AssetDividendDistribution assetDividendDistribution;
 		/** Entity authorized to change platform configuration and withdraw accruals. */
 		id platformOwner;
 		/** First configured recipient of platform developer fees. */
@@ -636,8 +662,10 @@ public:
 		uint64 resultCounter;
 		/** Total game slots currently occupied. */
 		uint16 activeGameCount;
-		/** Next storage slot from which allocation search resumes. */
-		uint16 allocationCursor;
+		/** One-based head of the reusable game-slot free list. */
+		uint16 freeGameHead;
+		/** First game slot that has never been allocated. */
+		uint16 nextUnusedGameSlot;
 		/** Next game slot from which the periodic scan resumes. */
 		uint16 automationCursor;
 		/** Next raw wallet-map slot from which the periodic scan resumes. */
@@ -658,7 +686,7 @@ public:
 	/** Result of creating a creator wallet. */
 	struct CreateWallet_output
 	{
-		/** Non-refundable service credit assigned to the wallet. */
+		/** Restricted service credit assigned to the wallet. */
 		uint64 serviceCredit;
 		/** Excess invocation reward retained as withdrawable wallet QU. */
 		uint64 refundableQubic;
@@ -678,7 +706,7 @@ public:
 	{
 		/** Managed-asset positions, including positions retained by active games. */
 		Array<WalletAssetBalance, PLDT_MAX_WALLET_ASSETS> assets;
-		/** Non-refundable QU available for game funding. */
+		/** Restricted QU available for operation fees and run credit. */
 		uint64 serviceCredit;
 		/** Withdrawable QU available for game funding. */
 		uint64 refundableQubic;
@@ -692,6 +720,8 @@ public:
 		EWalletStatus status;
 		/** Whether the requested owner has a wallet. */
 		bit found;
+		/** Whether service credit may be withdrawn while no game is active. */
+		bit serviceCreditUnlocked;
 	};
 
 	/** Empty request used to deposit the invocation reward into a wallet. */
@@ -773,8 +803,6 @@ public:
 		ECurrencyMode currencyMode;
 		/** Selects whether the game closes or starts another round after settlement. */
 		EGameMode mode;
-		/** Selects payout or reinvestment of creator fees. */
-		ECreatorRevenueMode creatorRevenueMode;
 		/** Whether a code may contain the same digit more than once. */
 		bit allowRepeatedDigits;
 	};
@@ -823,8 +851,6 @@ public:
 		uint16 playerTicketLimit;
 		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
-		/** Selects payout or reinvestment of creator fees. */
-		ECreatorRevenueMode creatorRevenueMode;
 	};
 
 	/** Result data produced by the update game economics operation. */
@@ -983,7 +1009,9 @@ public:
 	{
 		/** Qubic charged from run credit for each automated round. */
 		uint64 roundFee;
-		/** Invocation reward required to create the game. */
+		/** Wallet fee burned by each authorized creator mutation. */
+		uint64 operationFee;
+		/** Wallet Qubic required for initial run credit and Qubic creator funding. */
 		uint64 initialQubicRequired;
 		/** Asset shares that must be transferred for initial creator funding. */
 		uint64 initialCreatorAssetRequired;
@@ -1131,6 +1159,55 @@ public:
 		EReturnCode returnCode;
 	};
 
+	/** Aggregated ticket and payout data for one unique player in a round. */
+	struct PlayerSummary
+	{
+		/** Player identity, ordered by this player's first ticket in the round. */
+		id player;
+		/** Sum of payout values across all of the player's tickets in the round. */
+		uint64 totalPayout;
+		/** Total number of tickets owned by the player in the round. */
+		uint16 ticketCount;
+		/** Number of tickets whose settlement winner weight is non-zero. */
+		uint16 winningTicketCount;
+		/** Number of tickets whose persisted status is PAID. */
+		uint16 paidTicketCount;
+		/** Number of tickets that qualified for the bonus multiplier. */
+		uint16 bonusQualifiedTicketCount;
+	};
+
+	/** Validated data consumed by the unique-player paging operation. */
+	struct GetPlayers_input
+	{
+		/** Game and round pair whose unique players are requested. */
+		RoundKey roundKey;
+		/** Zero-based number of unique players to skip. */
+		uint64 offset;
+		/** Maximum requested page size; values above 64 are clamped to 64. */
+		uint16 limit;
+		/** Reserved ABI bytes; callers must initialize them to zero. */
+		Array<uint8, 4> padding0;
+		/** Reserved ABI bytes; callers must initialize them to zero. */
+		Array<uint8, 2> padding1;
+	};
+
+	/** Result data produced by the unique-player paging operation. */
+	struct GetPlayers_output
+	{
+		/** Unique player summaries in stable first-ticket order. */
+		Array<PlayerSummary, PLDT_PLAYERS_PAGE_CAPACITY> players;
+		/** Complete unique-player count, independent of offset and limit. */
+		uint64 totalCount;
+		/** Number of valid summaries written into the current page. */
+		uint16 returnedCount;
+		/** Public outcome describing success or the lookup failure. */
+		EReturnCode returnCode;
+		/** Reserved ABI bytes, always returned as zero. */
+		Array<uint8, 4> padding0;
+		/** Reserved ABI byte, always returned as zero. */
+		Array<uint8, 1> padding1;
+	};
+
 	/** Validated data consumed by the get games operation. */
 	struct GetGames_input
 	{
@@ -1223,6 +1300,24 @@ public:
 		EReturnCode returnCode;
 	};
 
+	/** Validated data consumed by the wallet asset credit operation. */
+	struct CreditWalletAsset_input
+	{
+		/** Wallet owner receiving managed asset shares. */
+		id owner;
+		/** Managed asset whose wallet balance may be credited. */
+		Asset asset;
+		/** Number of transferred shares to credit. */
+		uint64 amount;
+	};
+
+	/** Result data produced by the wallet asset credit operation. */
+	struct CreditWalletAsset_output
+	{
+		/** Whether the transferred shares were represented in the destination wallet. */
+		bit credited;
+	};
+
 	/** Validated data consumed by the transfer asset dividend operation. */
 	struct TransferAssetDividend_input
 	{
@@ -1230,6 +1325,8 @@ public:
 		Asset dividendAsset;
 		/** Asset units available for proportional shareholder distribution. */
 		uint64 dividendAmount;
+		/** Asset-accounting slot that owns the dividend liability. */
+		uint16 accountingSlot;
 	};
 
 	/** Result data produced by the transfer asset dividend operation. */
@@ -1241,25 +1338,46 @@ public:
 		bit failed;
 	};
 
-	/** QPI scratch state for transfer asset dividend; contract routines cannot declare stack locals. */
-	struct TransferAssetDividend_locals
+	/** Input for freezing one immutable managed-asset dividend entitlement set. */
+	using SnapshotAssetDividend_input = TransferAssetDividend_input;
+
+	/** Result of freezing a managed-asset dividend entitlement set. */
+	struct SnapshotAssetDividend_output
 	{
-		/** Iterator state for bounded PLDT shareholder distribution. */
+		/** Whether the shareholder set could not be represented completely. */
+		bit failed;
+	};
+
+	/** QPI scratch state isolated from payout locals to stay within the locals-size limit. */
+	struct SnapshotAssetDividend_locals
+	{
+		/** Iterator state for the current PLDT shareholder set. */
 		AssetPossessionIterator shareholdersIter;
-		/** Contract-share asset whose holders receive asset dividends. */
+		/** Contract-share asset whose holders receive the dividend. */
 		Asset shareholdersAsset;
-		/** Cumulative prize amount that should be allocated at this step. */
-		uint64 targetDistribution;
 		/** Whole currency units still unallocated after integer division. */
 		uint64 remainder;
-		/** Unassigned asset units after whole-share distribution. */
+		/** Remainder assigned to the current holder. */
 		uint64 holderRemainder;
 		/** Whole asset units assigned per held PLDT share. */
 		sint64 dividendPerShare;
 		/** PLDT shares possessed by the current shareholder. */
 		sint64 holderShares;
-		/** Asset units assigned to the current PLDT shareholder. */
+		/** Asset units assigned to the current shareholder. */
 		sint64 holderDividend;
+	};
+
+	/** QPI scratch state for transfer asset dividend; contract routines cannot declare stack locals. */
+	struct TransferAssetDividend_locals
+	{
+		/** Request used to mirror a successful shareholder payout when possible. */
+		CreditWalletAsset_input creditInput;
+		/** Result of the best-effort wallet mirror. */
+		CreditWalletAsset_output creditOutput;
+		/** Request used to freeze dividend entitlements before transfers begin. */
+		SnapshotAssetDividend_input snapshotInput;
+		/** Result of freezing dividend entitlements. */
+		SnapshotAssetDividend_output snapshotOutput;
 		/** QPI transfer result; a negative value indicates failure. */
 		sint64 transferResult;
 	};
@@ -1281,6 +1399,10 @@ public:
 	/** QPI scratch state for withdraw asset platform revenue; contract routines cannot declare stack locals. */
 	struct WithdrawAssetPlatformRevenue_locals
 	{
+		/** Request used to mirror a successful developer payout when possible. */
+		CreditWalletAsset_input creditInput;
+		/** Result of the best-effort wallet mirror. */
+		CreditWalletAsset_output creditOutput;
 		/** Request passed to the dividend helper. */
 		TransferAssetDividend_input dividendInput;
 		/** Response returned by the dividend helper. */
@@ -1590,22 +1712,6 @@ public:
 		CalculateGamePreview_output previewOutput;
 	};
 
-	/** Validated data consumed by the wallet asset credit operation. */
-	struct CreditWalletAsset_input
-	{
-		/** Wallet owner receiving managed asset shares. */
-		id owner;
-		/** Managed asset whose wallet balance may be credited. */
-		Asset asset;
-		/** Number of transferred shares to credit. */
-		uint64 amount;
-	};
-
-	/** Result data produced by the wallet asset credit operation. */
-	struct CreditWalletAsset_output
-	{
-	};
-
 	/** QPI scratch state used by the wallet asset credit operation. */
 	struct CreditWalletAsset_locals
 	{
@@ -1847,6 +1953,8 @@ public:
 	/** QPI scratch state for create game; contract routines cannot declare stack locals. */
 	struct CreateGame_locals
 	{
+		/** Wallet debited by the creator-operation fee before validation. */
+		CreatorWallet wallet;
 		/** Refund input stored by this structure. */
 		RefundInvocationReward_input refundInput;
 		/** Refund output stored by this structure. */
@@ -1981,8 +2089,6 @@ public:
 		sint64 transferResult;
 		/** Zero-based game, ticket, result, or accounting slot under operation. */
 		uint16 slot;
-		/** Wallet asset slot stored by this structure. */
-		uint8 walletAssetSlot;
 		/** Whether any resumable transfer attempted in this operation failed. */
 		bit failed;
 		/** Wallet asset found stored by this structure. */
@@ -1998,6 +2104,8 @@ public:
 		CalculateTicketEconomics_output economicsOutput;
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Wallet debited by the creator-operation fee. */
+		CreatorWallet wallet;
 		/** Validated next-round economics before it is committed. */
 		GameEconomics pending;
 		/** Request passed to the refund helper. */
@@ -2276,6 +2384,8 @@ public:
 		FinalizeGame_output finalizeOutput;
 		/** Working copy or returned snapshot of a game record. */
 		Game game;
+		/** Wallet debited by the creator-operation fee. */
+		CreatorWallet wallet;
 		/** Request passed to the refund helper. */
 		RefundInvocationReward_input refundInput;
 		/** Response returned by the refund helper. */
@@ -2372,6 +2482,37 @@ public:
 		uint64 skipped;
 	};
 
+	/** QPI scratch state for unique-player paging; contract routines cannot declare stack locals. */
+	struct GetPlayers_locals
+	{
+		/** First ticket link for each occupied exact-identity hash slot. */
+		Array<uint32, PLDT_PLAYER_LOOKUP_CAPACITY> firstTicketLinks;
+		/** Working copy of the ticket currently being traversed. */
+		Ticket ticket;
+		/** First ticket used to verify identity after a hash collision. */
+		Ticket firstTicket;
+		/** Working aggregate copied out of and back into the output array. */
+		PlayerSummary summary;
+		/** Request passed to the round-ticket-list lookup helper. */
+		FindGameTicketList_input findInput;
+		/** Response returned by the round-ticket-list lookup helper. */
+		FindGameTicketList_output findOutput;
+		/** Current one-based ticket link during list traversal. */
+		uint64 link;
+		/** Exact-identity hash slot used by linear probing. */
+		uint64 hashSlot;
+		/** One-based first-ticket link read from an occupied hash slot. */
+		uint64 firstLink;
+		/** Stable unique-player index assigned at first occurrence. */
+		uint64 playerIndex;
+		/** Cursor over summaries in the current output page. */
+		uint64 i;
+		/** Requested limit after applying the fixed response capacity. */
+		uint16 effectiveLimit;
+		/** Whether the current ticket's player was already observed. */
+		bit foundPlayer;
+	};
+
 	/** QPI scratch state for get winners; contract routines cannot declare stack locals. */
 	struct GetWinners_locals
 	{
@@ -2460,15 +2601,6 @@ public:
 		Game game;
 	};
 
-	/** QPI scratch state used by the freeze finalization state helper. */
-	struct FreezeFinalizationState_locals
-	{
-		/** Available credit stored by this structure. */
-		uint64 availableCredit;
-		/** Amount to credit stored by this structure. */
-		uint64 amountToCredit;
-	};
-
 	/** Input values consumed by the resolve next round schedule helper. */
 	struct ResolveNextRoundSchedule_input
 	{
@@ -2514,18 +2646,20 @@ public:
 		CreatorWallet wallet;
 		/** Wallet asset stored by this structure. */
 		WalletAssetBalance walletAsset;
-		/** Qubic amount stored by this structure. */
-		uint64 qubicAmount;
-		/** Asset amount stored by this structure. */
-		uint64 assetAmount;
 		/** Service credit returned stored by this structure. */
 		uint64 serviceCreditReturned;
+		/** Capacity currently available in the destination wallet bucket. */
+		uint64 availableCredit;
+		/** Bounded amount committed during the current retry. */
+		uint64 amountToCredit;
+		/** Remaining amount in the current creator liability. */
+		uint64 pendingAmount;
 		/** Bounded-loop index stored by this structure. */
 		uint64 i;
 		/** Transfer result stored by this structure. */
 		sint64 transferResult;
-		/** Wallet asset slot stored by this structure. */
-		uint8 walletAssetSlot;
+		/** Selects creator fees first, then returned pool and balance. */
+		uint8 payoutIndex;
 		/** Wallet asset found stored by this structure. */
 		bit walletAssetFound;
 	};
@@ -3003,6 +3137,7 @@ public:
 		REGISTER_USER_FUNCTION(PreviewGame, 8);
 		REGISTER_USER_FUNCTION(GetGames, 9);
 		REGISTER_USER_FUNCTION(GetWallet, 10);
+		REGISTER_USER_FUNCTION(GetPlayers, 11);
 	}
 
 	INITIALIZE()
@@ -3075,7 +3210,6 @@ public:
 				CALL(ProcessGame, locals.processInput, locals.processOutput);
 				locals.actionBudget -= locals.processOutput.actionsUsed;
 			}
-			++locals.inspected;
 		}
 
 		state.mut().automationCursor = automationGameSlot(locals.inspected, state.get().automationCursor);
@@ -3096,7 +3230,7 @@ public:
 			locals.walletOwner = state.get().wallets.key(static_cast<sint64>(locals.walletIndex));
 			locals.wallet = state.get().wallets.value(static_cast<sint64>(locals.walletIndex));
 			if (locals.wallet.status == EWalletStatus::OPEN && locals.wallet.activeGameCount == 0 &&
-			    static_cast<uint32>(qpi.epoch()) >= static_cast<uint32>(locals.wallet.lastGameCreationEpoch) + 2U)
+			    epochElapsedAtLeast(qpi.epoch(), locals.wallet.lastGameCreationEpoch, 2))
 			{
 				locals.wallet.status = EWalletStatus::EXPIRING;
 				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
@@ -3133,6 +3267,16 @@ public:
 			{
 				continue;
 			}
+			if (locals.wallet.serviceCreditUnlocked && locals.wallet.serviceCredit > 0)
+			{
+				locals.transferResult = qpi.transfer(locals.walletOwner, static_cast<sint64>(locals.wallet.serviceCredit));
+				if (locals.transferResult < 0)
+				{
+					continue;
+				}
+				locals.wallet.serviceCredit = 0;
+				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
+			}
 			calculatePlatformShares(locals.wallet.serviceCredit, locals.developer1Fee, locals.developer2Fee, locals.dividendFee);
 			if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
 			                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
@@ -3162,7 +3306,7 @@ public:
 	 * @brief Opens a creator wallet funded by the invocation reward.
 	 * @param input Empty input; the invocator becomes the wallet owner.
 	 * @param output Service-credit and refundable-Qubic balances plus the result code.
-	 * @note The configured creation fee is retained as non-refundable service credit; any excess remains withdrawable.
+	 * @note The configured creation fee is restricted service credit until the owner's last active game closes.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateWallet)
 	{
@@ -3226,6 +3370,7 @@ public:
 		output.lastGameCreationEpoch = locals.wallet.lastGameCreationEpoch;
 		output.assetCount = locals.wallet.assetCount;
 		output.status = locals.wallet.status;
+		output.serviceCreditUnlocked = locals.wallet.serviceCreditUnlocked && locals.wallet.activeGameCount == 0;
 	}
 
 	/**
@@ -3260,8 +3405,8 @@ public:
 	}
 
 	/**
-	 * @brief Returns refundable Qubic from the invocator's creator wallet.
-	 * @param input Amount to withdraw; service credit cannot be withdrawn.
+	 * @brief Returns withdrawable Qubic from the invocator's creator wallet.
+	 * @param input Amount to withdraw; unlocked service credit is consumed before refundable Qubic.
 	 * @param output Successfully paid amount and result code.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawWalletQubic)
@@ -3277,9 +3422,20 @@ public:
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
-		if (input.amount == 0 || input.amount > locals.wallet.refundableQubic)
+		if (input.amount == 0)
 		{
-			output.returnCode = input.amount == 0 ? EReturnCode::INVALID_VALUE : EReturnCode::INSUFFICIENT_FUNDS;
+			output.returnCode = EReturnCode::INVALID_VALUE;
+			return;
+		}
+		if ((!locals.wallet.serviceCreditUnlocked || locals.wallet.activeGameCount != 0) && input.amount > locals.wallet.refundableQubic)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (locals.wallet.serviceCreditUnlocked && locals.wallet.activeGameCount == 0 &&
+		    input.amount > locals.wallet.serviceCredit && input.amount - locals.wallet.serviceCredit > locals.wallet.refundableQubic)
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
 		locals.transferResult = qpi.transfer(qpi.invocator(), static_cast<sint64>(input.amount));
@@ -3288,7 +3444,22 @@ public:
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
-		locals.wallet.refundableQubic -= input.amount;
+		if (locals.wallet.serviceCreditUnlocked && locals.wallet.activeGameCount == 0)
+		{
+			if (input.amount <= locals.wallet.serviceCredit)
+			{
+				locals.wallet.serviceCredit -= input.amount;
+			}
+			else
+			{
+				locals.wallet.refundableQubic -= input.amount - locals.wallet.serviceCredit;
+				locals.wallet.serviceCredit = 0;
+			}
+		}
+		else
+		{
+			locals.wallet.refundableQubic -= input.amount;
+		}
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		output.amountPaid = input.amount;
 		output.returnCode = EReturnCode::SUCCESS;
@@ -3325,12 +3496,36 @@ public:
 	 * @brief Atomically creates, funds, and charges a one-shot or permanent game.
 	 * @param input Game rules, lifecycle mode, UTC window, economics, currency, and initial ledgers.
 	 * @param output Generation-aware game id, slot, and result code.
-	 * @note The first round fee is non-refundable; asset creator funding is pulled from the creator.
+	 * @note An authorized call burns the operation fee before business validation; the first round fee is also non-refundable.
+	 * @note Creator fees and returned pools credit the internal wallet at finalization; future rounds use prefunded game balances.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateGame)
 	{
 		output.gameId = 0;
 		output.slot = 0;
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (!debitWalletOperationFee(locals.wallet))
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		locals.previewInput = input;
 		CALL(PreviewGame, locals.previewInput, locals.previewOutput);
 		if (locals.previewOutput.returnCode != EReturnCode::SUCCESS)
@@ -3370,7 +3565,8 @@ public:
 	/**
 	 * @brief Adds Qubic run credit and/or game-currency creator balance.
 	 * @param input Game id and ledger top-ups.
-	 * @param output Result code; failed operations preserve both ledgers.
+	 * @param output Result code; failed business validation preserves game ledgers.
+	 * @note An authorized call burns the operation fee before business validation.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(FundGame)
 	{
@@ -3389,6 +3585,24 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		if (qpi.invocationReward() != 0)
+		{
+			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
+			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
+			output.returnCode = locals.refundOutput.returnCode;
+			return;
+		}
+		if (!debitWalletOperationFee(locals.wallet))
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		if (locals.game.status == EGameStatus::FINALIZING)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_STATE;
@@ -3408,14 +3622,7 @@ public:
 			}
 			locals.expectedReward = sadd(locals.expectedReward, input.creatorBalanceTopUp);
 		}
-		if (qpi.invocationReward() != 0)
-		{
-			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
-			CALL(RefundInvocationReward, locals.refundInput, locals.refundOutput);
-			output.returnCode = locals.refundOutput.returnCode;
-			return;
-		}
-		locals.serviceCreditDebit = locals.wallet.serviceCredit < locals.expectedReward ? locals.wallet.serviceCredit : locals.expectedReward;
+		locals.serviceCreditDebit = locals.wallet.serviceCredit < input.runCreditTopUp ? locals.wallet.serviceCredit : input.runCreditTopUp;
 		if (locals.expectedReward - locals.serviceCreditDebit > locals.wallet.refundableQubic)
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
@@ -3470,7 +3677,7 @@ public:
 		locals.wallet.refundableQubic -= locals.expectedReward - locals.serviceCreditDebit;
 		locals.game.runCredit = sadd(locals.game.runCredit, input.runCreditTopUp);
 		locals.game.creatorBalance = sadd(locals.game.creatorBalance, input.creatorBalanceTopUp);
-		locals.game.serviceCreditBalance = sadd(locals.game.serviceCreditBalance, locals.serviceCreditDebit);
+		locals.game.runServiceCredit = sadd(locals.game.runServiceCredit, locals.serviceCreditDebit);
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		state.mut().games.set(locals.slot, locals.game);
 		output.returnCode = EReturnCode::SUCCESS;
@@ -3480,6 +3687,7 @@ public:
 	 * @brief Withdraws unreserved game ledgers to their owner.
 	 * @param input Requested amounts; the current prize pool is not addressable.
 	 * @param output Successfully transferred amounts and result code.
+	 * @note An authorized call burns the operation fee before business validation; asset wallet mirroring is best effort.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawGameBalance)
 	{
@@ -3495,12 +3703,23 @@ public:
 		{
 			return;
 		}
-		if (locals.game.status == EGameStatus::FINALIZING)
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
-		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		if (!debitWalletOperationFee(locals.wallet))
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		if (locals.game.status == EGameStatus::FINALIZING)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
@@ -3517,7 +3736,9 @@ public:
 		{
 			locals.qubicAmount = sadd(locals.qubicAmount, input.creatorBalanceAmount);
 		}
-		if (!prepareWalletQubicCredit(locals.wallet, locals.qubicAmount, locals.game.serviceCreditBalance, locals.serviceCreditReturned))
+		if (!prepareWalletQubicCredit(locals.wallet, locals.qubicAmount,
+		                              locals.game.runServiceCredit < input.runCreditAmount ? locals.game.runServiceCredit : input.runCreditAmount,
+		                              locals.serviceCreditReturned))
 		{
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
@@ -3529,28 +3750,22 @@ public:
 		}
 		else
 		{
-			// Asset balances are committed only after the ownership transfer succeeds.
+			// Ownership transfer is authoritative; wallet mirroring must not lock funds at fixed-capacity boundaries.
 			if (input.creatorBalanceAmount > 0)
 			{
-				locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
-				if (locals.walletAssetFound)
-				{
-					locals.walletAssetSlot = static_cast<uint8>(locals.i);
-				}
-				if (!locals.walletAssetFound || locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - input.creatorBalanceAmount)
-				{
-					output.returnCode = EReturnCode::STORAGE_FULL;
-					return;
-				}
 				locals.transferResult =
 				    qpi.transferShareOwnershipAndPossession(locals.game.currencyAsset.assetName, locals.game.currencyAsset.issuer, SELF, SELF,
 				                                            static_cast<sint64>(input.creatorBalanceAmount), locals.game.owner);
 				if (locals.transferResult >= 0)
 				{
 					locals.game.creatorBalance -= input.creatorBalanceAmount;
-					locals.walletAsset.balance = sadd(locals.walletAsset.balance, input.creatorBalanceAmount);
-					locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
 					output.creatorBalancePaid = input.creatorBalanceAmount;
+					locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
+					if (locals.walletAssetFound && locals.walletAsset.balance <= PLDT_MAX_TRANSFER_AMOUNT - input.creatorBalanceAmount)
+					{
+						locals.walletAsset.balance = sadd(locals.walletAsset.balance, input.creatorBalanceAmount);
+						locals.wallet.assets.set(static_cast<uint8>(locals.i), locals.walletAsset);
+					}
 				}
 				else
 				{
@@ -3561,7 +3776,7 @@ public:
 		// Return QU to its original service/refundable buckets and persist both ledgers together.
 		locals.wallet.serviceCredit = sadd(locals.wallet.serviceCredit, locals.serviceCreditReturned);
 		locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.qubicAmount - locals.serviceCreditReturned);
-		locals.game.serviceCreditBalance -= locals.serviceCreditReturned;
+		locals.game.runServiceCredit -= locals.serviceCreditReturned;
 		locals.game.runCredit -= input.runCreditAmount;
 		output.runCreditPaid = input.runCreditAmount;
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
@@ -3573,6 +3788,7 @@ public:
 	 * @brief Queues validated economics for the next round of a permanent game.
 	 * @param input Complete replace-on-write next-round economics.
 	 * @param output Result code; the current round is never modified.
+	 * @note An authorized call burns the operation fee before business validation.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateGameEconomics)
 	{
@@ -3590,14 +3806,30 @@ public:
 			return;
 		}
 		locals.game = state.get().games.get(locals.slot);
-		if (locals.game.mode != EGameMode::PERMANENT)
+		if (locals.game.owner != qpi.invocator())
+		{
+			output.returnCode = EReturnCode::ACCESS_DENIED;
+			return;
+		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
-		if (locals.game.owner != qpi.invocator())
+		if (!debitWalletOperationFee(locals.wallet))
 		{
-			output.returnCode = EReturnCode::ACCESS_DENIED;
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		if (locals.game.mode != EGameMode::PERMANENT)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
 		if (locals.game.status == EGameStatus::FINALIZING)
@@ -3617,11 +3849,6 @@ public:
 			return;
 		}
 		if (input.creatorFeePercent > state.get().maxCreatorFeePercent)
-		{
-			output.returnCode = EReturnCode::INVALID_VALUE;
-			return;
-		}
-		if (input.creatorRevenueMode != ECreatorRevenueMode::PAYOUT && input.creatorRevenueMode != ECreatorRevenueMode::REINVEST)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
@@ -3648,7 +3875,6 @@ public:
 		locals.pending.ticketLimit = input.ticketLimit;
 		locals.pending.playerTicketLimit = input.playerTicketLimit;
 		locals.pending.creatorFeePercent = input.creatorFeePercent;
-		locals.pending.creatorRevenueMode = input.creatorRevenueMode;
 		locals.pending.isSet = true;
 		locals.game.pendingEconomics = locals.pending;
 		state.mut().games.set(locals.slot, locals.game);
@@ -3659,6 +3885,7 @@ public:
 	 * @brief Cancels either mode before first start or requests terminal closure when applicable.
 	 * @param input Game id.
 	 * @param output Result code; an active one-shot round is unchanged and an active permanent round is not shortened.
+	 * @note An authorized call burns the operation fee even when the active one-shot operation is a no-op.
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(StopGame)
 	{
@@ -3674,6 +3901,22 @@ public:
 		{
 			return;
 		}
+		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		if (!debitWalletOperationFee(locals.wallet))
+		{
+			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
+			return;
+		}
+		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		{
+			output.returnCode = EReturnCode::TRANSFER_FAILED;
+			return;
+		}
+		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		if (locals.game.roundNumber == 1 && locals.game.status == EGameStatus::SCHEDULED && qpi.now() < locals.game.startAt)
 		{
 			locals.finalizeInput.slot = locals.slot;
@@ -3692,7 +3935,7 @@ public:
 			locals.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
 			locals.game.pendingRunCreditPayout = locals.game.runCredit;
 			locals.game.runCredit = 0;
-			locals.game.pendingCreatorBalancePayout = locals.game.creatorBalance;
+			locals.game.pendingCreatorBalancePayout = sadd(locals.game.pendingCreatorBalancePayout, locals.game.creatorBalance);
 			locals.game.creatorBalance = 0;
 			locals.game.stopRequested = true;
 			state.mut().games.set(locals.slot, locals.game);
@@ -3856,6 +4099,97 @@ public:
 					output.ticketIds.set(output.returnedCount, locals.ticket.ticketId);
 					output.ticketIndexes.set(output.returnedCount++, locals.link - 1);
 				}
+			}
+			locals.link = locals.ticket.nextLink;
+		}
+		output.returnCode = EReturnCode::SUCCESS;
+	}
+
+	/**
+	 * @brief Pages through unique players in one round and aggregates their tickets.
+	 * @param input Round key, unique-player offset, and requested limit; limits above 64 are clamped.
+	 * @param output Stable first-ticket-order summaries, full unique count, returned count, and result code.
+	 * @note This read-only query does not depend on the invocator and does not modify contract state.
+	 */
+	PUBLIC_FUNCTION_WITH_LOCALS(GetPlayers)
+	{
+		setMemory(output.players, 0);
+		setMemory(output.padding0, 0);
+		setMemory(output.padding1, 0);
+		output.totalCount = 0;
+		output.returnedCount = 0;
+		setMemory(locals.firstTicketLinks, 0);
+		locals.findInput.gameId = input.roundKey.gameId;
+		locals.findInput.roundNumber = input.roundKey.roundNumber;
+		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
+		{
+			output.returnCode = locals.findOutput.returnCode;
+			return;
+		}
+
+		locals.effectiveLimit = input.limit < PLDT_PLAYERS_PAGE_CAPACITY ? input.limit : PLDT_PLAYERS_PAGE_CAPACITY;
+		locals.link = locals.findOutput.firstTicketLink;
+		while (locals.link != 0)
+		{
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			locals.hashSlot = (locals.ticket.player.u64._0 ^ locals.ticket.player.u64._1 ^ locals.ticket.player.u64._2 ^
+			                   locals.ticket.player.u64._3) &
+			                  (PLDT_PLAYER_LOOKUP_CAPACITY - 1);
+			locals.foundPlayer = false;
+			locals.firstLink = locals.firstTicketLinks.get(locals.hashSlot);
+			while (locals.firstLink != 0)
+			{
+				locals.firstTicket = state.get().tickets.get(locals.firstLink - 1);
+				if (locals.firstTicket.player == locals.ticket.player)
+				{
+					locals.foundPlayer = true;
+					break;
+				}
+				locals.hashSlot = (locals.hashSlot + 1) & (PLDT_PLAYER_LOOKUP_CAPACITY - 1);
+				locals.firstLink = locals.firstTicketLinks.get(locals.hashSlot);
+			}
+			if (!locals.foundPlayer)
+			{
+				locals.firstTicketLinks.set(locals.hashSlot, static_cast<uint32>(locals.link));
+				locals.playerIndex = output.totalCount++;
+				if (locals.playerIndex >= input.offset && output.returnedCount < locals.effectiveLimit)
+				{
+					setMemory(locals.summary, 0);
+					locals.summary.player = locals.ticket.player;
+					output.players.set(output.returnedCount++, locals.summary);
+				}
+			}
+			locals.link = locals.ticket.nextLink;
+		}
+
+		locals.link = locals.findOutput.firstTicketLink;
+		while (locals.link != 0 && output.returnedCount != 0)
+		{
+			locals.ticket = state.get().tickets.get(locals.link - 1);
+			for (locals.i = 0; locals.i < output.returnedCount; ++locals.i)
+			{
+				locals.summary = output.players.get(locals.i);
+				if (locals.summary.player != locals.ticket.player)
+				{
+					continue;
+				}
+				locals.summary.totalPayout = sadd(locals.summary.totalPayout, locals.ticket.payout);
+				++locals.summary.ticketCount;
+				if (locals.ticket.winnerWeight > 0)
+				{
+					++locals.summary.winningTicketCount;
+				}
+				if (locals.ticket.status == ETicketStatus::PAID)
+				{
+					++locals.summary.paidTicketCount;
+				}
+				if (locals.ticket.bonusQualified)
+				{
+					++locals.summary.bonusQualifiedTicketCount;
+				}
+				output.players.set(locals.i, locals.summary);
+				break;
 			}
 			locals.link = locals.ticket.nextLink;
 		}
@@ -4198,7 +4532,16 @@ public:
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
-		if (locals.accounting.developer1Accrued > 0)
+		// An in-flight dividend owns its accounting bucket until every snapshotted entitlement is paid.
+		if (state.get().assetDividendDistribution.active &&
+		    (!isSameAsset(state.get().assetDividendDistribution.asset, input.asset) ||
+		     state.get().assetDividendDistribution.accountingSlot != static_cast<uint16>(locals.i)))
+		{
+			output.returnCode = EReturnCode::INVALID_STATE;
+			return;
+		}
+		// A resumed dividend has priority over newer accruals so later traffic cannot starve its unpaid recipients.
+		if (!state.get().assetDividendDistribution.active && locals.accounting.developer1Accrued > 0)
 		{
 			if (state.get().developer1 == NULL_ID)
 			{
@@ -4211,6 +4554,10 @@ public:
 				                                            static_cast<sint64>(locals.accounting.developer1Accrued), state.get().developer1);
 				if (locals.transferResult >= 0)
 				{
+					locals.creditInput.owner = state.get().developer1;
+					locals.creditInput.asset = locals.accounting.asset;
+					locals.creditInput.amount = locals.accounting.developer1Accrued;
+					CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
 					output.developer1Paid = locals.accounting.developer1Accrued;
 					locals.accounting.developer1Accrued = 0;
 				}
@@ -4220,7 +4567,7 @@ public:
 				}
 			}
 		}
-		if (locals.accounting.developer2Accrued > 0)
+		if (!state.get().assetDividendDistribution.active && locals.accounting.developer2Accrued > 0)
 		{
 			if (state.get().developer2 == NULL_ID)
 			{
@@ -4233,6 +4580,10 @@ public:
 				                                            static_cast<sint64>(locals.accounting.developer2Accrued), state.get().developer2);
 				if (locals.transferResult >= 0)
 				{
+					locals.creditInput.owner = state.get().developer2;
+					locals.creditInput.asset = locals.accounting.asset;
+					locals.creditInput.amount = locals.accounting.developer2Accrued;
+					CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
 					output.developer2Paid = locals.accounting.developer2Accrued;
 					locals.accounting.developer2Accrued = 0;
 				}
@@ -4244,6 +4595,7 @@ public:
 		}
 		locals.dividendInput.dividendAsset = locals.accounting.asset;
 		locals.dividendInput.dividendAmount = locals.accounting.dividendAccrued;
+		locals.dividendInput.accountingSlot = static_cast<uint16>(locals.i);
 		CALL(TransferAssetDividend, locals.dividendInput, locals.dividendOutput);
 		output.dividendPaid = locals.dividendOutput.distributedAmount;
 		locals.accounting.dividendAccrued -= output.dividendPaid;
@@ -4296,8 +4648,8 @@ private:
 		}
 		if (input.configuration.ticketLimit == 0 || input.configuration.ticketLimit > PLDT_MAX_TICKETS_PER_GAME ||
 		    input.configuration.playerTicketLimit == 0 || input.configuration.playerTicketLimit > input.configuration.ticketLimit ||
-		    input.configuration.codeLength == 0 || input.configuration.codeLength > PLDT_MAX_CODE_LENGTH ||
-		    input.configuration.maxDigit > PLDT_MAX_DIGIT ||
+		    input.configuration.codeLength < PLDT_MIN_CODE_LENGTH || input.configuration.codeLength > PLDT_MAX_CODE_LENGTH ||
+		    input.configuration.maxDigit < PLDT_MIN_MAX_DIGIT || input.configuration.maxDigit > PLDT_MAX_DIGIT ||
 		    (!input.configuration.allowRepeatedDigits && input.configuration.maxDigit + 1 < input.configuration.codeLength))
 		{
 			return;
@@ -4308,8 +4660,6 @@ private:
 			return;
 		}
 		if ((input.configuration.mode != EGameMode::ONE_SHOT && input.configuration.mode != EGameMode::PERMANENT) ||
-		    (input.configuration.creatorRevenueMode != ECreatorRevenueMode::PAYOUT &&
-		     input.configuration.creatorRevenueMode != ECreatorRevenueMode::REINVEST) ||
 		    (input.configuration.currencyMode != ECurrencyMode::QUBIC && input.configuration.currencyMode != ECurrencyMode::ASSET))
 		{
 			return;
@@ -4380,6 +4730,7 @@ private:
 		}
 		output.preview.platformFee = locals.economicsOutput.platformFee;
 		output.preview.roundFee = state.get().roundFee;
+		output.preview.operationFee = PLDT_OPERATION_FEE;
 		if (input.configuration.currencyMode == ECurrencyMode::QUBIC)
 		{
 			output.preview.initialQubicRequired = sadd(input.configuration.initialRunCredit, input.configuration.initialCreatorBalance);
@@ -4415,9 +4766,13 @@ private:
 			return;
 		}
 		// Reserve the exact wallet buckets and platform accrual capacity without mutating state.
-		locals.requiredQubic = input.preview.initialQubicRequired;
-		output.serviceCreditDebit = locals.wallet.serviceCredit < locals.requiredQubic ? locals.wallet.serviceCredit : locals.requiredQubic;
-		output.refundableQubicDebit = locals.requiredQubic - output.serviceCreditDebit;
+		output.serviceCreditDebit =
+		    locals.wallet.serviceCredit < input.configuration.initialRunCredit ? locals.wallet.serviceCredit : input.configuration.initialRunCredit;
+		output.refundableQubicDebit = input.configuration.initialRunCredit - output.serviceCreditDebit;
+		if (input.configuration.currencyMode == ECurrencyMode::QUBIC)
+		{
+			output.refundableQubicDebit = sadd(output.refundableQubicDebit, input.configuration.initialCreatorBalance);
+		}
 		if (output.refundableQubicDebit > locals.wallet.refundableQubic)
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
@@ -4430,19 +4785,27 @@ private:
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
-		// Select the next reusable game slot while enforcing the creator-level active-game cap.
-		locals.found = false;
+		// Invariant: cleared slots are linked once; never-used slots form a contiguous suffix.
 		locals.creatorActiveGames = locals.wallet.activeGameCount;
-		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
+		if (locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
 		{
-			locals.candidateSlot = static_cast<uint16>(mod(state.get().allocationCursor + locals.i, static_cast<uint64>(PLDT_MAX_GAMES)));
-			if (!locals.found && state.get().games.get(locals.candidateSlot).status == EGameStatus::EMPTY_SLOT)
-			{
-				output.slot = locals.candidateSlot;
-				locals.found = true;
-			}
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
 		}
-		if (!locals.found || locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
+		if (state.get().freeGameHead != 0)
+		{
+			output.slot = state.get().freeGameHead - 1;
+		}
+		else if (state.get().nextUnusedGameSlot < PLDT_MAX_GAMES)
+		{
+			output.slot = state.get().nextUnusedGameSlot;
+		}
+		else
+		{
+			output.returnCode = EReturnCode::STORAGE_FULL;
+			return;
+		}
+		if (state.get().games.get(output.slot).status != EGameStatus::EMPTY_SLOT)
 		{
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
@@ -4539,6 +4902,15 @@ private:
 
 	PRIVATE_PROCEDURE_WITH_LOCALS(CommitCreatedGame)
 	{
+		if (state.get().freeGameHead != 0)
+		{
+			state.mut().freeGameHead = state.get().freeGameNext.get(input.prepared.slot);
+			state.mut().freeGameNext.set(input.prepared.slot, 0);
+		}
+		else
+		{
+			state.mut().nextUnusedGameSlot = input.prepared.slot + 1;
+		}
 		locals.generation = sadd(state.get().generations.get(input.prepared.slot), 1ULL);
 		if (locals.generation == 0)
 		{
@@ -4560,7 +4932,7 @@ private:
 		locals.game.roundFeeSnapshot = state.get().roundFee;
 		locals.game.runCredit = input.configuration.initialRunCredit - state.get().roundFee;
 		locals.game.creatorBalance = input.configuration.initialCreatorBalance - input.configuration.creatorPrizeSeed;
-		locals.game.serviceCreditBalance =
+		locals.game.runServiceCredit =
 		    input.prepared.serviceCreditDebit > state.get().roundFee ? input.prepared.serviceCreditDebit - state.get().roundFee : 0;
 		locals.game.roundDurationMicroseconds = input.configuration.startAt.durationMicrosec(input.configuration.drawAt);
 		locals.game.bonusMultiplierBps = input.configuration.bonusMultiplierBps;
@@ -4577,7 +4949,6 @@ private:
 		locals.game.creatorFeePercent = input.configuration.creatorFeePercent;
 		locals.game.currencyMode = input.configuration.currencyMode;
 		locals.game.mode = input.configuration.mode;
-		locals.game.creatorRevenueMode = input.configuration.creatorRevenueMode;
 		locals.game.roundNumber = 1;
 		locals.game.allowRepeatedDigits = input.configuration.allowRepeatedDigits;
 		locals.game.status = EGameStatus::SCHEDULED;
@@ -4612,7 +4983,6 @@ private:
 		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, input.prepared.developer2Fee);
 		state.mut().dividendAccrued = sadd(state.get().dividendAccrued, input.prepared.dividendFee);
 		state.mut().activeGameCount = state.get().activeGameCount + 1;
-		state.mut().allocationCursor = static_cast<uint16>(mod(static_cast<uint64>(input.prepared.slot + 1), static_cast<uint64>(PLDT_MAX_GAMES)));
 		output.gameId = locals.game.gameId;
 		output.slot = input.prepared.slot;
 		output.returnCode = EReturnCode::SUCCESS;
@@ -4998,6 +5368,7 @@ private:
 
 	PRIVATE_PROCEDURE_WITH_LOCALS(CreditWalletAsset)
 	{
+		output.credited = false;
 		if (input.amount == 0 || input.amount > PLDT_MAX_TRANSFER_AMOUNT || !state.get().wallets.get(input.owner, locals.wallet) ||
 		    locals.wallet.status != EWalletStatus::OPEN)
 		{
@@ -5042,6 +5413,7 @@ private:
 			++locals.wallet.assetCount;
 		}
 		state.mut().wallets.replace(input.owner, locals.wallet);
+		output.credited = true;
 	}
 
 	PRIVATE_PROCEDURE(TransferGameCurrency)
@@ -5156,19 +5528,17 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	PRIVATE_PROCEDURE_WITH_LOCALS(TransferAssetDividend)
+	PRIVATE_PROCEDURE_WITH_LOCALS(SnapshotAssetDividend)
 	{
-		output.distributedAmount = 0;
 		output.failed = false;
-		if (input.dividendAmount == 0)
-		{
-			return;
-		}
+		setMemory(state.mut().assetDividendDistribution, 0);
+		state.mut().assetDividendDistribution.asset = input.dividendAsset;
+		state.mut().assetDividendDistribution.accountingSlot = input.accountingSlot;
+		state.mut().assetDividendDistribution.remainingAmount = input.dividendAmount;
 		locals.shareholdersAsset.issuer = id::zero();
 		locals.shareholdersAsset.assetName = PLDT_CONTRACT_ASSET_NAME;
 		locals.dividendPerShare = static_cast<sint64>(div(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS)));
 		locals.remainder = mod(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS));
-		locals.targetDistribution = input.dividendAmount;
 		locals.shareholdersIter.begin(locals.shareholdersAsset);
 		while (!locals.shareholdersIter.reachedEnd())
 		{
@@ -5176,30 +5546,89 @@ private:
 			if (locals.holderShares > 0)
 			{
 				locals.holderDividend = smul(locals.holderShares, locals.dividendPerShare);
-				locals.holderRemainder =
-				    static_cast<uint64>(locals.holderShares) < locals.remainder ? static_cast<uint64>(locals.holderShares) : locals.remainder;
-				locals.holderDividend = static_cast<sint64>(sadd(static_cast<uint64>(locals.holderDividend), locals.holderRemainder));
+				locals.holderRemainder = static_cast<uint64>(locals.holderShares) < locals.remainder
+				                             ? static_cast<uint64>(locals.holderShares)
+				                             : locals.remainder;
+				locals.holderDividend =
+				    static_cast<sint64>(sadd(static_cast<uint64>(locals.holderDividend), locals.holderRemainder));
 				locals.remainder -= locals.holderRemainder;
 				if (locals.holderDividend > 0)
 				{
-					locals.transferResult = qpi.transferShareOwnershipAndPossession(input.dividendAsset.assetName, input.dividendAsset.issuer, SELF,
-					                                                                SELF, locals.holderDividend, locals.shareholdersIter.possessor());
-					if (locals.transferResult >= 0)
+					if (state.get().assetDividendDistribution.recipientCount >= PLDT_MAX_DIVIDEND_RECIPIENTS)
 					{
-						output.distributedAmount = sadd(output.distributedAmount, static_cast<uint64>(locals.holderDividend));
-					}
-					else
-					{
+						setMemory(state.mut().assetDividendDistribution, 0);
 						output.failed = true;
+						return;
 					}
+					state.mut().assetDividendDistribution.recipients.set(state.get().assetDividendDistribution.recipientCount,
+					                                                           locals.shareholdersIter.possessor());
+					state.mut().assetDividendDistribution.amounts.set(state.get().assetDividendDistribution.recipientCount,
+					                                                        static_cast<uint64>(locals.holderDividend));
+					++state.mut().assetDividendDistribution.recipientCount;
 				}
 			}
 			locals.shareholdersIter.next();
 		}
-		if (output.distributedAmount != locals.targetDistribution)
+		state.mut().assetDividendDistribution.active = true;
+	}
+
+	PRIVATE_PROCEDURE_WITH_LOCALS(TransferAssetDividend)
+	{
+		output.distributedAmount = 0;
+		output.failed = false;
+		if (state.get().assetDividendDistribution.active)
+		{
+			if (!isSameAsset(state.get().assetDividendDistribution.asset, input.dividendAsset) ||
+			    state.get().assetDividendDistribution.accountingSlot != input.accountingSlot)
+			{
+				output.failed = true;
+				return;
+			}
+		}
+		else
+		{
+			if (input.dividendAmount == 0)
+			{
+				return;
+			}
+			locals.snapshotInput = input;
+			CALL(SnapshotAssetDividend, locals.snapshotInput, locals.snapshotOutput);
+			if (locals.snapshotOutput.failed)
+			{
+				output.failed = true;
+				return;
+			}
+		}
+		while (state.get().assetDividendDistribution.cursor < state.get().assetDividendDistribution.recipientCount)
+		{
+			locals.transferResult = qpi.transferShareOwnershipAndPossession(
+			    state.get().assetDividendDistribution.asset.assetName, state.get().assetDividendDistribution.asset.issuer, SELF, SELF,
+			    static_cast<sint64>(state.get().assetDividendDistribution.amounts.get(state.get().assetDividendDistribution.cursor)),
+			    state.get().assetDividendDistribution.recipients.get(state.get().assetDividendDistribution.cursor));
+			if (locals.transferResult < 0)
+			{
+				output.failed = true;
+				return;
+			}
+			output.distributedAmount = sadd(
+			    output.distributedAmount,
+			    state.get().assetDividendDistribution.amounts.get(state.get().assetDividendDistribution.cursor));
+			state.mut().assetDividendDistribution.remainingAmount -=
+			    state.get().assetDividendDistribution.amounts.get(state.get().assetDividendDistribution.cursor);
+			locals.creditInput.owner =
+			    state.get().assetDividendDistribution.recipients.get(state.get().assetDividendDistribution.cursor);
+			locals.creditInput.asset = state.get().assetDividendDistribution.asset;
+			locals.creditInput.amount =
+			    state.get().assetDividendDistribution.amounts.get(state.get().assetDividendDistribution.cursor);
+			++state.mut().assetDividendDistribution.cursor;
+			CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
+		}
+		if (state.get().assetDividendDistribution.remainingAmount != 0)
 		{
 			output.failed = true;
+			return;
 		}
+		setMemory(state.mut().assetDividendDistribution, 0);
 	}
 
 	PRIVATE_FUNCTION_WITH_LOCALS(CountMatches)
@@ -5455,8 +5884,6 @@ private:
 				output.game.totalPaid = sadd(output.game.totalPaid, locals.payout);
 				if (output.game.currencyMode == ECurrencyMode::QUBIC)
 				{
-					output.game.serviceCreditBalance -=
-					    output.game.serviceCreditBalance < locals.payout ? output.game.serviceCreditBalance : locals.payout;
 				}
 				if (output.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
 				{
@@ -5537,7 +5964,7 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
-	PRIVATE_PROCEDURE_WITH_LOCALS(FreezeFinalizationState)
+	PRIVATE_PROCEDURE(FreezeFinalizationState)
 	{
 		output.game = input.game;
 		if (output.game.status == EGameStatus::FINALIZING)
@@ -5549,20 +5976,9 @@ private:
 		if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
 		    input.reason == EGameTerminalReason::OWNER_CANCELLED)
 		{
-			output.game.creatorBalance = sadd(output.game.creatorBalance, output.game.prizePool);
+			output.game.pendingCreatorBalancePayout = output.game.prizePool;
 		}
-		if (output.game.creatorRevenueMode == ECreatorRevenueMode::REINVEST)
-		{
-			locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - output.game.creatorBalance;
-			locals.amountToCredit = output.game.creatorRevenue < locals.availableCredit ? output.game.creatorRevenue : locals.availableCredit;
-			output.game.creatorBalance = sadd(output.game.creatorBalance, locals.amountToCredit);
-			output.game.pendingCreatorCurrencyPayout =
-			    sadd(output.game.pendingCreatorCurrencyPayout, output.game.creatorRevenue - locals.amountToCredit);
-		}
-		else
-		{
-			output.game.pendingCreatorCurrencyPayout = sadd(output.game.pendingCreatorCurrencyPayout, output.game.creatorRevenue);
-		}
+		output.game.pendingCreatorCurrencyPayout = output.game.creatorRevenue;
 		output.game.creatorRevenue = 0;
 		if (output.game.stopRequested || input.reason == EGameTerminalReason::OWNER_CANCELLED)
 		{
@@ -5581,7 +5997,6 @@ private:
 				output.game.ticketLimit = output.game.pendingEconomics.ticketLimit;
 				output.game.playerTicketLimit = output.game.pendingEconomics.playerTicketLimit;
 				output.game.creatorFeePercent = output.game.pendingEconomics.creatorFeePercent;
-				output.game.creatorRevenueMode = output.game.pendingEconomics.creatorRevenueMode;
 				setMemory(output.game.pendingEconomics, 0);
 			}
 			if (output.game.runCredit < output.game.roundFeeSnapshot || output.game.creatorBalance < output.game.creatorPrizeSeed)
@@ -5593,7 +6008,7 @@ private:
 		{
 			output.game.pendingRunCreditPayout = output.game.runCredit;
 			output.game.runCredit = 0;
-			output.game.pendingCreatorBalancePayout = output.game.creatorBalance;
+			output.game.pendingCreatorBalancePayout = sadd(output.game.pendingCreatorBalancePayout, output.game.creatorBalance);
 			output.game.creatorBalance = 0;
 		}
 		output.game.status = EGameStatus::FINALIZING;
@@ -5614,7 +6029,7 @@ private:
 			output.game.finalizingStopReason = EGameStopReason::SCHEDULE_EXHAUSTED;
 			output.game.pendingRunCreditPayout = output.game.runCredit;
 			output.game.runCredit = 0;
-			output.game.pendingCreatorBalancePayout = output.game.creatorBalance;
+			output.game.pendingCreatorBalancePayout = sadd(output.game.pendingCreatorBalancePayout, output.game.creatorBalance);
 			output.game.creatorBalance = 0;
 			state.mut().games.set(input.slot, output.game);
 		}
@@ -5623,72 +6038,92 @@ private:
 	PRIVATE_PROCEDURE_WITH_LOCALS(DrainFinalizationPayouts)
 	{
 		output.game = input.game;
-		if (output.game.currencyMode == ECurrencyMode::QUBIC && output.game.pendingCreatorCurrencyPayout > 0)
-		{
-			locals.transferResult = qpi.transfer(output.game.owner, static_cast<sint64>(output.game.pendingCreatorCurrencyPayout));
-			if (locals.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-			// Persist the completed payout before later retryable wallet operations to prevent duplicate transfers.
-			output.game.pendingCreatorCurrencyPayout = 0;
-			state.mut().games.set(input.slot, output.game);
-		}
 		if (!state.get().wallets.get(output.game.owner, locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
-		// Validate wallet capacity before the remaining creator ledgers are transferred or cleared.
-		locals.qubicAmount = output.game.pendingRunCreditPayout;
-		locals.assetAmount = 0;
-		if (output.game.currencyMode == ECurrencyMode::QUBIC)
+		// Return run credit by provenance, allowing each bounded wallet ledger to make independent progress.
+		locals.serviceCreditReturned = output.game.runServiceCredit < output.game.pendingRunCreditPayout
+		                                   ? output.game.runServiceCredit
+		                                   : output.game.pendingRunCreditPayout;
+		locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.serviceCredit;
+		locals.amountToCredit = locals.serviceCreditReturned < locals.availableCredit ? locals.serviceCreditReturned : locals.availableCredit;
+		locals.wallet.serviceCredit = sadd(locals.wallet.serviceCredit, locals.amountToCredit);
+		output.game.runServiceCredit -= locals.amountToCredit;
+		output.game.pendingRunCreditPayout -= locals.amountToCredit;
+		if (output.game.runServiceCredit == 0 && output.game.pendingRunCreditPayout > 0)
 		{
-			locals.qubicAmount = sadd(locals.qubicAmount, output.game.pendingCreatorBalancePayout);
+			locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.refundableQubic;
+			locals.amountToCredit =
+			    output.game.pendingRunCreditPayout < locals.availableCredit ? output.game.pendingRunCreditPayout : locals.availableCredit;
+			locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.amountToCredit);
+			output.game.pendingRunCreditPayout -= locals.amountToCredit;
 		}
-		else
-		{
-			locals.assetAmount = sadd(output.game.pendingCreatorCurrencyPayout, output.game.pendingCreatorBalancePayout);
-		}
-		if (!prepareWalletQubicCredit(locals.wallet, locals.qubicAmount, output.game.serviceCreditBalance, locals.serviceCreditReturned))
-		{
-			output.returnCode = EReturnCode::STORAGE_FULL;
-			return;
-		}
-		if (output.game.currencyMode == ECurrencyMode::ASSET && locals.assetAmount > 0)
-		{
-			// Keep the pending payout intact until both the asset transfer and wallet credit succeed.
-			locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
-			if (locals.walletAssetFound)
-			{
-				locals.walletAssetSlot = static_cast<uint8>(locals.i);
-			}
-			if (!locals.walletAssetFound || locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - locals.assetAmount)
-			{
-				output.returnCode = EReturnCode::STORAGE_FULL;
-				return;
-			}
-			locals.transferResult = qpi.transferShareOwnershipAndPossession(output.game.currencyAsset.assetName, output.game.currencyAsset.issuer,
-			                                                                SELF, SELF, static_cast<sint64>(locals.assetAmount), output.game.owner);
-			if (locals.transferResult < 0)
-			{
-				output.returnCode = EReturnCode::TRANSFER_FAILED;
-				return;
-			}
-			locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.assetAmount);
-			locals.wallet.assets.set(locals.walletAssetSlot, locals.walletAsset);
-		}
-		// Clear pending ledgers only in the same commit that credits their destination wallet.
-		locals.wallet.serviceCredit = sadd(locals.wallet.serviceCredit, locals.serviceCreditReturned);
-		locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.qubicAmount - locals.serviceCreditReturned);
-		output.game.serviceCreditBalance -= locals.serviceCreditReturned;
-		output.game.pendingCreatorCurrencyPayout = 0;
-		output.game.pendingCreatorBalancePayout = 0;
-		output.game.pendingRunCreditPayout = 0;
 		state.mut().wallets.replace(output.game.owner, locals.wallet);
 		state.mut().games.set(input.slot, output.game);
-		output.returnCode = EReturnCode::SUCCESS;
+
+		// Keep fees separate from pool returns: their combined liability need not fit in one wallet credit.
+		for (locals.payoutIndex = 0; locals.payoutIndex < 2; ++locals.payoutIndex)
+		{
+			locals.pendingAmount = locals.payoutIndex == 0 ? output.game.pendingCreatorCurrencyPayout : output.game.pendingCreatorBalancePayout;
+			if (locals.pendingAmount == 0)
+			{
+				continue;
+			}
+			if (output.game.currencyMode == ECurrencyMode::QUBIC)
+			{
+				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.refundableQubic;
+			}
+			else
+			{
+				// Active asset games pin their wallet position until every creator liability is credited.
+				locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
+				if (!locals.walletAssetFound)
+				{
+					output.returnCode = EReturnCode::STORAGE_FULL;
+					return;
+				}
+				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.walletAsset.balance;
+			}
+			locals.amountToCredit = locals.pendingAmount < locals.availableCredit ? locals.pendingAmount : locals.availableCredit;
+			if (locals.amountToCredit == 0)
+			{
+				continue;
+			}
+			if (output.game.currencyMode == ECurrencyMode::QUBIC)
+			{
+				locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.amountToCredit);
+			}
+			else
+			{
+				locals.transferResult = qpi.transferShareOwnershipAndPossession(
+				    output.game.currencyAsset.assetName, output.game.currencyAsset.issuer, SELF, SELF,
+				    static_cast<sint64>(locals.amountToCredit), output.game.owner);
+				if (locals.transferResult < 0)
+				{
+					output.returnCode = EReturnCode::TRANSFER_FAILED;
+					return;
+				}
+				locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.amountToCredit);
+				locals.wallet.assets.set(static_cast<uint8>(locals.i), locals.walletAsset);
+			}
+			if (locals.payoutIndex == 0)
+			{
+				output.game.pendingCreatorCurrencyPayout -= locals.amountToCredit;
+			}
+			else
+			{
+				output.game.pendingCreatorBalancePayout -= locals.amountToCredit;
+			}
+			// Commit each completed credit before another transfer can fail; retries consume only the remainder.
+			state.mut().wallets.replace(output.game.owner, locals.wallet);
+			state.mut().games.set(input.slot, output.game);
+		}
+		output.returnCode = output.game.pendingRunCreditPayout == 0 && output.game.pendingCreatorBalancePayout == 0 &&
+		                            output.game.pendingCreatorCurrencyPayout == 0
+		                        ? EReturnCode::SUCCESS
+		                        : EReturnCode::STORAGE_FULL;
 	}
 
 	PRIVATE_FUNCTION(ValidateRoundFeeCapacity)
@@ -5746,8 +6181,8 @@ private:
 		}
 		locals.game = input.game;
 		locals.game.runCredit -= locals.game.roundFeeSnapshot;
-		locals.game.serviceCreditBalance -=
-		    locals.game.serviceCreditBalance < locals.game.roundFeeSnapshot ? locals.game.serviceCreditBalance : locals.game.roundFeeSnapshot;
+		locals.game.runServiceCredit -=
+		    locals.game.runServiceCredit < locals.game.roundFeeSnapshot ? locals.game.runServiceCredit : locals.game.roundFeeSnapshot;
 		locals.game.creatorBalance -= locals.game.creatorPrizeSeed;
 		state.mut().developer1Accrued = sadd(state.get().developer1Accrued, input.fees.developer1Fee);
 		state.mut().developer2Accrued = sadd(state.get().developer2Accrued, input.fees.developer2Fee);
@@ -5831,6 +6266,10 @@ private:
 			{
 				--locals.wallet.activeGameCount;
 			}
+			if (locals.wallet.activeGameCount == 0)
+			{
+				locals.wallet.serviceCreditUnlocked = true;
+			}
 			if (locals.game.currencyMode == ECurrencyMode::ASSET)
 			{
 				locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
@@ -5876,7 +6315,8 @@ private:
 		{
 			state.mut().activeGameCount = state.get().activeGameCount - 1;
 		}
-		state.mut().allocationCursor = input.slot;
+		state.mut().freeGameNext.set(input.slot, state.get().freeGameHead);
+		state.mut().freeGameHead = input.slot + 1;
 	}
 
 	PRIVATE_PROCEDURE_WITH_LOCALS(ProcessGame)
@@ -6023,11 +6463,28 @@ private:
 		       developer2Accrued <= PLDT_MAX_TRANSFER_AMOUNT - developer2Increment && dividendAccrued <= PLDT_MAX_TRANSFER_AMOUNT - dividendIncrement;
 	}
 
+	/** Debits the fixed creator-operation fee, consuming service credit before refundable Qubic. */
+	static bool debitWalletOperationFee(CreatorWallet& wallet)
+	{
+		if (wallet.serviceCredit >= PLDT_OPERATION_FEE)
+		{
+			wallet.serviceCredit -= PLDT_OPERATION_FEE;
+			return true;
+		}
+		if (wallet.refundableQubic < PLDT_OPERATION_FEE - wallet.serviceCredit)
+		{
+			return false;
+		}
+		wallet.refundableQubic -= PLDT_OPERATION_FEE - wallet.serviceCredit;
+		wallet.serviceCredit = 0;
+		return true;
+	}
+
 	/** Calculates the wallet buckets used for a Qubic credit and validates their capacity. */
-	static bool prepareWalletQubicCredit(const CreatorWallet& wallet, const uint64 amount, const uint64 serviceCreditBalance,
+	static bool prepareWalletQubicCredit(const CreatorWallet& wallet, const uint64 amount, const uint64 runServiceCredit,
 	                                     uint64& serviceCreditReturned)
 	{
-		serviceCreditReturned = serviceCreditBalance < amount ? serviceCreditBalance : amount;
+		serviceCreditReturned = runServiceCredit < amount ? runServiceCredit : amount;
 		return wallet.serviceCredit <= PLDT_MAX_TRANSFER_AMOUNT - serviceCreditReturned &&
 		       wallet.refundableQubic <= PLDT_MAX_TRANSFER_AMOUNT - (amount - serviceCreditReturned);
 	}
@@ -6049,6 +6506,12 @@ private:
 	static constexpr uint16 automationGameSlot(const uint16 inspected, const uint16 automationCursor)
 	{
 		return static_cast<uint16>(mod(static_cast<uint64>(automationCursor + inspected), static_cast<uint64>(PLDT_MAX_GAMES)));
+	}
+
+	/** Returns whether a modular uint16 epoch interval is old enough without accepting future epochs. */
+	static constexpr bool epochElapsedAtLeast(const uint16 current, const uint16 previous, const uint16 required)
+	{
+		return static_cast<uint16>(current - previous) >= required && static_cast<uint16>(current - previous) < 0x8000U;
 	}
 
 	/** Extracts the fixed game slot encoded in a generation-aware game id. */
