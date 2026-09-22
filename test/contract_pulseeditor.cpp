@@ -37,7 +37,6 @@ struct PulseEditorTestAccess : PLDT
 	using PLDT::findWalletAsset;
 	using PLDT::hasPlatformAccrualCapacity;
 	using PLDT::isSameAsset;
-	using PLDT::prepareWalletQubicCredit;
 	using PLDT::resolveOwnedGame;
 };
 
@@ -95,38 +94,18 @@ TEST(PulseEditorHelpers, PlatformAccrualCapacityRejectsOverflow)
 	EXPECT_FALSE(PulseEditorTestAccess::hasPlatformAccrualCapacity(PLDT_MAX_TRANSFER_AMOUNT - 2, 0, 0, 3, 0, 0));
 }
 
-TEST(PulseEditorHelpers, WalletQubicCreditReturnsServiceCreditBeforeRefundableQubic)
-{
-	PLDT::CreatorWallet wallet{};
-	wallet.serviceCredit = 100;
-	wallet.refundableQubic = 200;
-	uint64 serviceCreditReturned = 0;
 
-	EXPECT_TRUE(PulseEditorTestAccess::prepareWalletQubicCredit(wallet, 10, 6, serviceCreditReturned));
-	EXPECT_EQ(serviceCreditReturned, 6);
-}
-
-TEST(PulseEditorHelpers, WalletQubicCreditRejectsRefundableBalanceOverflow)
-{
-	PLDT::CreatorWallet wallet{};
-	wallet.refundableQubic = PLDT_MAX_TRANSFER_AMOUNT - 3;
-	uint64 serviceCreditReturned = 0;
-
-	EXPECT_FALSE(PulseEditorTestAccess::prepareWalletQubicCredit(wallet, 10, 6, serviceCreditReturned));
-}
 
 namespace
 {
 	constexpr uint16 PLDT_PROCEDURE_CREATE_GAME = 1;
 	constexpr uint16 PLDT_PROCEDURE_CREATE_WALLET = 2;
-	constexpr uint16 PLDT_PROCEDURE_FUND_GAME = 3;
 	constexpr uint16 PLDT_PROCEDURE_DEPOSIT_WALLET_QUBIC = 6;
 	constexpr uint16 PLDT_PROCEDURE_UPDATE_GAME_ECONOMICS = 5;
 	constexpr uint16 PLDT_PROCEDURE_STOP_GAME = 7;
-	constexpr uint16 PLDT_PROCEDURE_WITHDRAW_GAME_BALANCE = 10;
 	constexpr uint16 PLDT_PROCEDURE_TRANSFER_SHARE_MANAGEMENT_RIGHTS = 11;
 	constexpr uint16 PLDT_PROCEDURE_WITHDRAW_WALLET_QUBIC = 12;
-	constexpr uint16 PLDT_PROCEDURE_BUY_TICKET = 4;
+	constexpr uint16 PLDT_PROCEDURE_BUY_TICKETS = 15;
 	constexpr uint16 PLDT_PROCEDURE_SET_PLATFORM_CONFIG = 8;
 	constexpr uint16 PLDT_FUNCTION_GET_GAME = 1;
 	constexpr uint16 PLDT_FUNCTION_GET_GAME_RESULT = 2;
@@ -245,8 +224,6 @@ namespace
 		input.drawAt = DateAndTime(2025, 1, 4, 0, 0, 0);
 		input.ticketPrice = 100;
 		input.creatorPrizeSeed = seed;
-		input.initialRunCredit = PLDT_DEFAULT_ROUND_FEE;
-		input.initialCreatorBalance = seed;
 		input.ticketLimit = ticketLimit;
 		input.playerTicketLimit = ticketLimit;
 		input.codeLength = PLDT_MIN_CODE_LENGTH;
@@ -327,7 +304,7 @@ public:
 	{
 		const auto previewResult = preview(input);
 		const uint64 required = previewResult.initialQubicRequired + previewResult.operationFee;
-		const uint64 creatorRefundableRequired = input.currencyMode == PLDT::ECurrencyMode::QUBIC ? input.initialCreatorBalance : 0;
+		const uint64 creatorRefundableRequired = input.currencyMode == PLDT::ECurrencyMode::QUBIC ? input.creatorPrizeSeed : 0;
 		auto balance = wallet(owner);
 		if (!balance.found)
 		{
@@ -363,32 +340,13 @@ public:
 		return procedure<PLDT::CreateWallet_input, PLDT::CreateWallet_output>(PLDT_PROCEDURE_CREATE_WALLET, input, owner, amount);
 	}
 
-	PLDT::FundGame_output fundGameFromWallet(const id& owner, const PLDT::FundGame_input& input)
+	void depositWalletQubic(const id& owner, const uint64 amount)
 	{
-		const auto storedGame = game(input.gameId).game;
-		const uint64 requiredQubic = storedGame.currencyMode == PLDT::ECurrencyMode::QUBIC
-		                                  ? PLDT_OPERATION_FEE + input.runCreditTopUp + input.creatorBalanceTopUp
-		                                  : PLDT_OPERATION_FEE + input.runCreditTopUp;
-		const uint64 creatorRefundableRequired =
-			storedGame.currencyMode == PLDT::ECurrencyMode::QUBIC ? input.creatorBalanceTopUp : 0;
-		const auto balance = wallet(owner);
-		const uint64 totalShortfall = balance.serviceCredit + balance.refundableQubic < requiredQubic
-		                                  ? requiredQubic - balance.serviceCredit - balance.refundableQubic
-		                                  : 0;
-		const uint64 refundableShortfall = balance.refundableQubic < creatorRefundableRequired
-		                                       ? creatorRefundableRequired - balance.refundableQubic
-		                                       : 0;
-		const uint64 missing = totalShortfall > refundableShortfall ? totalShortfall : refundableShortfall;
-		if (missing > 0)
-		{
-			PLDT::DepositWalletQubic_input depositInput{};
-			fund(owner, static_cast<sint64>(missing));
-			EXPECT_EQ((procedure<PLDT::DepositWalletQubic_input, PLDT::DepositWalletQubic_output>(
-			               PLDT_PROCEDURE_DEPOSIT_WALLET_QUBIC, depositInput, owner, static_cast<sint64>(missing)))
-			              .returnCode,
-			          PLDT::EReturnCode::SUCCESS);
-		}
-		return procedure<PLDT::FundGame_input, PLDT::FundGame_output>(PLDT_PROCEDURE_FUND_GAME, input, owner);
+		PLDT::DepositWalletQubic_input input{};
+		fund(owner, static_cast<sint64>(amount));
+		ASSERT_EQ((procedure<PLDT::DepositWalletQubic_input, PLDT::DepositWalletQubic_output>(
+			PLDT_PROCEDURE_DEPOSIT_WALLET_QUBIC, input, owner, static_cast<sint64>(amount))).returnCode,
+			PLDT::EReturnCode::SUCCESS);
 	}
 
 	PLDT::GetWallet_output wallet(const id& owner) const
@@ -403,37 +361,41 @@ public:
 		return function<PLDT::PreviewGame_input, PLDT::PreviewGame_output>(PLDT_FUNCTION_PREVIEW_GAME, configuration);
 	}
 
-	PLDT::BuyTicket_output buy(const id& player, const uint64 gameId, const uint8 value)
+	PLDT::BuyTickets_output buy(const id& player, const uint64 gameId, const uint8 value)
 	{
-		PLDT::BuyTicket_input input{};
+		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
-		input.digits = digits(value);
-		return procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(PLDT_PROCEDURE_BUY_TICKET, input, player, 100);
+		input.ticketCount = 1;
+		input.tickets.set(0, digits(value));
+		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, 100);
 	}
 
-	PLDT::BuyTicket_output buyAtPrice(const id& player, const uint64 gameId, const uint8 value, const sint64 price)
+	PLDT::BuyTickets_output buyAtPrice(const id& player, const uint64 gameId, const uint8 value, const sint64 price)
 	{
-		PLDT::BuyTicket_input input{};
+		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
-		input.digits = digits(value);
-		return procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(PLDT_PROCEDURE_BUY_TICKET, input, player, price);
+		input.ticketCount = 1;
+		input.tickets.set(0, digits(value));
+		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, price);
 	}
 
-	PLDT::BuyTicket_output buyAsset(const id& player, const uint64 gameId, const uint8 value)
+	PLDT::BuyTickets_output buyAsset(const id& player, const uint64 gameId, const uint8 value)
 	{
-		PLDT::BuyTicket_input input{};
+		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
-		input.digits = digits(value);
-		return procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(PLDT_PROCEDURE_BUY_TICKET, input, player);
+		input.ticketCount = 1;
+		input.tickets.set(0, digits(value));
+		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player);
 	}
 
-	PLDT::BuyTicket_output buyDigits(const id& player, const uint64 gameId,
+	PLDT::BuyTickets_output buyDigits(const id& player, const uint64 gameId,
 	                                 const Array<uint8, PLDT_DIGITS_ALIGNED>& values)
 	{
-		PLDT::BuyTicket_input input{};
+		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
-		input.digits = values;
-		return procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(PLDT_PROCEDURE_BUY_TICKET, input, player, 100);
+		input.ticketCount = 1;
+		input.tickets.set(0, values);
+		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, 100);
 	}
 
 	PLDT::BuyTickets_output buyBatch(const id& player, const uint64 gameId, const std::initializer_list<uint8> values)
@@ -444,7 +406,7 @@ public:
 		{
 			input.tickets.set(input.ticketCount++, digits(value));
 		}
-		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, input, player,
+		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player,
 		                                                                              static_cast<sint64>(100 * values.size()));
 	}
 
@@ -762,7 +724,7 @@ TEST_F(ContractTestingPulseEditorV3, InvalidCreatorMutationStillConsumesOperatio
 	EXPECT_EQ(getContractFeeReserve(PLDT_CONTRACT_INDEX), 1100);
 }
 
-TEST_F(ContractTestingPulseEditorV3, ServiceCreditCannotFundQubicPrizeOrCreatorBalance)
+TEST_F(ContractTestingPulseEditorV3, ServiceCreditCannotFundQubicPrize)
 {
 	ASSERT_EQ(createWallet(CREATOR).returnCode, PLDT::EReturnCode::SUCCESS);
 	auto configuration = makeGame(1, 100);
@@ -777,7 +739,6 @@ TEST_F(ContractTestingPulseEditorV3, UnusedServiceCreditUnlocksAfterLastGameClos
 {
 	ASSERT_EQ(createWallet(CREATOR).returnCode, PLDT::EReturnCode::SUCCESS);
 	auto configuration = makeGame(1, 0);
-	configuration.initialCreatorBalance = 0;
 	const auto created = procedure<PLDT::CreateGame_input, PLDT::CreateGame_output>(
 		PLDT_PROCEDURE_CREATE_GAME, configuration, CREATOR);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -815,6 +776,302 @@ TEST_F(ContractTestingPulseEditorV3, AutomationVisitsAdjacentGameSlots)
 	EXPECT_EQ(contractState->games.get(1).status, PLDT::EGameStatus::SELLING);
 }
 
+TEST_F(ContractTestingPulseEditorV3, AutomationSkipsEmptySlotsAcrossWrapAndPreservesTickPeriod)
+{
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	PLDT::Game scheduled{};
+	scheduled.startAt = DateAndTime(2025, 1, 3, 0, 0, 0);
+	scheduled.drawAt = DateAndTime(2025, 1, 5, 0, 0, 0);
+	scheduled.status = PLDT::EGameStatus::SCHEDULED;
+	scheduled.gameId = 1924;
+	contractState->games.set(900, scheduled);
+	scheduled.gameId = 1024;
+	contractState->games.set(0, scheduled);
+	contractState->activeGameCount = 2;
+	contractState->automationCursor = 800;
+	setCalendar(2025, 1, 3);
+
+	beginTickAt(99);
+	EXPECT_EQ(contractState->games.get(900).status, PLDT::EGameStatus::SCHEDULED);
+	EXPECT_EQ(contractState->games.get(0).status, PLDT::EGameStatus::SCHEDULED);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 800);
+
+	beginTickAt(100);
+	EXPECT_EQ(contractState->games.get(900).status, PLDT::EGameStatus::SELLING);
+	EXPECT_EQ(contractState->games.get(0).status, PLDT::EGameStatus::SELLING);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 800);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationLimitsNonemptyGamesAndContinuesAfterLastVisitedSlot)
+{
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	PLDT::Game scheduled{};
+	scheduled.startAt = DateAndTime(2025, 1, 3, 0, 0, 0);
+	scheduled.drawAt = DateAndTime(2025, 1, 4, 0, 0, 0);
+	scheduled.status = PLDT::EGameStatus::SCHEDULED;
+	for (uint16 i = 0; i < 33; ++i)
+	{
+		scheduled.gameId = 1024 + i * 20;
+		contractState->games.set(i * 20, scheduled);
+	}
+	contractState->activeGameCount = 33;
+	setCalendar(2025, 1, 3);
+
+	beginTickAt(100);
+	for (uint16 i = 0; i < 32; ++i)
+	{
+		EXPECT_EQ(contractState->games.get(i * 20).status, PLDT::EGameStatus::SELLING);
+	}
+	EXPECT_EQ(contractState->games.get(640).status, PLDT::EGameStatus::SCHEDULED);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 621);
+
+	beginTickAt(200);
+	EXPECT_EQ(contractState->games.get(640).status, PLDT::EGameStatus::SELLING);
+	// Already-selling games still consume visits; the second pass ends at slot 600.
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 601);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationFullRegistryAdvancesByThirtyTwoGames)
+{
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	PLDT::Game scheduled{};
+	scheduled.startAt = DateAndTime(2025, 1, 3, 0, 0, 0);
+	scheduled.drawAt = DateAndTime(2025, 1, 4, 0, 0, 0);
+	scheduled.status = PLDT::EGameStatus::SCHEDULED;
+	for (uint16 i = 0; i < PLDT_MAX_GAMES; ++i)
+	{
+		scheduled.gameId = 1024 + i;
+		contractState->games.set(i, scheduled);
+	}
+	contractState->activeGameCount = PLDT_MAX_GAMES;
+	setCalendar(2025, 1, 3);
+	beginTickAt(100);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 32);
+	EXPECT_EQ(contractState->games.get(31).status, PLDT::EGameStatus::SELLING);
+	EXPECT_EQ(contractState->games.get(32).status, PLDT::EGameStatus::SCHEDULED);
+	beginTickAt(200);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 64);
+	for (uint16 i = 0; i < PLDT_MAX_GAMES; ++i)
+	{
+		EXPECT_EQ(contractState->games.get(i).status,
+		          i < 64 ? PLDT::EGameStatus::SELLING : PLDT::EGameStatus::SCHEDULED);
+	}
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationCountsGamesThatCloseDuringProcessing)
+{
+	ASSERT_EQ(createWallet(CREATOR).returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(createWallet(SECOND_PLAYER).returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(createWallet(OUTSIDER).returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	PLDT::CreatorWallet creatorWallet{};
+	for (const auto& owner : {CREATOR, SECOND_PLAYER, OUTSIDER})
+	{
+		ASSERT_TRUE(contractState->wallets.get(owner, creatorWallet));
+		creatorWallet.activeGameCount = 11;
+		contractState->wallets.replace(owner, creatorWallet);
+	}
+	PLDT::Game closing{};
+	closing.startAt = DateAndTime(2025, 1, 3, 0, 0, 0);
+	closing.drawAt = DateAndTime(2025, 1, 4, 0, 0, 0);
+	closing.status = PLDT::EGameStatus::SELLING;
+	closing.mode = PLDT::EGameMode::ONE_SHOT;
+	closing.roundNumber = 1;
+	for (uint16 i = 0; i < 33; ++i)
+	{
+		closing.owner = i % 3 == 0 ? CREATOR : (i % 3 == 1 ? SECOND_PLAYER : OUTSIDER);
+		closing.gameId = 1024 + i * 2;
+		contractState->games.set(i * 2, closing);
+	}
+	contractState->activeGameCount = 33;
+	setCalendar(2025, 1, 4);
+
+	beginTickAt(100);
+	EXPECT_EQ(contractState->resultCounter, 32ULL);
+	EXPECT_EQ(static_cast<uint32>(contractState->activeGameCount), 1);
+	EXPECT_EQ(contractState->games.get(64).status, PLDT::EGameStatus::SELLING);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 63);
+	beginTickAt(200);
+	EXPECT_EQ(contractState->resultCounter, 33ULL);
+	EXPECT_EQ(static_cast<uint32>(contractState->activeGameCount), 0);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationRevisitsSparsePermanentGameOnNextPassWithoutDoubleFee)
+{
+	auto configuration = makeGame(2, 100);
+	configuration.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, configuration);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto serviceBefore = wallet(CREATOR).serviceCredit;
+	setCalendar(2025, 1, 4);
+	beginTickAt(100);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, serviceBefore - 10000);
+	EXPECT_EQ(platformAccounting().resultCounter, 1ULL);
+
+	setCalendar(2025, 1, 5);
+	beginTickAt(200);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 3ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, serviceBefore - 20000);
+	EXPECT_EQ(platformAccounting().resultCounter, 2ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationEmptyRegistryStillReclaimsTicketsAndExpiresWallets)
+{
+	const auto created = createGame(CREATOR, makeGame(1, 0));
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 3);
+	ASSERT_EQ(buy(PLAYER, created.gameId, 0).returnCode, PLDT::EReturnCode::SUCCESS);
+	beginTickAt(100);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	ASSERT_EQ(static_cast<uint32>(contractState->activeGameCount), 0);
+	ASSERT_EQ(contractState->freeTicketCount, 0U);
+	contractState->nextUnusedTicketSlot = PLDT_MAX_TICKETS;
+	contractState->automationCursor = 777;
+	const auto walletIndex = contractState->wallets.getElementIndex(CREATOR);
+	ASSERT_GE(walletIndex, 0);
+	contractState->walletAutomationCursor = static_cast<uint16>(walletIndex);
+	system.epoch = static_cast<uint16>(system.epoch + 2);
+	const auto creatorWallet = wallet(CREATOR);
+	const auto balanceBefore = getBalance(CREATOR);
+
+	beginTickAt(200);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 777);
+	EXPECT_EQ(contractState->freeTicketCount, 1U);
+	EXPECT_FALSE(result(created.gameId).roundResult.detailsAvailable);
+	EXPECT_FALSE(wallet(CREATOR).found);
+	EXPECT_EQ(getBalance(CREATOR), balanceBefore + creatorWallet.serviceCredit + creatorWallet.refundableQubic);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationCountsRetryableFailuresAgainstGameLimit)
+{
+	std::vector<PLDT::CreateGame_output> created;
+	for (uint16 i = 0; i < 33; ++i)
+	{
+		const id owner = i < 16 ? CREATOR : (i < 32 ? SECOND_PLAYER : OUTSIDER);
+		created.push_back(createGame(owner, makeGame(2, 100)));
+		ASSERT_EQ(created.back().returnCode, PLDT::EReturnCode::SUCCESS);
+	}
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	// Simulate exhausted wallet credit capacity: returning each seed must remain retryable.
+	for (const auto& owner : {CREATOR, SECOND_PLAYER, OUTSIDER})
+	{
+		PLDT::CreatorWallet fullWallet{};
+		ASSERT_TRUE(contractState->wallets.get(owner, fullWallet));
+		fullWallet.refundableQubic = PLDT_MAX_TRANSFER_AMOUNT;
+		contractState->wallets.replace(owner, fullWallet);
+	}
+	setCalendar(2025, 1, 4);
+	beginTickAt(100);
+	for (uint16 i = 0; i < 32; ++i)
+	{
+		const auto& pending = contractState->games.get(created[i].slot);
+		EXPECT_EQ(pending.status, PLDT::EGameStatus::FINALIZING);
+		EXPECT_EQ(pending.pendingPrizePoolPayout, 100ULL);
+	}
+	EXPECT_EQ(contractState->games.get(created[32].slot).status, PLDT::EGameStatus::SCHEDULED);
+	EXPECT_EQ(contractState->resultCounter, 0ULL);
+	EXPECT_EQ(static_cast<uint32>(contractState->automationCursor), 32U);
+
+	// The next pass must reach the deferred game despite the preceding retry failures.
+	beginTickAt(200);
+	EXPECT_EQ(contractState->games.get(created[32].slot).status, PLDT::EGameStatus::FINALIZING);
+	EXPECT_EQ(contractState->games.get(created[32].slot).pendingPrizePoolPayout, 100ULL);
+	EXPECT_EQ(contractState->resultCounter, 0ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationReclamationUsesOnlyBudgetRemainingAfterSettlement)
+{
+	auto configuration = makeGame(65, 0);
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(4, 0), 10000);
+	const auto oldGame = createGame(CREATOR, configuration);
+	ASSERT_EQ(oldGame.returnCode, PLDT::EReturnCode::SUCCESS);
+	const m256i digest(25, 26, 27, 28);
+	etalonTick.prevSpectrumDigest = digest;
+	const auto oldWinning = expectedWinningDigits(digest, oldGame.gameId, 65, configuration.codeLength,
+	                                             configuration.maxDigit, configuration.allowRepeatedDigits);
+	setCalendar(2025, 1, 3);
+	fund(PLAYER, 6500);
+	for (uint16 i = 0; i < 65; ++i)
+	{
+		ASSERT_EQ(buyDigits(PLAYER, oldGame.gameId, oldWinning).returnCode, PLDT::EReturnCode::SUCCESS);
+	}
+	beginTickAt(100);
+	beginTickAt(200);
+	beginTickAt(300);
+	ASSERT_EQ(result(oldGame.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+
+	configuration.ticketLimit = 1;
+	configuration.playerTicketLimit = 1;
+	configuration.startAt = DateAndTime(2025, 1, 4, 0, 0, 0);
+	configuration.drawAt = DateAndTime(2025, 1, 5, 0, 0, 0);
+	const auto currentGame = createGame(CREATOR, configuration);
+	ASSERT_EQ(currentGame.returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto currentWinning = expectedWinningDigits(digest, currentGame.gameId, 1, configuration.codeLength,
+	                                                 configuration.maxDigit, configuration.allowRepeatedDigits);
+	setCalendar(2025, 1, 4);
+	const auto purchase = buyDigits(PLAYER, currentGame.gameId, currentWinning);
+	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	ASSERT_EQ(contractState->freeTicketCount, 0U);
+	// Trigger reclamation pressure without filling a million live ticket slots.
+	contractState->nextUnusedTicketSlot = PLDT_MAX_TICKETS;
+
+	beginTickAt(400);
+	ASSERT_EQ(result(currentGame.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.status, PLDT::ETicketStatus::PAID);
+	// One classification and one payment leave exactly 62 of the 64 actions for reclamation.
+	EXPECT_EQ(contractState->freeTicketCount, 62U);
+	EXPECT_FALSE(result(oldGame.gameId).roundResult.detailsAvailable);
+	EXPECT_TRUE(result(currentGame.gameId).roundResult.detailsAvailable);
+
+	beginTickAt(500);
+	EXPECT_EQ(contractState->freeTicketCount, 66U);
+	EXPECT_FALSE(result(currentGame.gameId).roundResult.detailsAvailable);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AutomationBusyPermanentGameCannotStarveFollowingSettlement)
+{
+	auto configuration = makeGame(32, 0);
+	configuration.mode = PLDT::EGameMode::PERMANENT;
+	configuration.tierWeightsBps = {};
+	// Tickets containing only zero have no misplaced matches; every possible exact count wins.
+	for (uint8 exact = 0; exact <= 4; ++exact)
+	{
+		configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(exact, 0), 2000);
+	}
+	const auto busy = createGame(CREATOR, configuration);
+	ASSERT_EQ(busy.returnCode, PLDT::EReturnCode::SUCCESS);
+	configuration.mode = PLDT::EGameMode::ONE_SHOT;
+	configuration.ticketLimit = 1;
+	configuration.playerTicketLimit = 1;
+	const auto waiting = createGame(OUTSIDER, configuration);
+	ASSERT_EQ(waiting.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 3);
+	fund(PLAYER, 20000);
+	ASSERT_EQ(buy(PLAYER, waiting.gameId, 0).returnCode, PLDT::EReturnCode::SUCCESS);
+
+	for (uint32 tick = 100; tick <= 400; tick += 100)
+	{
+		if (game(busy.gameId).game.ticketCount == 0)
+		{
+			for (uint16 batch = 0; batch < 2; ++batch)
+			{
+				PLDT::BuyTickets_input purchase{};
+				purchase.gameId = busy.gameId;
+				purchase.ticketCount = 16;
+				ASSERT_EQ((procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, purchase, PLAYER, 1600)).returnCode,
+				          PLDT::EReturnCode::SUCCESS);
+			}
+		}
+		beginTickAt(tick);
+	}
+	const auto completed = result(waiting.gameId);
+	ASSERT_EQ(completed.returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(completed.roundResult.totalPaid, 93ULL);
+}
+
 TEST_F(ContractTestingPulseEditorV3, WalletQubicDepositAndWithdrawalPreserveServiceCredit)
 {
 	ASSERT_EQ(createWallet(CREATOR).returnCode, PLDT::EReturnCode::SUCCESS);
@@ -845,7 +1102,7 @@ TEST_F(ContractTestingPulseEditorV3, CreateGameConsumesWalletServiceCreditWithou
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	const auto balance = wallet(CREATOR);
 	EXPECT_EQ(balance.serviceCredit,
-	          PLDT_DEFAULT_WALLET_CREATION_FEE - PLDT_OPERATION_FEE - input.initialRunCredit);
+	          PLDT_DEFAULT_WALLET_CREATION_FEE - PLDT_OPERATION_FEE - PLDT_DEFAULT_ROUND_FEE);
 	EXPECT_EQ(balance.refundableQubic, 0);
 	EXPECT_EQ(static_cast<uint32>(balance.activeGameCount), 1U);
 }
@@ -1067,7 +1324,7 @@ TEST_F(ContractTestingPulseEditorV3, FailedInitialAssetTransferPreservesWalletAn
 	const auto rejected = procedure<PLDT::CreateGame_input, PLDT::CreateGame_output>(
 		PLDT_PROCEDURE_CREATE_GAME, configuration, CREATOR);
 
-	EXPECT_EQ(rejected.returnCode, PLDT::EReturnCode::INSUFFICIENT_FUNDS);
+	EXPECT_EQ(rejected.returnCode, PLDT::EReturnCode::TRANSFER_FAILED);
 	const auto walletAfter = wallet(CREATOR);
 	EXPECT_EQ(walletAfter.serviceCredit, walletBefore.serviceCredit - 100);
 	EXPECT_EQ(walletAfter.assets.get(0).balance, 100);
@@ -1197,58 +1454,325 @@ TEST_F(ContractTestingPulseEditorV3, TicketPurchaseRejectsPlatformLiabilityOverf
 	EXPECT_EQ(getBalance(PLAYER), 10000);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentCreationSeparatesCreditBalanceAndFirstRoundSeed)
+TEST_F(ContractTestingPulseEditorV3, SharedWalletReturnedSeedFundsNextRoundWithoutGameTopUp)
 {
-	PLDT::CreateGame_input input{};
-	input = makeGame(2, 100);
+	auto input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 30000;
-	input.initialCreatorBalance = 500;
 	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
 
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+
+	const auto current = game(created.gameId);
+	ASSERT_EQ(current.returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(current.game.roundNumber, 2ULL);
+	EXPECT_EQ(current.game.prizePool, 100ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+	EXPECT_EQ(result(created.gameId).gameResult.gameStopReason, PLDT::EGameStopReason::NONE);
+	processFirstGameAt(200);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 1ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, AssetAccountingCapacityRejectionRefundsUnexpectedQubicForOneAndTwoTicketBatches)
+{
+	const Asset currency{CREATOR, assetNameFromString("PEDREF")};
+	ASSERT_EQ(issueAsset(currency, 400), 400);
+	ASSERT_EQ(transferAsset(currency, CREATOR, PLAYER, 300), 300);
+	ASSERT_EQ(transferAssetManagement(currency, CREATOR, 100, PLDT_CONTRACT_INDEX), 100);
+	ASSERT_EQ(transferAssetManagement(currency, PLAYER, 300, PLDT_CONTRACT_INDEX), 300);
+	auto input = makeGame(4, 100);
+	input.currencyMode = PLDT::ECurrencyMode::ASSET;
+	input.currencyAsset = currency;
+	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
+	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	const auto accountingSlot = game(created.gameId).game.assetAccountingLink - 1;
+	auto accounting = contractState->assetAccounting.get(accountingSlot);
+	accounting.dividendAccrued = PLDT_MAX_TRANSFER_AMOUNT;
+	contractState->assetAccounting.set(accountingSlot, accounting);
+	setCalendar(2025, 1, 3);
+	fund(PLAYER, 1000);
+	const auto before = getBalance(PLAYER);
+	PLDT::BuyTickets_input single{};
+	single.gameId = created.gameId;
+	single.ticketCount = 1;
+	single.tickets.set(0, digits(0));
+	const auto rejectedSingle = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+		PLDT_PROCEDURE_BUY_TICKETS, single, PLAYER, 77);
+	EXPECT_EQ(rejectedSingle.returnCode, PLDT::EReturnCode::STORAGE_FULL);
+	EXPECT_EQ(getBalance(PLAYER), before);
+	PLDT::BuyTickets_input batch{};
+	batch.gameId = created.gameId;
+	batch.ticketCount = 2;
+	batch.tickets.set(0, digits(0));
+	batch.tickets.set(1, digits(1));
+	const auto rejectedBatch = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, batch, PLAYER, 123);
+	EXPECT_EQ(rejectedBatch.returnCode, PLDT::EReturnCode::STORAGE_FULL);
+	EXPECT_EQ(getBalance(PLAYER), before);
+	EXPECT_EQ(static_cast<uint32>(game(created.gameId).game.ticketCount), 0U);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
+	EXPECT_EQ(wallet(PLAYER).assets.get(0).balance, 300ULL);
+	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, PLAYER, PLAYER,
+		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 300);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletZeroSeedStillPaysEachRoundFee)
+{
+	auto input = makeGame(2, 0);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	ASSERT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletFeeUsesServiceCreditBeforeRefundableQubic)
+{
+	reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX])->walletCreationFee = 5100;
+	ASSERT_EQ(createWallet(CREATOR, 15200).returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto created = procedure<PLDT::CreateGame_input, PLDT::CreateGame_output>(
+		PLDT_PROCEDURE_CREATE_GAME, makeGame(2, 100), CREATOR);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 5000ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletInsufficientCreationFeeDoesNotReserveSeed)
+{
+	reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX])->walletCreationFee = 100;
+	ASSERT_EQ(createWallet(CREATOR, 10199).returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto before = platformAccounting();
+	const auto created = procedure<PLDT::CreateGame_input, PLDT::CreateGame_output>(
+		PLDT_PROCEDURE_CREATE_GAME, makeGame(2, 100), CREATOR);
+	EXPECT_EQ(created.returnCode, PLDT::EReturnCode::INSUFFICIENT_FUNDS);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 10099ULL);
+	EXPECT_EQ(static_cast<uint32>(wallet(CREATOR).activeGameCount), 0U);
+	EXPECT_EQ(platformAccounting().developer1Accrued, before.developer1Accrued);
+	EXPECT_EQ(platformAccounting().resultCounter, 0ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletTwoGamesCannotSpendTheSameRoundFee)
+{
+	reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX])->walletCreationFee = 30200;
+	ASSERT_EQ(createWallet(CREATOR, 30200).returnCode, PLDT::EReturnCode::SUCCESS);
+	auto input = makeGame(2, 0);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto first = createGame(CREATOR, input);
+	const auto second = createGame(CREATOR, input);
+	ASSERT_EQ(first.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(second.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(wallet(CREATOR).serviceCredit, 10000ULL);
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	EXPECT_EQ(game(first.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(game(second.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
+	EXPECT_EQ(result(second.gameId).gameResult.gameStopReason, PLDT::EGameStopReason::OUT_OF_FUNDS);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 0ULL);
+	EXPECT_EQ(static_cast<uint32>(wallet(CREATOR).activeGameCount), 1U);
+	EXPECT_EQ(platformAccounting().developer1Accrued, 7500ULL);
+	EXPECT_EQ(platformAccounting().developer2Accrued, 7500ULL);
+	EXPECT_EQ(platformAccounting().dividendAccrued, 15000ULL);
+	processFirstGameAt(200);
+	EXPECT_EQ(platformAccounting().resultCounter, 2ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletWithdrawalAffectsNextSeedButNotCurrentWinner)
+{
+	ASSERT_EQ(createWallet(CREATOR, PLDT_DEFAULT_WALLET_CREATION_FEE + 200).returnCode, PLDT::EReturnCode::SUCCESS);
+	auto input = makeGame(1, 100);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	PLDT::WithdrawWalletQubic_input withdrawal{};
+	withdrawal.amount = 100;
+	ASSERT_EQ((procedure<PLDT::WithdrawWalletQubic_input, PLDT::WithdrawWalletQubic_output>(
+		PLDT_PROCEDURE_WITHDRAW_WALLET_QUBIC, withdrawal, CREATOR)).returnCode, PLDT::EReturnCode::SUCCESS);
+	const m256i digest(9, 10, 11, 12);
+	etalonTick.prevSpectrumDigest = digest;
+	const auto winning = expectedWinningDigits(digest, created.gameId, 1, input.codeLength, input.maxDigit, input.allowRepeatedDigits);
+	setCalendar(2025, 1, 3);
+	const auto purchase = buyDigits(PLAYER, created.gameId, winning);
+	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
+	processFirstGameAt(100);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.payout, 193ULL);
+	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
+	EXPECT_EQ(result(created.gameId).gameResult.gameStopReason, PLDT::EGameStopReason::OUT_OF_FUNDS);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	EXPECT_EQ(platformAccounting().developer1Accrued, 2500ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletCreatorRevenueFundsNextSeedAfterWinnerPayout)
+{
+	auto input = makeGame(1, 9);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	input.creatorFeePercent = 10;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	const m256i digest(9, 10, 11, 12);
+	etalonTick.prevSpectrumDigest = digest;
+	const auto winning = expectedWinningDigits(digest, created.gameId, 1, input.codeLength, input.maxDigit, input.allowRepeatedDigits);
+	setCalendar(2025, 1, 3);
+	const auto purchase = buyDigits(PLAYER, created.gameId, winning);
+	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	processFirstGameAt(100);
+	ASSERT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 9ULL);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.payout, 93ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletPlatformCapacityRetryDoesNotChargeTwice)
+{
+	auto input = makeGame(2, 100);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	contractState->developer1Accrued = PLDT_MAX_TRANSFER_AMOUNT;
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	ASSERT_EQ(game(created.gameId).game.status, PLDT::EGameStatus::FINALIZING);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 100ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	processFirstGameAt(200);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 100ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 0ULL);
+	contractState->developer1Accrued = 0;
+	processFirstGameAt(300);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	EXPECT_EQ(platformAccounting().developer1Accrued, 2500ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 1ULL);
+	processFirstGameAt(400);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletAssetRolloverRetriesCustodyWithoutChargingOrLosingUpdate)
+{
+	const Asset currency{CREATOR, assetNameFromString("PEDNEXT")};
+	ASSERT_EQ(issueAsset(currency, 150), 150);
+	ASSERT_EQ(transferAssetManagement(currency, CREATOR, 150, PLDT_CONTRACT_INDEX), 150);
+	auto input = makeGame(2, 100);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	input.currencyMode = PLDT::ECurrencyMode::ASSET;
+	input.currencyAsset = currency;
+	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
+	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	PLDT::UpdateGameEconomics_input update{};
+	update.gameId = created.gameId;
+	update.ticketPrice = 100;
+	update.creatorPrizeSeed = 150;
+	update.ticketLimit = 2;
+	update.playerTicketLimit = 2;
+	ASSERT_EQ((procedure<PLDT::UpdateGameEconomics_input, PLDT::UpdateGameEconomics_output>(
+		PLDT_PROCEDURE_UPDATE_GAME_ECONOMICS, update, CREATOR)).returnCode, PLDT::EReturnCode::SUCCESS);
+	{
+		QpiContextSystemProcedureCall qpi(PLDT_CONTRACT_INDEX, BEGIN_TICK);
+		ASSERT_GE(qpi.transferShareOwnershipAndPossession(currency.assetName, currency.issuer, CREATOR, CREATOR, 50, OUTSIDER), 0);
+	}
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	ASSERT_EQ(game(created.gameId).game.status, PLDT::EGameStatus::FINALIZING);
+	EXPECT_TRUE(game(created.gameId).game.pendingEconomics.isSet);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 150ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989800ULL);
+	EXPECT_EQ(platformAccounting().developer1Accrued, 2500ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 0ULL);
+	processFirstGameAt(200);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 150ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989800ULL);
+	{
+		QpiContextSystemProcedureCall qpi(PLDT_CONTRACT_INDEX, BEGIN_TICK);
+		ASSERT_GE(qpi.transferShareOwnershipAndPossession(currency.assetName, currency.issuer, OUTSIDER, OUTSIDER, 50, CREATOR), 0);
+	}
+	processFirstGameAt(300);
+	ASSERT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 150ULL);
+	EXPECT_FALSE(game(created.gameId).game.pendingEconomics.isSet);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979800ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 1ULL);
+	EXPECT_EQ(result(created.gameId).gameResult.prizePool, 100ULL);
+	processFirstGameAt(400);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979800ULL);
+	EXPECT_EQ(platformAccounting().resultCounter, 1ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, SharedWalletZeroAssetSeedDoesNotTransferShares)
+{
+	const Asset currency{CREATOR, assetNameFromString("PEDZERO")};
+	ASSERT_EQ(issueAsset(currency, 1), 1);
+	ASSERT_EQ(transferAssetManagement(currency, CREATOR, 1, PLDT_CONTRACT_INDEX), 1);
+	auto input = makeGame(2, 0);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	input.currencyMode = PLDT::ECurrencyMode::ASSET;
+	input.currencyAsset = currency;
+	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
+	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
+	const auto created = createGame(CREATOR, input);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 1ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 979900ULL);
+	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, contractId(), contractId(),
+		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 0);
+}
+
+TEST_F(ContractTestingPulseEditorV3, PermanentCreationLeavesFutureFundsInWallet)
+{
+	ASSERT_EQ(createWallet(CREATOR, PLDT_DEFAULT_WALLET_CREATION_FEE + 500).returnCode, PLDT::EReturnCode::SUCCESS);
+	auto input = makeGame(2, 100);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	const auto stored = game(created.gameId).game;
 	EXPECT_EQ(stored.mode, PLDT::EGameMode::PERMANENT);
 	EXPECT_EQ(stored.roundNumber, 1ULL);
-	EXPECT_EQ(stored.runCredit, 20000ULL);
-	EXPECT_EQ(stored.creatorBalance, 400ULL);
 	EXPECT_EQ(stored.prizePool, 100ULL);
 	EXPECT_EQ(stored.roundFeeSnapshot, 10000ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 400ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentOwnerCanFundAndWithdrawOnlyUnreservedLedgers)
+TEST_F(ContractTestingPulseEditorV3, WalletWithdrawalDoesNotWithdrawCurrentPrizePool)
 {
-	PLDT::CreateGame_input createInput{};
-	createInput = makeGame(2, 100);
-	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 10000;
-	createInput.initialCreatorBalance = 100;
-	const auto created = createGame(CREATOR, createInput);
+	ASSERT_EQ(createWallet(CREATOR, PLDT_DEFAULT_WALLET_CREATION_FEE + 300).returnCode, PLDT::EReturnCode::SUCCESS);
+	auto input = makeGame(2, 100);
+	input.mode = PLDT::EGameMode::PERMANENT;
+	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.runCreditTopUp = 15000;
-	fundInput.creatorBalanceTopUp = 200;
-	const auto funded = fundGameFromWallet(CREATOR, fundInput);
-	ASSERT_EQ(funded.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(game(created.gameId).game.runCredit, 15000ULL);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 200ULL);
-
-	const auto balanceBefore = wallet(CREATOR);
-	PLDT::WithdrawGameBalance_input withdrawInput{};
-	withdrawInput.gameId = created.gameId;
-	withdrawInput.runCreditAmount = 5000;
-	withdrawInput.creatorBalanceAmount = 50;
-	const auto withdrawn = procedure<PLDT::WithdrawGameBalance_input, PLDT::WithdrawGameBalance_output>(
-		PLDT_PROCEDURE_WITHDRAW_GAME_BALANCE, withdrawInput, CREATOR);
-	ASSERT_EQ(withdrawn.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(withdrawn.runCreditPaid, 5000ULL);
-	EXPECT_EQ(withdrawn.creatorBalancePaid, 50ULL);
-	EXPECT_EQ(wallet(CREATOR).serviceCredit + wallet(CREATOR).refundableQubic,
-	          balanceBefore.serviceCredit + balanceBefore.refundableQubic + 5050 - PLDT_OPERATION_FEE);
-	EXPECT_EQ(game(created.gameId).game.runCredit, 10000ULL);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 150ULL);
+	depositWalletQubic(CREATOR, 50);
+	PLDT::WithdrawWalletQubic_input withdrawal{};
+	withdrawal.amount = 251;
+	EXPECT_EQ((procedure<PLDT::WithdrawWalletQubic_input, PLDT::WithdrawWalletQubic_output>(
+		PLDT_PROCEDURE_WITHDRAW_WALLET_QUBIC, withdrawal, CREATOR)).returnCode, PLDT::EReturnCode::INSUFFICIENT_FUNDS);
+	withdrawal.amount = 250;
+	EXPECT_EQ((procedure<PLDT::WithdrawWalletQubic_input, PLDT::WithdrawWalletQubic_output>(
+		PLDT_PROCEDURE_WITHDRAW_WALLET_QUBIC, withdrawal, CREATOR)).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
 }
 
 TEST_F(ContractTestingPulseEditorV3, PermanentNoTicketRoundReturnsSeedAndAppliesPendingEconomicsOnImmediateRollover)
@@ -1256,11 +1780,10 @@ TEST_F(ContractTestingPulseEditorV3, PermanentNoTicketRoundReturnsSeedAndApplies
 	PLDT::CreateGame_input createInput{};
 	createInput = makeGame(2, 100);
 	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 30000;
-	createInput.initialCreatorBalance = 500;
 	const auto created = createGame(CREATOR, createInput);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 
+	depositWalletQubic(CREATOR, 100);
 	PLDT::UpdateGameEconomics_input update{};
 	update.gameId = created.gameId;
 	update.ticketPrice = 250;
@@ -1280,9 +1803,7 @@ TEST_F(ContractTestingPulseEditorV3, PermanentNoTicketRoundReturnsSeedAndApplies
 	EXPECT_EQ(next.ticketPrice, 250ULL);
 	EXPECT_EQ(next.creatorPrizeSeed, 150ULL);
 	EXPECT_EQ(next.prizePool, 150ULL);
-	EXPECT_EQ(next.runCredit, 10000ULL);
-	EXPECT_EQ(next.creatorBalance, 250ULL);
-	EXPECT_EQ(wallet(CREATOR).refundableQubic, 100ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 50ULL);
 	EXPECT_EQ(next.startAt, DateAndTime(2025, 1, 4, 0, 0, 0));
 	EXPECT_EQ(next.drawAt, DateAndTime(2025, 1, 5, 0, 0, 0));
 	EXPECT_EQ(next.status, PLDT::EGameStatus::SELLING);
@@ -1293,8 +1814,6 @@ TEST_F(ContractTestingPulseEditorV3, PermanentStopsOnceWhenNextExactDrawExceedsD
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 200;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 
@@ -1315,13 +1834,11 @@ TEST_F(ContractTestingPulseEditorV3, PermanentStopsOnceWhenNextExactDrawExceedsD
 	EXPECT_EQ(platformAccounting().resultCounter, counter);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentPreStartStopRefundsLedgersAndSeedButKeepsChargedFee)
+TEST_F(ContractTestingPulseEditorV3, PermanentPreStartStopReturnsSeedButKeepsChargedFee)
 {
 	PLDT::CreateGame_input createInput{};
 	createInput = makeGame(2, 100);
 	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 20000;
-	createInput.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, createInput);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	const auto balanceBefore = wallet(CREATOR);
@@ -1333,7 +1850,7 @@ TEST_F(ContractTestingPulseEditorV3, PermanentPreStartStopRefundsLedgersAndSeedB
 
 	EXPECT_EQ(stopped.returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(wallet(CREATOR).serviceCredit + wallet(CREATOR).refundableQubic,
-	          balanceBefore.serviceCredit + balanceBefore.refundableQubic + 10300 - PLDT_OPERATION_FEE);
+	          balanceBefore.serviceCredit + balanceBefore.refundableQubic + 100 - PLDT_OPERATION_FEE);
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
 	const auto completed = result(created.gameId);
 	ASSERT_EQ(completed.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -1343,11 +1860,11 @@ TEST_F(ContractTestingPulseEditorV3, PermanentPreStartStopRefundsLedgersAndSeedB
 
 TEST_F(ContractTestingPulseEditorV3, PermanentStopsOutOfFundsAfterCompletingCurrentNoTicketRound)
 {
+	reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX])->walletCreationFee = 10100;
+	ASSERT_EQ(createWallet(CREATOR, 10200).returnCode, PLDT::EReturnCode::SUCCESS);
 	PLDT::CreateGame_input createInput{};
 	createInput = makeGame(2, 100);
 	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 10000;
-	createInput.initialCreatorBalance = 100;
 	const auto created = createGame(CREATOR, createInput);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 
@@ -1355,13 +1872,13 @@ TEST_F(ContractTestingPulseEditorV3, PermanentStopsOutOfFundsAfterCompletingCurr
 	processFirstGameAt(100);
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
 	EXPECT_EQ(wallet(CREATOR).serviceCredit,
-	          PLDT_DEFAULT_WALLET_CREATION_FEE - PLDT_DEFAULT_ROUND_FEE - PLDT_OPERATION_FEE);
+	          0ULL);
 	const auto completed = result(created.gameId);
 	ASSERT_EQ(completed.returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(completed.gameResult.gameStopReason, PLDT::EGameStopReason::OUT_OF_FUNDS);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentNoWinnerCreditsWalletAndStopsWithoutPrefundedSeed)
+TEST_F(ContractTestingPulseEditorV3, PermanentNoWinnerReturnedPoolFundsNextRound)
 {
 	PLDT::CreateGame_input input{};
 	input = makeGame(1, 100);
@@ -1370,8 +1887,6 @@ TEST_F(ContractTestingPulseEditorV3, PermanentNoWinnerCreditsWalletAndStopsWitho
 	input.tierWeightsBps.set(PLDT::payoutMatrixIndex(4, 0), 10000);
 	input.maxDigit = PLDT_MIN_MAX_DIGIT;
 	input.creatorFeePercent = 10;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 100;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	const m256i digest(9, 10, 11, 12);
@@ -1384,11 +1899,11 @@ TEST_F(ContractTestingPulseEditorV3, PermanentNoWinnerCreditsWalletAndStopsWitho
 	ASSERT_EQ(buyDigits(PLAYER, created.gameId, losing).returnCode, PLDT::EReturnCode::SUCCESS);
 	beginTickAt(100);
 
-	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
-	EXPECT_EQ(wallet(CREATOR).refundableQubic, 193ULL);
+	EXPECT_EQ(game(created.gameId).game.roundNumber, 2ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 93ULL);
 	const auto completed = result(created.gameId);
 	ASSERT_EQ(completed.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(completed.gameResult.gameStopReason, PLDT::EGameStopReason::OUT_OF_FUNDS);
+	EXPECT_EQ(completed.gameResult.gameStopReason, PLDT::EGameStopReason::NONE);
 	EXPECT_EQ(completed.gameResult.terminalReason, PLDT::EGameTerminalReason::NO_WINNERS);
 	EXPECT_EQ(completed.gameResult.prizePool, 184ULL);
 }
@@ -1398,8 +1913,6 @@ TEST_F(ContractTestingPulseEditorV3, RoundResultUsesGameAndRoundIdentityWhilePer
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 30000;
-	input.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	setCalendar(2025, 1, 4);
@@ -1422,22 +1935,18 @@ TEST_F(ContractTestingPulseEditorV3, RoundResultUsesGameAndRoundIdentityWhilePer
 	EXPECT_EQ(missing.returnCode, PLDT::EReturnCode::INVALID_ROUND);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentPreviewValidatesInitialFeeAndSeedFunding)
+TEST_F(ContractTestingPulseEditorV3, PermanentPreviewDerivesFirstRoundFunding)
 {
 	PLDT::PreviewGame_input input{};
 	input = makeGame(2, 100);
-	input.initialRunCredit = 10000;
-	input.initialCreatorBalance = 100;
 	const auto valid = function<PLDT::PreviewGame_input, PLDT::PreviewGame_output>(
 		PLDT_FUNCTION_PREVIEW_GAME, input);
 	ASSERT_EQ(valid.returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(valid.roundFee, 10000ULL);
 	EXPECT_EQ(valid.initialQubicRequired, 10100ULL);
 
-	input.initialRunCredit = 9999;
-	const auto invalid = function<PLDT::PreviewGame_input, PLDT::PreviewGame_output>(
-		PLDT_FUNCTION_PREVIEW_GAME, input);
-	EXPECT_EQ(invalid.returnCode, PLDT::EReturnCode::INSUFFICIENT_FUNDS);
+	EXPECT_EQ(valid.operationFee, 100ULL);
+	EXPECT_EQ(valid.initialCreatorAssetRequired, 0ULL);
 }
 
 TEST_F(ContractTestingPulseEditorV3, ReclamationExpiresRoundDetailsAndTicketGenerationRejectsReusedId)
@@ -1448,14 +1957,13 @@ TEST_F(ContractTestingPulseEditorV3, ReclamationExpiresRoundDetailsAndTicketGene
 	input.tierWeightsBps = {};
 	input.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
 	input.maxDigit = PLDT_MIN_MAX_DIGIT;
-	input.initialRunCredit = 30000;
-	input.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	depositWalletQubic(CREATOR, 200);
 	setCalendar(2025, 1, 3);
 	const auto first = buy(PLAYER, created.gameId, 0);
 	ASSERT_EQ(first.returnCode, PLDT::EReturnCode::SUCCESS);
-	ASSERT_NE(first.ticketId, 0ULL);
+	ASSERT_NE(first.ticketIds.get(0), 0ULL);
 	beginTickAt(100);
 
 	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
@@ -1472,9 +1980,9 @@ TEST_F(ContractTestingPulseEditorV3, ReclamationExpiresRoundDetailsAndTicketGene
 
 	const auto second = buy(SECOND_PLAYER, created.gameId, 0);
 	ASSERT_EQ(second.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_NE(second.ticketId, first.ticketId);
+	EXPECT_NE(second.ticketIds.get(0), first.ticketIds.get(0));
 	PLDT::GetTicket_input staleInput{};
-	staleInput.ticketId = first.ticketId;
+	staleInput.ticketId = first.ticketIds.get(0);
 	const auto stale = function<PLDT::GetTicket_input, PLDT::GetTicket_output>(PLDT_FUNCTION_GET_TICKET, staleInput);
 	EXPECT_EQ(stale.returnCode, PLDT::EReturnCode::INVALID_TICKET);
 
@@ -1524,8 +2032,6 @@ TEST_F(ContractTestingPulseEditorV3, PermanentFinalizationReturnsQubicToWalletWi
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	PLDT::StopGame_input stopInput{};
@@ -1538,13 +2044,11 @@ TEST_F(ContractTestingPulseEditorV3, PermanentFinalizationReturnsQubicToWalletWi
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentOwnerMutatorsAreFrozenDuringRetryableFinalization)
+TEST_F(ContractTestingPulseEditorV3, PermanentEconomicsAreFrozenDuringRetryableFinalization)
 {
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
@@ -1553,17 +2057,6 @@ TEST_F(ContractTestingPulseEditorV3, PermanentOwnerMutatorsAreFrozenDuringRetrya
 	contractState->games.set(created.slot, finalizingGame);
 	ASSERT_EQ(game(created.gameId).game.status, PLDT::EGameStatus::FINALIZING);
 
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.runCreditTopUp = 1;
-	const auto funded = procedure<PLDT::FundGame_input, PLDT::FundGame_output>(
-		PLDT_PROCEDURE_FUND_GAME, fundInput, CREATOR);
-	EXPECT_EQ(funded.returnCode, PLDT::EReturnCode::INVALID_STATE);
-	PLDT::WithdrawGameBalance_input withdrawInput{};
-	withdrawInput.gameId = created.gameId;
-	const auto withdrawn = procedure<PLDT::WithdrawGameBalance_input, PLDT::WithdrawGameBalance_output>(
-		PLDT_PROCEDURE_WITHDRAW_GAME_BALANCE, withdrawInput, CREATOR);
-	EXPECT_EQ(withdrawn.returnCode, PLDT::EReturnCode::INVALID_STATE);
 	PLDT::UpdateGameEconomics_input updateInput{};
 	updateInput.gameId = created.gameId;
 	updateInput.ticketPrice = 100;
@@ -1575,7 +2068,7 @@ TEST_F(ContractTestingPulseEditorV3, PermanentOwnerMutatorsAreFrozenDuringRetrya
 	EXPECT_EQ(updated.returnCode, PLDT::EReturnCode::INVALID_STATE);
 }
 
-TEST_F(ContractTestingPulseEditorV3, AssetPermanentCreationAcceptsMultipleFutureRoundFeesInInitialRunCredit)
+TEST_F(ContractTestingPulseEditorV3, AssetPermanentCreationOnlyReservesFirstSeed)
 {
 	const Asset currency{CREATOR, assetNameFromString("PEDPERM")};
 	ASSERT_EQ(issueAsset(currency, 500), 500);
@@ -1587,19 +2080,17 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentCreationAcceptsMultipleFuture
 	input.currencyAsset = currency;
 	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	input.initialRunCredit = 30000;
-	input.initialCreatorBalance = 500;
 	fund(CREATOR, 30000);
 
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(game(created.gameId).game.runCredit, 20000ULL);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 400ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 400ULL);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, contractId(), contractId(),
-	                                  PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 500);
+	                                  PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 100);
 }
 
-TEST_F(ContractTestingPulseEditorV3, AssetPermanentPreviewAndCreationCapSeparateCurrencyLedgersIndependently)
+TEST_F(ContractTestingPulseEditorV3, AssetPreviewSeparatesQubicFeeFromAssetSeed)
 {
 	const Asset currency{CREATOR, assetNameFromString("PEDCAP")};
 	ASSERT_EQ(issueAsset(currency, 1), 1);
@@ -1611,17 +2102,15 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentPreviewAndCreationCapSeparate
 	input.currencyAsset = currency;
 	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	input.initialRunCredit = PLDT_MAX_TRANSFER_AMOUNT;
-	input.initialCreatorBalance = 1;
 	const auto previewed = function<PLDT::PreviewGame_input, PLDT::PreviewGame_output>(
 		PLDT_FUNCTION_PREVIEW_GAME, input);
 	ASSERT_EQ(previewed.returnCode, PLDT::EReturnCode::SUCCESS);
-	fund(CREATOR, static_cast<sint64>(PLDT_MAX_TRANSFER_AMOUNT));
+	EXPECT_EQ(previewed.initialQubicRequired, 10000ULL);
+	EXPECT_EQ(previewed.initialCreatorAssetRequired, 1ULL);
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(game(created.gameId).game.runCredit,
-	          PLDT_MAX_TRANSFER_AMOUNT - PLDT_DEFAULT_ROUND_FEE);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 0ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 0ULL);
 }
 
 TEST_F(ContractTestingPulseEditorV3, PermanentEconomicsRejectsContractSharePriceThatWouldRequireBurn)
@@ -1638,8 +2127,6 @@ TEST_F(ContractTestingPulseEditorV3, PermanentEconomicsRejectsContractSharePrice
 	input.currencyAsset = contractShares;
 	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	input.initialRunCredit = PLDT_DEFAULT_ROUND_FEE;
-	input.initialCreatorBalance = 1;
 	fund(PLAYER, PLDT_DEFAULT_ROUND_FEE);
 	const auto created = createGame(PLAYER, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -1658,6 +2145,8 @@ TEST_F(ContractTestingPulseEditorV3, PermanentEconomicsRejectsContractSharePrice
 
 TEST_F(ContractTestingPulseEditorV3, AssetPermanentNoTicketOutOfFundsReturnsSeedAndReleasesGame)
 {
+	reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX])->walletCreationFee = 10100;
+	ASSERT_EQ(createWallet(CREATOR, 10200).returnCode, PLDT::EReturnCode::SUCCESS);
 	const Asset currency{CREATOR, assetNameFromString("PEDSTOP")};
 	ASSERT_EQ(issueAsset(currency, 100), 100);
 	ASSERT_EQ(transferAssetManagement(currency, CREATOR, 100, PLDT_CONTRACT_INDEX), 100);
@@ -1668,8 +2157,6 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentNoTicketOutOfFundsReturnsSeed
 	input.currencyAsset = currency;
 	input.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	input.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	input.initialRunCredit = PLDT_DEFAULT_ROUND_FEE;
-	input.initialCreatorBalance = 100;
 	fund(CREATOR, PLDT_DEFAULT_ROUND_FEE);
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -1691,8 +2178,6 @@ TEST_F(ContractTestingPulseEditorV3, ActivePermanentStopWaitsForConfiguredRoundC
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	setCalendar(2025, 1, 3);
@@ -1715,8 +2200,6 @@ TEST_F(ContractTestingPulseEditorV3, PlatformRoundFeeChangeAffectsOnlyNewGameSna
 	PLDT::CreateGame_input permanentInput{};
 	permanentInput = makeGame(2, 100);
 	permanentInput.mode = PLDT::EGameMode::PERMANENT;
-	permanentInput.initialRunCredit = 20000;
-	permanentInput.initialCreatorBalance = 200;
 	const auto existing = createGame(CREATOR, permanentInput);
 	ASSERT_EQ(existing.returnCode, PLDT::EReturnCode::SUCCESS);
 
@@ -1733,7 +2216,6 @@ TEST_F(ContractTestingPulseEditorV3, PlatformRoundFeeChangeAffectsOnlyNewGameSna
 	EXPECT_EQ(game(existing.gameId).game.roundFeeSnapshot, 10000ULL);
 
 	auto newerInput = makeGame(1, 100);
-	newerInput.initialRunCredit = 20000;
 	const auto newer = createGame(SECOND_PLAYER, newerInput);
 	ASSERT_EQ(newer.returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(game(newer.gameId).game.roundFeeSnapshot, 20000ULL);
@@ -1748,8 +2230,6 @@ TEST_F(ContractTestingPulseEditorV3, StopAfterTicketCapStillPreventsNextRound)
 	input.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
 	input.maxDigit = PLDT_MIN_MAX_DIGIT;
 	input.creatorFeePercent = 10;
-	input.initialRunCredit = 20000;
-	input.initialCreatorBalance = 200;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	setCalendar(2025, 1, 3);
@@ -1770,8 +2250,6 @@ TEST_F(ContractTestingPulseEditorV3, ActivePermanentStopQueuesClosureAfterCurren
 	PLDT::CreateGame_input input{};
 	input = makeGame(2, 100);
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 10000;
-	input.initialCreatorBalance = 100;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	setCalendar(2025, 1, 3);
@@ -1779,43 +2257,27 @@ TEST_F(ContractTestingPulseEditorV3, ActivePermanentStopQueuesClosureAfterCurren
 	EXPECT_TRUE(game(created.gameId).game.stopRequested);
 }
 
-TEST_F(ContractTestingPulseEditorV3, OneShotUsesCommonLedgersAndReturnsTheirRemainderAtClose)
+TEST_F(ContractTestingPulseEditorV3, OneShotReturnsSeedAndNeverChargesAnotherRound)
 {
 	auto input = makeGame(1, 100);
-	input.initialRunCredit = 15000;
-	input.initialCreatorBalance = 400;
 	const auto created = createGame(CREATOR, input);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(game(created.gameId).game.runCredit, 5000ULL);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 300ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
 
 	setCalendar(2025, 1, 4);
 	processFirstGameAt(100);
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
 	EXPECT_EQ(wallet(CREATOR).serviceCredit,
 	          PLDT_DEFAULT_WALLET_CREATION_FEE - PLDT_DEFAULT_ROUND_FEE - PLDT_OPERATION_FEE);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 100ULL);
 	EXPECT_EQ(result(created.gameId).gameResult.gameStopReason, PLDT::EGameStopReason::ONE_SHOT_COMPLETE);
 }
 
-TEST_F(ContractTestingPulseEditorV3, CommonLedgerOperationsSupportOneShotButEconomicsUpdateDoesNot)
+TEST_F(ContractTestingPulseEditorV3, OneShotRejectsEconomicsUpdate)
 {
 	const auto created = createGame(CREATOR, makeGame(1, 100));
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.runCreditTopUp = 500;
-	fundInput.creatorBalanceTopUp = 200;
-	const auto funded = fundGameFromWallet(CREATOR, fundInput);
-	ASSERT_EQ(funded.returnCode, PLDT::EReturnCode::SUCCESS);
-
-	PLDT::WithdrawGameBalance_input withdrawInput{};
-	withdrawInput.gameId = created.gameId;
-	withdrawInput.runCreditAmount = 100;
-	withdrawInput.creatorBalanceAmount = 50;
-	const auto withdrawn = procedure<PLDT::WithdrawGameBalance_input, PLDT::WithdrawGameBalance_output>(
-		PLDT_PROCEDURE_WITHDRAW_GAME_BALANCE, withdrawInput, CREATOR);
-	EXPECT_EQ(withdrawn.returnCode, PLDT::EReturnCode::SUCCESS);
-
 	PLDT::UpdateGameEconomics_input update{};
 	update.gameId = created.gameId;
 	const auto updated = procedure<PLDT::UpdateGameEconomics_input, PLDT::UpdateGameEconomics_output>(
@@ -1931,8 +2393,8 @@ TEST_F(ContractTestingPulseEditorV3, TicketCapDrawRedistributesPoolAcrossWinning
 	EXPECT_EQ(settled.gameResult.terminalReason, PLDT::EGameTerminalReason::SETTLED);
 	EXPECT_EQ(settled.gameResult.prizePool, 286);
 	EXPECT_EQ(settled.gameResult.totalPaid, 286);
-	const auto firstPayout = ticket(first.ticketIndex).ticket.payout;
-	const auto secondPayout = ticket(second.ticketIndex).ticket.payout;
+	const auto firstPayout = ticket(first.ticketIndexes.get(0)).ticket.payout;
+	const auto secondPayout = ticket(second.ticketIndexes.get(0)).ticket.payout;
 	EXPECT_EQ(firstPayout + secondPayout, 286);
 	EXPECT_TRUE((firstPayout == 86 && secondPayout == 200) || (firstPayout == 200 && secondPayout == 86));
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
@@ -1958,8 +2420,8 @@ TEST_F(ContractTestingPulseEditorV3, LargestRemainderTieUsesLowerStableTierIndex
 	const auto second = buyDigits(SECOND_PLAYER, created.gameId, losing);
 	beginTickAt(100);
 
-	const auto firstTicket = ticket(first.ticketIndex).ticket;
-	const auto secondTicket = ticket(second.ticketIndex).ticket;
+	const auto firstTicket = ticket(first.ticketIndexes.get(0)).ticket;
+	const auto secondTicket = ticket(second.ticketIndexes.get(0)).ticket;
 	ASSERT_NE(static_cast<uint32>(firstTicket.tierIndex), static_cast<uint32>(secondTicket.tierIndex));
 	if (firstTicket.tierIndex < secondTicket.tierIndex)
 	{
@@ -1987,7 +2449,7 @@ TEST_F(ContractTestingPulseEditorV3, EmptyTiersAreExcludedSoSingleWinnerReceives
 	fund(PLAYER, 100);
 	const auto purchase = buyDigits(PLAYER, created.gameId, winning);
 	beginTickAt(100);
-	EXPECT_EQ(ticket(purchase.ticketIndex).ticket.payout, 193);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.payout, 193);
 	EXPECT_EQ(result(created.gameId).gameResult.totalPaid, 193);
 }
 
@@ -2025,7 +2487,7 @@ TEST_F(ContractTestingPulseEditorV3, DrawDateSettlesOneTicketWithoutMinimumPlaye
 	setCalendar(2025, 1, 4);
 	beginTickAt(100);
 	EXPECT_EQ(result(created.gameId).gameResult.terminalReason, PLDT::EGameTerminalReason::SETTLED);
-	EXPECT_EQ(ticket(purchase.ticketIndex).ticket.payout, 193);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.payout, 193);
 }
 
 TEST_F(ContractTestingPulseEditorV3, SuccessfulSettlementCreditsCreatorWalletUntilManualWithdrawal)
@@ -2051,7 +2513,7 @@ TEST_F(ContractTestingPulseEditorV3, SuccessfulSettlementCreditsCreatorWalletUnt
 	beginTickAt(100);
 
 	EXPECT_EQ(result(created.gameId).gameResult.prizePool, 184);
-	EXPECT_EQ(ticket(purchase.ticketIndex).ticket.payout, 184);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.payout, 184);
 	EXPECT_EQ(getBalance(CREATOR), creatorBalanceBeforeSettlement);
 	EXPECT_EQ(wallet(CREATOR).serviceCredit, walletBeforeSettlement.serviceCredit);
 	EXPECT_EQ(wallet(CREATOR).refundableQubic, walletBeforeSettlement.refundableQubic + 9);
@@ -2106,7 +2568,6 @@ TEST_F(ContractTestingPulseEditorV3, FailedManualWithdrawalPreservesEarnedCreato
 {
 	auto configuration = makeGame(1, 0);
 	configuration.mode = PLDT::EGameMode::PERMANENT;
-	configuration.initialRunCredit = 20000;
 	configuration.creatorFeePercent = 10;
 	const auto created = createGame(CREATOR, configuration);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -2193,7 +2654,6 @@ TEST_F(ContractTestingPulseEditorV3, AssetPoolReturnWaitsForWalletCapacityAndCus
 	configuration.currencyAsset = currency;
 	configuration.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	configuration.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	configuration.initialCreatorBalance = 300;
 	const auto created = createGame(CREATOR, configuration);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
@@ -2206,30 +2666,30 @@ TEST_F(ContractTestingPulseEditorV3, AssetPoolReturnWaitsForWalletCapacityAndCus
 	setCalendar(2025, 1, 4);
 	processFirstGameAt(100);
 	ASSERT_EQ(game(created.gameId).game.status, PLDT::EGameStatus::FINALIZING);
-	EXPECT_EQ(game(created.gameId).game.pendingCreatorBalancePayout, 260ULL);
+	EXPECT_EQ(game(created.gameId).game.pendingPrizePoolPayout, 60ULL);
 	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, MAX_AMOUNT);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, CREATOR, CREATOR,
-		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 40);
+		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 240);
 	processFirstGameAt(200);
-	EXPECT_EQ(game(created.gameId).game.pendingCreatorBalancePayout, 260ULL);
+	EXPECT_EQ(game(created.gameId).game.pendingPrizePoolPayout, 60ULL);
 	// Restore the real ledger after simulating capacity pressure, then make custody temporarily unavailable.
 	ASSERT_TRUE(contractState->wallets.get(CREATOR, storedWallet));
 	position = storedWallet.assets.get(0);
-	position.balance = 40;
+	position.balance = 240;
 	storedWallet.assets.set(0, position);
 	contractState->wallets.replace(CREATOR, storedWallet);
 	{
 		QpiContextSystemProcedureCall qpi(PLDT_CONTRACT_INDEX, BEGIN_TICK);
 		ASSERT_GE(qpi.transferShareOwnershipAndPossession(currency.assetName, currency.issuer,
-			contractId(), contractId(), 260, OUTSIDER), 0);
+			contractId(), contractId(), 60, OUTSIDER), 0);
 	}
 	processFirstGameAt(300);
-	EXPECT_EQ(game(created.gameId).game.pendingCreatorBalancePayout, 260ULL);
-	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 40ULL);
+	EXPECT_EQ(game(created.gameId).game.pendingPrizePoolPayout, 60ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 240ULL);
 	{
 		QpiContextSystemProcedureCall qpi(PLDT_CONTRACT_INDEX, BEGIN_TICK);
 		ASSERT_GE(qpi.transferShareOwnershipAndPossession(currency.assetName, currency.issuer,
-			OUTSIDER, OUTSIDER, 260, contractId()), 0);
+			OUTSIDER, OUTSIDER, 60, contractId()), 0);
 	}
 	processFirstGameAt(400);
 	EXPECT_EQ(game(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
@@ -2259,12 +2719,13 @@ TEST_F(ContractTestingPulseEditorV3, AssetCreatorFeeIsNotRepeatedWhenLaterPoolCr
 	etalonTick.prevSpectrumDigest = digest;
 	const auto winning = expectedWinningDigits(digest, created.gameId, 1, configuration.codeLength,
 		configuration.maxDigit, configuration.allowRepeatedDigits);
-	PLDT::BuyTicket_input purchase{};
+	PLDT::BuyTickets_input purchase{};
 	purchase.gameId = created.gameId;
-	purchase.digits = nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit);
+	purchase.ticketCount = 1;
+	purchase.tickets.set(0, nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit));
 	setCalendar(2025, 1, 3);
-	ASSERT_EQ((procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(
-		PLDT_PROCEDURE_BUY_TICKET, purchase, PLAYER)).returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ((procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+		PLDT_PROCEDURE_BUY_TICKETS, purchase, PLAYER)).returnCode, PLDT::EReturnCode::SUCCESS);
 	// Leave enough custody for the 9-share fee, but not the subsequent 184-share pool return.
 	{
 		QpiContextSystemProcedureCall qpi(PLDT_CONTRACT_INDEX, BEGIN_TICK);
@@ -2275,7 +2736,7 @@ TEST_F(ContractTestingPulseEditorV3, AssetCreatorFeeIsNotRepeatedWhenLaterPoolCr
 	ASSERT_EQ(game(created.gameId).game.status, PLDT::EGameStatus::FINALIZING);
 	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 9ULL);
 	EXPECT_EQ(game(created.gameId).game.pendingCreatorCurrencyPayout, 0ULL);
-	EXPECT_EQ(game(created.gameId).game.pendingCreatorBalancePayout, 184ULL);
+	EXPECT_EQ(game(created.gameId).game.pendingPrizePoolPayout, 184ULL);
 	processFirstGameAt(200);
 	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 9ULL);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, CREATOR, CREATOR,
@@ -2310,8 +2771,6 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentRevenueAndNoWinnerPoolCreditW
 	configuration.currencyAsset = currency;
 	configuration.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	configuration.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
-	configuration.initialRunCredit = 20000;
-	configuration.initialCreatorBalance = 300;
 	configuration.creatorFeePercent = 10;
 	configuration.tierWeightsBps = {};
 	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(4, 0), 10000);
@@ -2321,27 +2780,35 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentRevenueAndNoWinnerPoolCreditW
 	etalonTick.prevSpectrumDigest = digest;
 	const auto winning = expectedWinningDigits(digest, created.gameId, 1, configuration.codeLength,
 		configuration.maxDigit, configuration.allowRepeatedDigits);
-	PLDT::BuyTicket_input purchase{};
+	PLDT::BuyTickets_input purchase{};
 	purchase.gameId = created.gameId;
-	purchase.digits = nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit);
+	purchase.ticketCount = 1;
+	purchase.tickets.set(0, nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit));
 	setCalendar(2025, 1, 3);
-	ASSERT_EQ((procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(
-		PLDT_PROCEDURE_BUY_TICKET, purchase, PLAYER)).returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 0ULL);
+	ASSERT_EQ((procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+		PLDT_PROCEDURE_BUY_TICKETS, purchase, PLAYER)).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 200ULL);
 	processFirstGameAt(100);
 	ASSERT_EQ(game(created.gameId).game.roundNumber, 2ULL);
-	EXPECT_EQ(game(created.gameId).game.creatorBalance, 100ULL);
 	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
-	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 193ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 293ULL);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, CREATOR, CREATOR,
-		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 193);
+		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 293);
 	processFirstGameAt(200);
-	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 193ULL);
+	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 293ULL);
 	fund(CREATOR, 100);
-	ASSERT_EQ(releaseAssetManagement(CREATOR, currency, 193).returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(releaseAssetManagement(CREATOR, currency, 293).returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(wallet(CREATOR).assets.get(0).balance, 0ULL);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, CREATOR, CREATOR,
-		QX_CONTRACT_INDEX, QX_CONTRACT_INDEX), 193);
+		QX_CONTRACT_INDEX, QX_CONTRACT_INDEX), 293);
+}
+
+TEST_F(ContractTestingPulseEditorV3, BatchIsTheOnlyRegisteredTicketPurchase)
+{
+	EXPECT_EQ(contractUserProcedures[PLDT_CONTRACT_INDEX][4], nullptr);
+	EXPECT_NE(contractUserProcedures[PLDT_CONTRACT_INDEX][15], nullptr);
+	EXPECT_EQ(static_cast<uint32>(contractUserProcedureInputSizes[PLDT_CONTRACT_INDEX][15]), sizeof(PLDT::BuyTickets_input));
+	EXPECT_EQ(static_cast<uint32>(contractUserProcedureOutputSizes[PLDT_CONTRACT_INDEX][15]), sizeof(PLDT::BuyTickets_output));
 }
 
 TEST_F(ContractTestingPulseEditorV3, BatchUsesPerTicketFeeRoundingAndPersistsEveryTicket)
@@ -2358,6 +2825,74 @@ TEST_F(ContractTestingPulseEditorV3, BatchUsesPerTicketFeeRoundingAndPersistsEve
 	EXPECT_EQ(result(created.gameId).gameResult.totalPaid, 286);
 }
 
+TEST_F(ContractTestingPulseEditorV3, BatchAcceptsOneAndSixteenTicketsWithOrderedIds)
+{
+	const auto created = createGame(CREATOR, makeGame(17, 0));
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 3);
+	fund(PLAYER, 1700);
+	const auto balanceBefore = getBalance(PLAYER);
+	const auto single = buy(PLAYER, created.gameId, 0);
+	ASSERT_EQ(single.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(static_cast<uint32>(single.acceptedCount), 1U);
+	ASSERT_NE(single.ticketIds.get(0), 0ULL);
+	EXPECT_EQ(ticket(single.ticketIndexes.get(0)).ticket.ticketId, single.ticketIds.get(0));
+	for (uint16 i = 1; i < PLDT_MAX_BATCH_TICKETS; ++i)
+	{
+		EXPECT_EQ(single.ticketIds.get(i), 0ULL);
+		EXPECT_EQ(single.ticketIndexes.get(i), 0ULL);
+	}
+
+	PLDT::BuyTickets_input input{};
+	input.gameId = created.gameId;
+	input.ticketCount = 16;
+	for (uint16 i = 0; i < 16; ++i)
+	{
+		input.tickets.set(i, digits(static_cast<uint8>(i % 8)));
+	}
+	const auto batch = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+		PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 1600);
+	ASSERT_EQ(batch.returnCode, PLDT::EReturnCode::SUCCESS);
+	ASSERT_EQ(static_cast<uint32>(batch.acceptedCount), 16U);
+	for (uint16 i = 0; i < 16; ++i)
+	{
+		const auto stored = ticket(batch.ticketIndexes.get(i)).ticket;
+		EXPECT_EQ(stored.ticketId, batch.ticketIds.get(i));
+		EXPECT_EQ(stored.digits.get(0), static_cast<uint8>(i % 8));
+		EXPECT_EQ(stored.player, PLAYER);
+		EXPECT_NE(batch.ticketIds.get(i), i == 0 ? single.ticketIds.get(0) : batch.ticketIds.get(i - 1));
+	}
+	EXPECT_EQ(getBalance(PLAYER), balanceBefore - 1700);
+	EXPECT_EQ(static_cast<uint32>(game(created.gameId).game.ticketCount), 17U);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 1581ULL);
+}
+
+TEST_F(ContractTestingPulseEditorV3, BatchChecksPlayerLimitBeforeDigitsForEveryCount)
+{
+	auto configuration = makeGame(4, 100);
+	configuration.playerTicketLimit = 1;
+	const auto created = createGame(CREATOR, configuration);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 3);
+	fund(PLAYER, 400);
+	ASSERT_EQ(buy(PLAYER, created.gameId, 0).returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto balanceBefore = getBalance(PLAYER);
+	PLDT::BuyTickets_input input{};
+	input.gameId = created.gameId;
+	input.tickets.set(0, digits(9));
+	for (uint16 count = 1; count <= 2; ++count)
+	{
+		input.ticketCount = count;
+		const auto rejected = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+			PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 100 * count);
+		EXPECT_EQ(rejected.returnCode, PLDT::EReturnCode::PLAYER_TICKET_LIMIT);
+		EXPECT_EQ(static_cast<uint32>(rejected.acceptedCount), 0U);
+		EXPECT_EQ(getBalance(PLAYER), balanceBefore);
+		EXPECT_EQ(static_cast<uint32>(game(created.gameId).game.ticketCount), 1U);
+		EXPECT_EQ(game(created.gameId).game.prizePool, 193ULL);
+	}
+}
+
 TEST_F(ContractTestingPulseEditorV3, BatchRejectsCountsOutsideOneThroughSixteenWithoutChangingState)
 {
 	fund(CREATOR, 100);
@@ -2368,9 +2903,9 @@ TEST_F(ContractTestingPulseEditorV3, BatchRejectsCountsOutsideOneThroughSixteenW
 	PLDT::BuyTickets_input input{};
 	input.gameId = created.gameId;
 
-	const auto empty = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, input, PLAYER);
+	const auto empty = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER);
 	input.ticketCount = PLDT_MAX_BATCH_TICKETS + 1;
-	const auto oversized = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, input, PLAYER, 1700);
+	const auto oversized = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 1700);
 
 	EXPECT_EQ(empty.returnCode, PLDT::EReturnCode::INVALID_VALUE);
 	EXPECT_EQ(oversized.returnCode, PLDT::EReturnCode::INVALID_VALUE);
@@ -2453,10 +2988,8 @@ TEST_F(ContractTestingPulseEditorV3, PreviewRejectsAmountsOutsideQpiTransferRang
 
 	configuration.ticketPrice = 1;
 	configuration.creatorPrizeSeed = static_cast<uint64>(MAX_AMOUNT);
-	configuration.initialCreatorBalance = static_cast<uint64>(MAX_AMOUNT);
 	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
 	configuration.creatorPrizeSeed = static_cast<uint64>(MAX_AMOUNT) - PLDT_DEFAULT_ROUND_FEE;
-	configuration.initialCreatorBalance = configuration.creatorPrizeSeed;
 	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::SUCCESS);
 }
 
@@ -2524,7 +3057,7 @@ TEST_F(ContractTestingPulseEditorV3, SettlementResetsMatchCountsForEveryTicket)
 	auto mixed = digits(0);
 	mixed.set(1, 1);
 	firstBatch.tickets.set(1, mixed);
-	const auto first = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, firstBatch, PLAYER, 200);
+	const auto first = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, firstBatch, PLAYER, 200);
 
 	PLDT::BuyTickets_input secondBatch{};
 	secondBatch.gameId = created.gameId;
@@ -2535,7 +3068,7 @@ TEST_F(ContractTestingPulseEditorV3, SettlementResetsMatchCountsForEveryTicket)
 	mixed = digits(1);
 	mixed.set(1, 1);
 	secondBatch.tickets.set(1, mixed);
-	const auto second = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, secondBatch, SECOND_PLAYER, 200);
+	const auto second = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, secondBatch, SECOND_PLAYER, 200);
 	ASSERT_EQ(static_cast<uint32>(first.acceptedCount), 2U);
 	ASSERT_EQ(static_cast<uint32>(second.acceptedCount), 2U);
 	beginTickAt(100);
@@ -2570,15 +3103,15 @@ TEST_F(ContractTestingPulseEditorV3, FailedWinnerTransferRetriesWithoutConsuming
 	ASSERT_GE(selfIndex, 0);
 	ASSERT_TRUE(decreaseEnergy(selfIndex, getBalance(contractId())));
 	beginTickAt(100);
-	EXPECT_EQ(ticket(first.ticketIndex).ticket.status, PLDT::ETicketStatus::ACTIVE);
+	EXPECT_EQ(ticket(first.ticketIndexes.get(0)).ticket.status, PLDT::ETicketStatus::ACTIVE);
 
 	increaseEnergy(contractId(), 287);
 	processFirstGameAt(200);
 	const auto finished = result(created.gameId);
 	ASSERT_EQ(finished.returnCode, PLDT::EReturnCode::SUCCESS);
 	EXPECT_EQ(finished.gameResult.totalPaid, 287);
-	EXPECT_EQ(ticket(first.ticketIndex).ticket.payout, 144);
-	EXPECT_EQ(ticket(second.ticketIndex).ticket.payout, 143);
+	EXPECT_EQ(ticket(first.ticketIndexes.get(0)).ticket.payout, 144);
+	EXPECT_EQ(ticket(second.ticketIndexes.get(0)).ticket.payout, 143);
 }
 
 TEST_F(ContractTestingPulseEditorV3, InvalidBatchLeavesPaymentAndGameStateUnchanged)
@@ -2595,7 +3128,7 @@ TEST_F(ContractTestingPulseEditorV3, InvalidBatchLeavesPaymentAndGameStateUnchan
 	auto invalidDigits = digits(0);
 	invalidDigits.set(0, PLDT_MIN_MAX_DIGIT + 1);
 	input.tickets.set(1, invalidDigits);
-	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, input, PLAYER, 200);
+	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 200);
 
 	EXPECT_EQ(purchase.returnCode, PLDT::EReturnCode::INVALID_DIGITS);
 	EXPECT_EQ(static_cast<uint32>(purchase.acceptedCount), 0U);
@@ -2614,7 +3147,7 @@ TEST_F(ContractTestingPulseEditorV3, BatchReportsInvalidGameAndRefundsPayment)
 	input.gameId = 999999;
 	input.ticketCount = 1;
 	input.tickets.set(0, digits(0));
-	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(15, input, PLAYER, 100);
+	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 100);
 	EXPECT_EQ(purchase.returnCode, PLDT::EReturnCode::INVALID_GAME);
 	EXPECT_EQ(static_cast<uint32>(purchase.acceptedCount), 0U);
 	EXPECT_EQ(getBalance(PLAYER), balanceBefore);
@@ -2814,7 +3347,7 @@ TEST_F(ContractTestingPulseEditorV3, AssetCancellationWaitsForWalletPositionBefo
 	fullWallet.assetCount = PLDT_MAX_WALLET_ASSETS;
 	ASSERT_TRUE(contractState->wallets.replace(CREATOR, fullWallet));
 	ASSERT_EQ(stop(CREATOR, created.gameId).returnCode, PLDT::EReturnCode::STORAGE_FULL);
-	EXPECT_EQ(game(created.gameId).game.pendingCreatorBalancePayout, 100ULL);
+	EXPECT_EQ(game(created.gameId).game.pendingPrizePoolPayout, 100ULL);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, CREATOR, CREATOR,
 		PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 0);
 	ASSERT_TRUE(contractState->wallets.get(CREATOR, fullWallet));
@@ -2948,10 +3481,10 @@ TEST_F(ContractTestingPulseEditorV3, MultipleQualifyingAssetsDoNotStackOwnership
 	const auto regular = buyDigits(SECOND_PLAYER, created.gameId, winning);
 	beginTickAt(100);
 
-	EXPECT_TRUE(ticket(qualified.ticketIndex).ticket.bonusQualified);
-	EXPECT_FALSE(ticket(regular.ticketIndex).ticket.bonusQualified);
-	EXPECT_EQ(ticket(qualified.ticketIndex).ticket.payout, 191);
-	EXPECT_EQ(ticket(regular.ticketIndex).ticket.payout, 95);
+	EXPECT_TRUE(ticket(qualified.ticketIndexes.get(0)).ticket.bonusQualified);
+	EXPECT_FALSE(ticket(regular.ticketIndexes.get(0)).ticket.bonusQualified);
+	EXPECT_EQ(ticket(qualified.ticketIndexes.get(0)).ticket.payout, 191);
+	EXPECT_EQ(ticket(regular.ticketIndexes.get(0)).ticket.payout, 95);
 	EXPECT_EQ(result(created.gameId).gameResult.totalPaid, 286);
 }
 
@@ -2981,10 +3514,10 @@ TEST_F(ContractTestingPulseEditorV3, BonusQualificationIsSnapshottedWhenTicketIs
 	ASSERT_EQ(transferAsset(bonus, PLAYER, SECOND_PLAYER, 1), 1);
 	beginTickAt(100);
 
-	EXPECT_TRUE(ticket(qualifiedAtPurchase.ticketIndex).ticket.bonusQualified);
-	EXPECT_FALSE(ticket(regularAtPurchase.ticketIndex).ticket.bonusQualified);
-	EXPECT_EQ(ticket(qualifiedAtPurchase.ticketIndex).ticket.payout, 191);
-	EXPECT_EQ(ticket(regularAtPurchase.ticketIndex).ticket.payout, 95);
+	EXPECT_TRUE(ticket(qualifiedAtPurchase.ticketIndexes.get(0)).ticket.bonusQualified);
+	EXPECT_FALSE(ticket(regularAtPurchase.ticketIndexes.get(0)).ticket.bonusQualified);
+	EXPECT_EQ(ticket(qualifiedAtPurchase.ticketIndexes.get(0)).ticket.payout, 191);
+	EXPECT_EQ(ticket(regularAtPurchase.ticketIndexes.get(0)).ticket.payout, 95);
 }
 
 TEST_F(ContractTestingPulseEditorV3, AssetTicketSnapshotsQualificationBeforeCollectingTheEntryAsset)
@@ -3009,7 +3542,7 @@ TEST_F(ContractTestingPulseEditorV3, AssetTicketSnapshotsQualificationBeforeColl
 	const auto purchase = buyAsset(PLAYER, created.gameId, 0);
 
 	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
-	EXPECT_TRUE(ticket(purchase.ticketIndex).ticket.bonusQualified);
+	EXPECT_TRUE(ticket(purchase.ticketIndexes.get(0)).ticket.bonusQualified);
 	EXPECT_EQ(numberOfPossessedShares(currency.assetName, currency.issuer, PLAYER, PLAYER,
 	                                  PLDT_CONTRACT_INDEX, PLDT_CONTRACT_INDEX), 0);
 }
@@ -3040,7 +3573,7 @@ TEST_F(ContractTestingPulseEditorV3, NoWinnerDrawRefundsPoolAndCreatorRevenueAnd
 	EXPECT_EQ(finished.gameResult.terminalReason, PLDT::EGameTerminalReason::NO_WINNERS);
 	EXPECT_EQ(finished.gameResult.prizePool, 184);
 	EXPECT_EQ(finished.gameResult.totalPaid, 0);
-	EXPECT_EQ(ticket(purchase.ticketIndex).ticket.status, PLDT::ETicketStatus::LOST);
+	EXPECT_EQ(ticket(purchase.ticketIndexes.get(0)).ticket.status, PLDT::ETicketStatus::LOST);
 	EXPECT_EQ(getBalance(CREATOR), creatorBalanceBeforeSettlement);
 	EXPECT_EQ(wallet(CREATOR).serviceCredit + wallet(CREATOR).refundableQubic,
 	          walletBeforeSettlement.serviceCredit + walletBeforeSettlement.refundableQubic + 193);
@@ -3057,14 +3590,17 @@ TEST_F(ContractTestingPulseEditorV3, GeneratedDigitsStayUniqueAndInsideConfigure
 	const auto created = createGame(CREATOR, configuration);
 	setCalendar(2025, 1, 3);
 	fund(PLAYER, 100);
-	PLDT::BuyTicket_input input{};
+	PLDT::BuyTickets_input input{};
 	input.gameId = created.gameId;
+	input.ticketCount = 1;
+	Array<uint8, PLDT_DIGITS_ALIGNED> submittedDigits{};
 	for (uint16 i = 0; i < configuration.codeLength; ++i)
 	{
-		input.digits.set(i, static_cast<uint8>(i));
+		submittedDigits.set(i, static_cast<uint8>(i));
 	}
-	const auto purchase = procedure<PLDT::BuyTicket_input, PLDT::BuyTicket_output>(
-		PLDT_PROCEDURE_BUY_TICKET, input, PLAYER, 100);
+	input.tickets.set(0, submittedDigits);
+	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
+		PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 100);
 	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
 	const m256i digest(0x123456789abcdef0ULL, 0x0fedcba987654321ULL,
 	                  0x1111222233334444ULL, 0xaaaabbbbccccddddULL);
@@ -3243,7 +3779,6 @@ TEST_F(ContractTestingPulseEditorV3, GetPlayersKeepsGamesAndPermanentRoundsSepar
 {
 	auto permanentConfiguration = makeGame(1, 0);
 	permanentConfiguration.mode = PLDT::EGameMode::PERMANENT;
-	permanentConfiguration.initialRunCredit = 2 * PLDT_DEFAULT_ROUND_FEE;
 	const auto permanent = createGame(CREATOR, permanentConfiguration);
 	const auto oneShot = createGame(CREATOR, makeGame(1, 0));
 	ASSERT_EQ(permanent.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -3303,7 +3838,7 @@ TEST_F(ContractTestingPulseEditorV3, ResultPagingTraversesOnlyTheCompletedGamesT
 	purchaseInput.tickets.set(0, winning);
 	purchaseInput.tickets.set(1, losing);
 	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
-		15, purchaseInput, PLAYER, 200);
+		PLDT_PROCEDURE_BUY_TICKETS, purchaseInput, PLAYER, 200);
 	beginTickAt(100);
 
 	const auto owned = playerTickets(PLAYER, created.gameId);
@@ -3335,6 +3870,11 @@ TEST_F(ContractTestingPulseEditorV3, SettlementBudgetPersistsProgressAcrossAutom
 	configuration.tierWeightsBps = {};
 	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(4, 0), 10000);
 	const auto created = createGame(CREATOR, configuration);
+	// A future game after the busy slot must not reserve any of the current settlement budget.
+	auto futureConfiguration = makeGame(2, 0);
+	futureConfiguration.startAt = DateAndTime(2025, 1, 4, 0, 0, 0);
+	futureConfiguration.drawAt = DateAndTime(2025, 1, 5, 0, 0, 0);
+	ASSERT_EQ(createGame(OUTSIDER, futureConfiguration).returnCode, PLDT::EReturnCode::SUCCESS);
 	const m256i digest(21, 22, 23, 24);
 	etalonTick.prevSpectrumDigest = digest;
 	const auto winning = expectedWinningDigits(digest, created.gameId, 65, configuration.codeLength,
@@ -3352,7 +3892,7 @@ TEST_F(ContractTestingPulseEditorV3, SettlementBudgetPersistsProgressAcrossAutom
 			input.tickets.set(i, winning);
 		}
 		const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
-			15, input, PLAYER, static_cast<sint64>(input.ticketCount * 100));
+			PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, static_cast<sint64>(input.ticketCount * 100));
 		ASSERT_EQ(static_cast<uint32>(purchase.acceptedCount), static_cast<uint32>(input.ticketCount));
 		remaining -= input.ticketCount;
 	}
@@ -3399,7 +3939,7 @@ TEST_F(ContractTestingPulseEditorV3, AutomationSharesOneGlobalTicketActionBudget
 				input.tickets.set(i, gameIndex == 0 ? firstWinning : secondWinning);
 			}
 			const auto bought = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(
-				15, input, PLAYER, static_cast<sint64>(input.ticketCount * 100));
+				PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, static_cast<sint64>(input.ticketCount * 100));
 			ASSERT_EQ(static_cast<uint32>(bought.acceptedCount), static_cast<uint32>(input.ticketCount));
 			remaining -= input.ticketCount;
 		}
@@ -3416,6 +3956,7 @@ TEST_F(ContractTestingPulseEditorV3, AutomationSharesOneGlobalTicketActionBudget
 		}
 	}
 	EXPECT_EQ(static_cast<uint32>(processed), 64U);
+	EXPECT_EQ(contractState->games.get(secondGame.slot).status, PLDT::EGameStatus::COUNTING);
 }
 
 TEST_F(ContractTestingPulseEditorV3, PlatformGovernanceAndQubicRevenueWithdrawalAreOwnerOnly)
@@ -3570,7 +4111,6 @@ TEST_F(ContractTestingPulseEditorV3, AssetDividendRetryResumesSnapshotWithoutPay
 	configuration.ticketPrice = 362;
 	configuration.currencyMode = PLDT::ECurrencyMode::ASSET;
 	configuration.currencyAsset = currency;
-	configuration.initialCreatorBalance = 0;
 	configuration.ownershipManagingContractIndex = PLDT_CONTRACT_INDEX;
 	configuration.possessionManagingContractIndex = PLDT_CONTRACT_INDEX;
 	const auto created = createGame(CREATOR, configuration);
@@ -3710,34 +4250,13 @@ TEST_F(ContractTestingPulseEditorV3, PreviewRejectsGrossRoundRevenueAboveMaxAmou
 	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
 }
 
-TEST_F(ContractTestingPulseEditorV3, PermanentFundingCannotOverflowFuturePoolReturn)
+TEST_F(ContractTestingPulseEditorV3, WalletDepositDoesNotChangeReservedPrize)
 {
-	PLDT::CreateGame_input createInput{};
-	createInput = makeGame(2, 100);
-	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 10000;
-	createInput.initialCreatorBalance = static_cast<uint64>(MAX_AMOUNT) - 10000;
-	const auto created = createGame(CREATOR, createInput);
+	const auto created = createGame(CREATOR, makeGame(2, 100));
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
-
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.creatorBalanceTopUp = 10001;
-	fund(CREATOR, 10001);
-	PLDT::DepositWalletQubic_input depositInput{};
-	ASSERT_EQ((procedure<PLDT::DepositWalletQubic_input, PLDT::DepositWalletQubic_output>(
-	               PLDT_PROCEDURE_DEPOSIT_WALLET_QUBIC, depositInput, CREATOR, 10001))
-	              .returnCode,
-	          PLDT::EReturnCode::SUCCESS);
-	const auto balanceBefore = wallet(CREATOR);
-	const auto storedBefore = game(created.gameId).game;
-	const auto funded = procedure<PLDT::FundGame_input, PLDT::FundGame_output>(PLDT_PROCEDURE_FUND_GAME, fundInput, CREATOR);
-
-	EXPECT_EQ(funded.returnCode, PLDT::EReturnCode::INVALID_VALUE);
-	EXPECT_EQ(wallet(CREATOR).refundableQubic, balanceBefore.refundableQubic);
-	const auto storedAfter = game(created.gameId).game;
-	EXPECT_EQ(storedAfter.creatorBalance, storedBefore.creatorBalance);
-	EXPECT_EQ(storedAfter.prizePool, storedBefore.prizePool);
+	depositWalletQubic(CREATOR, 10001);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 10001ULL);
+	EXPECT_EQ(game(created.gameId).game.prizePool, 100ULL);
 }
 
 TEST_F(ContractTestingPulseEditorV3, PermanentTicketCannotOverflowFuturePoolReturn)
@@ -3745,16 +4264,13 @@ TEST_F(ContractTestingPulseEditorV3, PermanentTicketCannotOverflowFuturePoolRetu
 	PLDT::CreateGame_input createInput{};
 	createInput = makeGame(2, 100);
 	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 20000;
-	createInput.initialCreatorBalance = 100;
 	const auto created = createGame(CREATOR, createInput);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.creatorBalanceTopUp = static_cast<uint64>(MAX_AMOUNT) - 101;
-	const auto funded = fundGameFromWallet(CREATOR, fundInput);
-	ASSERT_EQ(funded.returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	auto reserved = contractState->games.get(created.slot);
+	reserved.prizePool = PLDT_MAX_TRANSFER_AMOUNT - 1;
+	contractState->games.set(created.slot, reserved);
 
 	setCalendar(2025, 1, 3);
 	fund(PLAYER, 100);
@@ -3766,7 +4282,7 @@ TEST_F(ContractTestingPulseEditorV3, PermanentTicketCannotOverflowFuturePoolRetu
 	const auto stored = game(created.gameId).game;
 	EXPECT_EQ(static_cast<uint32>(stored.ticketCount), 0U);
 	EXPECT_EQ(stored.totalRevenue, 0ULL);
-	EXPECT_EQ(stored.prizePool, 100ULL);
+	EXPECT_EQ(stored.prizePool, PLDT_MAX_TRANSFER_AMOUNT - 1);
 }
 
 TEST_F(ContractTestingPulseEditorV3, PermanentBatchChecksPoolReturnCapacityAtomically)
@@ -3774,16 +4290,13 @@ TEST_F(ContractTestingPulseEditorV3, PermanentBatchChecksPoolReturnCapacityAtomi
 	PLDT::CreateGame_input createInput{};
 	createInput = makeGame(2, 100);
 	createInput.mode = PLDT::EGameMode::PERMANENT;
-	createInput.initialRunCredit = 20000;
-	createInput.initialCreatorBalance = 100;
 	const auto created = createGame(CREATOR, createInput);
 	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 
-	PLDT::FundGame_input fundInput{};
-	fundInput.gameId = created.gameId;
-	fundInput.creatorBalanceTopUp = static_cast<uint64>(MAX_AMOUNT) - 250;
-	const auto funded = fundGameFromWallet(CREATOR, fundInput);
-	ASSERT_EQ(funded.returnCode, PLDT::EReturnCode::SUCCESS);
+	auto* contractState = reinterpret_cast<PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	auto reserved = contractState->games.get(created.slot);
+	reserved.prizePool = PLDT_MAX_TRANSFER_AMOUNT - 150;
+	contractState->games.set(created.slot, reserved);
 
 	setCalendar(2025, 1, 3);
 	fund(PLAYER, 200);
@@ -3795,7 +4308,7 @@ TEST_F(ContractTestingPulseEditorV3, PermanentBatchChecksPoolReturnCapacityAtomi
 	const auto stored = game(created.gameId).game;
 	EXPECT_EQ(static_cast<uint32>(stored.ticketCount), 0U);
 	EXPECT_EQ(stored.totalRevenue, 0ULL);
-	EXPECT_EQ(stored.prizePool, 100ULL);
+	EXPECT_EQ(stored.prizePool, PLDT_MAX_TRANSFER_AMOUNT - 150);
 }
 
 TEST_F(ContractTestingPulseEditorV3, QubicTicketBurnRefillsExecutionFeeReserve)
@@ -3875,12 +4388,10 @@ TEST_F(ContractTestingPulseEditorV3, ManagementRightsRequireOwnerOriginator)
 	                                  TESTEXB_CONTRACT_INDEX, TESTEXB_CONTRACT_INDEX), 10);
 }
 
-TEST_F(ContractTestingPulseEditorV3, UnifiedCreateGameSelectsPermanentModeAndSplitsInitialLedgers)
+TEST_F(ContractTestingPulseEditorV3, UnifiedCreateGameSelectsPermanentModeAndFundsFirstRound)
 {
 	auto input = makeGame();
 	input.mode = PLDT::EGameMode::PERMANENT;
-	input.initialRunCredit = 30000;
-	input.initialCreatorBalance = 500;
 	fund(CREATOR, 30500);
 
 	const auto created = createGame(CREATOR, input);
@@ -3889,6 +4400,6 @@ TEST_F(ContractTestingPulseEditorV3, UnifiedCreateGameSelectsPermanentModeAndSpl
 	const auto stored = game(created.gameId).game;
 	EXPECT_EQ(stored.mode, PLDT::EGameMode::PERMANENT);
 	EXPECT_EQ(stored.prizePool, 100ULL);
-	EXPECT_EQ(stored.runCredit, 20000ULL);
-	EXPECT_EQ(stored.creatorBalance, 400ULL);
+	EXPECT_EQ(wallet(CREATOR).serviceCredit, 989900ULL);
+	EXPECT_EQ(wallet(CREATOR).refundableQubic, 0ULL);
 }
