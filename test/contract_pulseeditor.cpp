@@ -8,6 +8,12 @@
 
 static_assert(std::is_same_v<decltype(PLDT::CreateGame_output::returnCode), PLDT::EReturnCode>,
               "PulseEditor return codes must expose EReturnCode instead of uint8");
+static_assert(sizeof(PLDT::TicketDigits) == 16, "TicketDigits wire size changed");
+static_assert(offsetof(PLDT::TicketDigits, digits) == 0, "TicketDigits.digits wire offset changed");
+static_assert(sizeof(PLDT::BuyTickets_input) == 272, "BuyTickets_input ABI size changed");
+static_assert(offsetof(PLDT::BuyTickets_input, tickets) == 0, "BuyTickets_input.tickets ABI offset changed");
+static_assert(offsetof(PLDT::BuyTickets_input, gameId) == 256, "BuyTickets_input.gameId ABI offset changed");
+static_assert(offsetof(PLDT::BuyTickets_input, ticketCount) == 264, "BuyTickets_input.ticketCount ABI offset changed");
 static_assert(sizeof(PLDT::PlayerSummary) == 48, "PlayerSummary ABI size changed");
 static_assert(offsetof(PLDT::PlayerSummary, player) == 0, "PlayerSummary.player ABI offset changed");
 static_assert(offsetof(PLDT::PlayerSummary, totalPayout) == 32, "PlayerSummary.totalPayout ABI offset changed");
@@ -356,7 +362,7 @@ public:
 		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
 		input.ticketCount = 1;
-		input.tickets.set(0, digits(value));
+		input.tickets.set(0, {digits(value)});
 		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, 100);
 	}
 
@@ -365,7 +371,7 @@ public:
 		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
 		input.ticketCount = 1;
-		input.tickets.set(0, digits(value));
+		input.tickets.set(0, {digits(value)});
 		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, price);
 	}
 
@@ -374,7 +380,7 @@ public:
 		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
 		input.ticketCount = 1;
-		input.tickets.set(0, digits(value));
+		input.tickets.set(0, {digits(value)});
 		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player);
 	}
 
@@ -383,7 +389,7 @@ public:
 		PLDT::BuyTickets_input input{};
 		input.gameId = gameId;
 		input.ticketCount = 1;
-		input.tickets.set(0, values);
+		input.tickets.set(0, {values});
 		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player, 100);
 	}
 
@@ -393,7 +399,7 @@ public:
 		input.gameId = gameId;
 		for (const auto value : values)
 		{
-			input.tickets.set(input.ticketCount++, digits(value));
+			input.tickets.set(input.ticketCount++, {digits(value)});
 		}
 		return procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, player,
 		                                                                  static_cast<sint64>(100 * values.size()));
@@ -1460,15 +1466,15 @@ TEST_F(ContractTestingPulseEditorV3, AssetAccountingCapacityRejectionRefundsUnex
 	PLDT::BuyTickets_input single{};
 	single.gameId = created.gameId;
 	single.ticketCount = 1;
-	single.tickets.set(0, digits(0));
+	single.tickets.set(0, {digits(0)});
 	const auto rejectedSingle = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, single, PLAYER, 77);
 	EXPECT_EQ(rejectedSingle.returnCode, PLDT::EReturnCode::STORAGE_FULL);
 	EXPECT_EQ(getBalance(PLAYER), before);
 	PLDT::BuyTickets_input batch{};
 	batch.gameId = created.gameId;
 	batch.ticketCount = 2;
-	batch.tickets.set(0, digits(0));
-	batch.tickets.set(1, digits(1));
+	batch.tickets.set(0, {digits(0)});
+	batch.tickets.set(1, {digits(1)});
 	const auto rejectedBatch = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, batch, PLAYER, 123);
 	EXPECT_EQ(rejectedBatch.returnCode, PLDT::EReturnCode::STORAGE_FULL);
 	EXPECT_EQ(getBalance(PLAYER), before);
@@ -2656,7 +2662,7 @@ TEST_F(ContractTestingPulseEditorV3, AssetCreatorFeeIsNotRepeatedWhenLaterPoolCr
 	PLDT::BuyTickets_input purchase{};
 	purchase.gameId = created.gameId;
 	purchase.ticketCount = 1;
-	purchase.tickets.set(0, nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit));
+	purchase.tickets.set(0, {nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit)});
 	setCalendar(2025, 1, 3);
 	ASSERT_EQ((procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, purchase, PLAYER)).returnCode,
 	          PLDT::EReturnCode::SUCCESS);
@@ -2713,7 +2719,7 @@ TEST_F(ContractTestingPulseEditorV3, AssetPermanentRevenueAndNoWinnerPoolCreditW
 	PLDT::BuyTickets_input purchase{};
 	purchase.gameId = created.gameId;
 	purchase.ticketCount = 1;
-	purchase.tickets.set(0, nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit));
+	purchase.tickets.set(0, {nonMatchingDigits(winning, configuration.codeLength, configuration.maxDigit)});
 	setCalendar(2025, 1, 3);
 	ASSERT_EQ((procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, purchase, PLAYER)).returnCode,
 	          PLDT::EReturnCode::SUCCESS);
@@ -2776,7 +2782,7 @@ TEST_F(ContractTestingPulseEditorV3, BatchAcceptsOneAndSixteenTicketsWithOrdered
 	input.ticketCount = 16;
 	for (uint16 i = 0; i < 16; ++i)
 	{
-		input.tickets.set(i, digits(static_cast<uint8>(i % 8)));
+		input.tickets.set(i, {digits(static_cast<uint8>(i % 8))});
 	}
 	const auto batch = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 1600);
 	ASSERT_EQ(batch.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -2806,7 +2812,7 @@ TEST_F(ContractTestingPulseEditorV3, BatchChecksPlayerLimitBeforeDigitsForEveryC
 	const auto balanceBefore = getBalance(PLAYER);
 	PLDT::BuyTickets_input input{};
 	input.gameId = created.gameId;
-	input.tickets.set(0, digits(9));
+	input.tickets.set(0, {digits(9)});
 	for (uint16 count = 1; count <= 2; ++count)
 	{
 		input.ticketCount = count;
@@ -2921,10 +2927,77 @@ TEST_F(ContractTestingPulseEditorV3, PreviewRejectsAmountsOutsideQpiTransferRang
 TEST_F(ContractTestingPulseEditorV3, PreviewRejectsWeightAssignedToTierOutsideCodeLength)
 {
 	auto configuration = makeGame();
-	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 0);
-	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(1, 0), 0);
-	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(2, 0), 10000);
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(5, 0), 10000);
 	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
+}
+
+TEST_F(ContractTestingPulseEditorV3, PreviewUniqueTiersRequireReachableDigitOverlap)
+{
+	auto configuration = makeGame();
+	configuration.allowRepeatedDigits = false;
+	for (const uint8 length : std::initializer_list<uint8>{8, 10})
+	{
+		SCOPED_TRACE(static_cast<unsigned>(length));
+		configuration.codeLength = length;
+		configuration.maxDigit = length - 1;
+		configuration.tierWeightsBps = {};
+		configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
+		EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
+		configuration.tierWeightsBps = {};
+		configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, length), 10000);
+		EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::SUCCESS);
+	}
+	// Two five-element subsets of an eight-digit alphabet must share at least two digits.
+	configuration.codeLength = 5;
+	configuration.maxDigit = 7;
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 1), 10000);
+	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 2), 10000);
+	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::SUCCESS);
+	configuration.allowRepeatedDigits = true;
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
+	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::SUCCESS);
+	configuration.tierWeightsBps = {};
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(4, 1), 10000);
+	EXPECT_EQ(preview(configuration).returnCode, PLDT::EReturnCode::INVALID_VALUE);
+}
+
+TEST_F(ContractTestingPulseEditorV3, UnreachableTierCreationOnlyChargesOperationFee)
+{
+	ASSERT_EQ(createWallet(CREATOR, PLDT_DEFAULT_WALLET_CREATION_FEE + 100).returnCode, PLDT::EReturnCode::SUCCESS);
+	const auto* state = reinterpret_cast<const PLDT::StateData*>(contractStates[PLDT_CONTRACT_INDEX]);
+	for (const uint8 length : std::initializer_list<uint8>{8, 10})
+	{
+		SCOPED_TRACE(static_cast<unsigned>(length));
+		auto configuration = makeGame(1, 100);
+		configuration.codeLength = length;
+		configuration.maxDigit = length - 1;
+		configuration.allowRepeatedDigits = false;
+		configuration.tierWeightsBps = {};
+		configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
+		const auto walletBefore = wallet(CREATOR);
+		const auto accountingBefore = platformAccounting();
+		const auto balanceBefore = getBalance(contractId());
+		const auto created = procedure<PLDT::CreateGame_input, PLDT::CreateGame_output>(PLDT_PROCEDURE_CREATE_GAME, configuration, CREATOR);
+		EXPECT_EQ(created.returnCode, PLDT::EReturnCode::INVALID_VALUE);
+		EXPECT_EQ(created.gameId, 0ULL);
+		EXPECT_EQ(wallet(CREATOR).serviceCredit, walletBefore.serviceCredit - PLDT_OPERATION_FEE);
+		EXPECT_EQ(wallet(CREATOR).refundableQubic, walletBefore.refundableQubic);
+		EXPECT_EQ(static_cast<uint32>(wallet(CREATOR).activeGameCount), 0U);
+		EXPECT_EQ(getBalance(contractId()), balanceBefore - PLDT_OPERATION_FEE);
+		EXPECT_EQ(static_cast<uint32>(platformAccounting().activeGameCount), 0U);
+		EXPECT_EQ(platformAccounting().developer1Accrued, accountingBefore.developer1Accrued);
+		EXPECT_EQ(platformAccounting().developer2Accrued, accountingBefore.developer2Accrued);
+		EXPECT_EQ(platformAccounting().dividendAccrued, accountingBefore.dividendAccrued);
+		EXPECT_EQ(static_cast<uint32>(state->nextUnusedGameSlot), 0U);
+		EXPECT_EQ(static_cast<uint32>(state->freeGameHead), 0U);
+		EXPECT_EQ(state->generations.get(0), 0ULL);
+		EXPECT_EQ(state->games.get(0).status, PLDT::EGameStatus::EMPTY_SLOT);
+	}
 }
 
 TEST_F(ContractTestingPulseEditorV3, PreviewEnforcesTicketAndBonusAssetCapacityBounds)
@@ -2977,11 +3050,11 @@ TEST_F(ContractTestingPulseEditorV3, SettlementResetsMatchCountsForEveryTicket)
 	PLDT::BuyTickets_input firstBatch{};
 	firstBatch.gameId = created.gameId;
 	firstBatch.ticketCount = 2;
-	firstBatch.tickets.set(0, digits(0));
-	firstBatch.tickets.set(1, digits(0));
+	firstBatch.tickets.set(0, {digits(0)});
+	firstBatch.tickets.set(1, {digits(0)});
 	auto mixed = digits(0);
 	mixed.set(1, 1);
-	firstBatch.tickets.set(1, mixed);
+	firstBatch.tickets.set(1, {mixed});
 	const auto first = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, firstBatch, PLAYER, 200);
 
 	PLDT::BuyTickets_input secondBatch{};
@@ -2989,10 +3062,10 @@ TEST_F(ContractTestingPulseEditorV3, SettlementResetsMatchCountsForEveryTicket)
 	secondBatch.ticketCount = 2;
 	mixed = digits(1);
 	mixed.set(1, 0);
-	secondBatch.tickets.set(0, mixed);
+	secondBatch.tickets.set(0, {mixed});
 	mixed = digits(1);
 	mixed.set(1, 1);
-	secondBatch.tickets.set(1, mixed);
+	secondBatch.tickets.set(1, {mixed});
 	const auto second = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, secondBatch, SECOND_PLAYER, 200);
 	ASSERT_EQ(static_cast<uint32>(first.acceptedCount), 2U);
 	ASSERT_EQ(static_cast<uint32>(second.acceptedCount), 2U);
@@ -3049,10 +3122,10 @@ TEST_F(ContractTestingPulseEditorV3, InvalidBatchLeavesPaymentAndGameStateUnchan
 	PLDT::BuyTickets_input input{};
 	input.gameId = created.gameId;
 	input.ticketCount = 2;
-	input.tickets.set(0, digits(0));
+	input.tickets.set(0, {digits(0)});
 	auto invalidDigits = digits(0);
 	invalidDigits.set(0, PLDT_MIN_MAX_DIGIT + 1);
-	input.tickets.set(1, invalidDigits);
+	input.tickets.set(1, {invalidDigits});
 	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 200);
 
 	EXPECT_EQ(purchase.returnCode, PLDT::EReturnCode::INVALID_DIGITS);
@@ -3071,7 +3144,7 @@ TEST_F(ContractTestingPulseEditorV3, BatchReportsInvalidGameAndRefundsPayment)
 	PLDT::BuyTickets_input input{};
 	input.gameId = 999999;
 	input.ticketCount = 1;
-	input.tickets.set(0, digits(0));
+	input.tickets.set(0, {digits(0)});
 	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 100);
 	EXPECT_EQ(purchase.returnCode, PLDT::EReturnCode::INVALID_GAME);
 	EXPECT_EQ(static_cast<uint32>(purchase.acceptedCount), 0U);
@@ -3505,11 +3578,12 @@ TEST_F(ContractTestingPulseEditorV3, GeneratedDigitsStayUniqueAndInsideConfigure
 {
 	auto configuration = makeGame(1, 0);
 	configuration.tierWeightsBps = {};
-	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(0, 0), 10000);
+	configuration.tierWeightsBps.set(PLDT::payoutMatrixIndex(10, 0), 10000);
 	configuration.codeLength = 10;
 	configuration.maxDigit = 9;
 	configuration.allowRepeatedDigits = false;
 	const auto created = createGame(CREATOR, configuration);
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
 	setCalendar(2025, 1, 3);
 	fund(PLAYER, 100);
 	PLDT::BuyTickets_input input{};
@@ -3520,7 +3594,7 @@ TEST_F(ContractTestingPulseEditorV3, GeneratedDigitsStayUniqueAndInsideConfigure
 	{
 		submittedDigits.set(i, static_cast<uint8>(i));
 	}
-	input.tickets.set(0, submittedDigits);
+	input.tickets.set(0, {submittedDigits});
 	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER, 100);
 	ASSERT_EQ(purchase.returnCode, PLDT::EReturnCode::SUCCESS);
 	const m256i digest(0x123456789abcdef0ULL, 0x0fedcba987654321ULL, 0x1111222233334444ULL, 0xaaaabbbbccccddddULL);
@@ -3739,6 +3813,60 @@ TEST_F(ContractTestingPulseEditorV3, GetPlayersReturnsEmptyRoundAndLookupErrors)
 	EXPECT_EQ(players(999999, 1).returnCode, PLDT::EReturnCode::INVALID_GAME);
 }
 
+TEST_F(ContractTestingPulseEditorV3, RoundResultDistinguishesKnownGamesAndMissingRounds)
+{
+	const auto created = createGame(CREATOR, makeGame(1, 0));
+	ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
+	const auto checkMissing = [this](const uint64 gameId, const uint64 roundNumber, const PLDT::EReturnCode expected)
+	{
+		PLDT::GetRoundResult_input resultInput{};
+		resultInput.roundKey = {gameId, roundNumber};
+		EXPECT_EQ((function<PLDT::GetRoundResult_input, PLDT::GetRoundResult_output>(PLDT_FUNCTION_GET_ROUND_RESULT, resultInput)).returnCode,
+		          expected);
+		EXPECT_EQ(players(gameId, roundNumber).returnCode, expected);
+		PLDT::GetPlayerTickets_input ticketsInput{};
+		ticketsInput.roundKey = resultInput.roundKey;
+		EXPECT_EQ((function<PLDT::GetPlayerTickets_input, PLDT::GetPlayerTickets_output>(PLDT_FUNCTION_GET_PLAYER_TICKETS, ticketsInput)).returnCode,
+		          expected);
+		PLDT::GetWinners_input winnersInput{};
+		winnersInput.roundKey = resultInput.roundKey;
+		EXPECT_EQ((function<PLDT::GetWinners_input, PLDT::GetWinners_output>(PLDT_FUNCTION_GET_WINNERS, winnersInput)).returnCode, expected);
+	};
+	checkMissing(created.gameId, 2, PLDT::EReturnCode::INVALID_ROUND);
+	checkMissing(created.gameId, 0, PLDT::EReturnCode::INVALID_ROUND);
+	checkMissing(0, 1, PLDT::EReturnCode::INVALID_ROUND);
+	checkMissing(999999, 1, PLDT::EReturnCode::INVALID_GAME);
+	ASSERT_EQ(stop(CREATOR, created.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	checkMissing(created.gameId, 2, PLDT::EReturnCode::INVALID_ROUND);
+}
+
+TEST_F(ContractTestingPulseEditorV3, RoundResultKeepsActiveGameIdentityAfterHistoryEviction)
+{
+	auto configuration = makeGame(1, 0);
+	configuration.mode = PLDT::EGameMode::PERMANENT;
+	const auto permanent = createGame(CREATOR, configuration);
+	ASSERT_EQ(permanent.returnCode, PLDT::EReturnCode::SUCCESS);
+	setCalendar(2025, 1, 4);
+	processFirstGameAt(100);
+	ASSERT_EQ(result(permanent.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	configuration = makeGame(1, 0);
+	configuration.startAt = DateAndTime(2025, 1, 5, 0, 0, 0);
+	configuration.drawAt = DateAndTime(2025, 1, 6, 0, 0, 0);
+	for (uint16 i = 0; i < PLDT_RESULT_HISTORY_SIZE; ++i)
+	{
+		const auto created = createGame(OUTSIDER, configuration);
+		ASSERT_EQ(created.returnCode, PLDT::EReturnCode::SUCCESS);
+		ASSERT_EQ(stop(OUTSIDER, created.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	}
+	ASSERT_EQ(game(permanent.gameId).returnCode, PLDT::EReturnCode::SUCCESS);
+	EXPECT_EQ(result(permanent.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
+	EXPECT_EQ(players(permanent.gameId, 1).returnCode, PLDT::EReturnCode::INVALID_ROUND);
+	EXPECT_EQ(playerTickets(PLAYER, permanent.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
+	EXPECT_EQ(winners(permanent.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
+}
+
 TEST_F(ContractTestingPulseEditorV3, ResultPagingTraversesOnlyTheCompletedGamesTicketList)
 {
 	fund(CREATOR, 100);
@@ -3754,8 +3882,8 @@ TEST_F(ContractTestingPulseEditorV3, ResultPagingTraversesOnlyTheCompletedGamesT
 	PLDT::BuyTickets_input purchaseInput{};
 	purchaseInput.gameId = created.gameId;
 	purchaseInput.ticketCount = 2;
-	purchaseInput.tickets.set(0, winning);
-	purchaseInput.tickets.set(1, losing);
+	purchaseInput.tickets.set(0, {winning});
+	purchaseInput.tickets.set(1, {losing});
 	const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, purchaseInput, PLAYER, 200);
 	beginTickAt(100);
 
@@ -3807,7 +3935,7 @@ TEST_F(ContractTestingPulseEditorV3, SettlementBudgetPersistsProgressAcrossAutom
 		input.ticketCount = remaining > PLDT_MAX_BATCH_TICKETS ? PLDT_MAX_BATCH_TICKETS : remaining;
 		for (uint16 i = 0; i < input.ticketCount; ++i)
 		{
-			input.tickets.set(i, winning);
+			input.tickets.set(i, {winning});
 		}
 		const auto purchase = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER,
 		                                                                                 static_cast<sint64>(input.ticketCount * 100));
@@ -3816,9 +3944,9 @@ TEST_F(ContractTestingPulseEditorV3, SettlementBudgetPersistsProgressAcrossAutom
 	}
 
 	processFirstGameAt(100);
-	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
+	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
 	processFirstGameAt(200);
-	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::INVALID_GAME);
+	EXPECT_EQ(result(created.gameId).returnCode, PLDT::EReturnCode::INVALID_ROUND);
 	processFirstGameAt(300);
 	const auto finished = result(created.gameId);
 	ASSERT_EQ(finished.returnCode, PLDT::EReturnCode::SUCCESS);
@@ -3854,7 +3982,7 @@ TEST_F(ContractTestingPulseEditorV3, AutomationSharesOneGlobalTicketActionBudget
 			input.ticketCount = remaining > PLDT_MAX_BATCH_TICKETS ? PLDT_MAX_BATCH_TICKETS : remaining;
 			for (uint16 i = 0; i < input.ticketCount; ++i)
 			{
-				input.tickets.set(i, gameIndex == 0 ? firstWinning : secondWinning);
+				input.tickets.set(i, {gameIndex == 0 ? firstWinning : secondWinning});
 			}
 			const auto bought = procedure<PLDT::BuyTickets_input, PLDT::BuyTickets_output>(PLDT_PROCEDURE_BUY_TICKETS, input, PLAYER,
 			                                                                               static_cast<sint64>(input.ticketCount * 100));

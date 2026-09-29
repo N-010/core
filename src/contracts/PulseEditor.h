@@ -98,7 +98,7 @@ constexpr uint64 PLDT_CONTRACT_ASSET_NAME = 0x54444c50ULL; // "PLDT"
 /** Largest ledger or transfer value accepted by QPI. */
 constexpr uint64 PLDT_MAX_TRANSFER_AMOUNT = MAX_AMOUNT;
 /** Out-of-band unsigned value used when no slot or result exists. */
-constexpr uint64 PLDT_UINT64_SENTINEL = 0xffffffffffffffffULL;
+constexpr uint64 PLDT_UINT64_SENTINEL = UINT64_MAX;
 /** Bit width reserved for the ticket slot inside a ticket id. */
 constexpr uint8 PLDT_TICKET_SLOT_BITS = 20;
 /** Mask that extracts a ticket slot from a generation-aware ticket id. */
@@ -116,23 +116,22 @@ struct PLDT2
 struct PLDT : public ContractBase
 {
 public:
-	template<typename T>
-	/** Split fixed-capacity matrix that stores every exact/misplaced payout tier. */
-	struct TierMatrix
+	/** Prize-category weights in basis points; split storage preserves the public ABI. */
+	struct TierWeightMatrix
 	{
 		/** First fixed segment of the tier matrix. */
-		Array<T, PLDT_TIER_PREFIX_CAPACITY> prefix;
+		Array<uint16, PLDT_TIER_PREFIX_CAPACITY> prefix;
 		/** Remaining fixed segment of the tier matrix. */
-		Array<T, PLDT_TIER_SUFFIX_CAPACITY> suffix;
+		Array<uint16, PLDT_TIER_SUFFIX_CAPACITY> suffix;
 
 		/** Returns the tier value at a stable compact payout-matrix index. */
-		const T& get(const uint16 index) const
+		const uint16& get(const uint16 index) const
 		{
 			return index < PLDT_TIER_PREFIX_CAPACITY ? prefix.get(index) : suffix.get(index - PLDT_TIER_PREFIX_CAPACITY);
 		}
 
 		/** Replaces the tier value while hiding the two-array storage split. */
-		void set(const uint16 index, const T value)
+		void set(const uint16 index, const uint16 value)
 		{
 			if (index < PLDT_TIER_PREFIX_CAPACITY)
 			{
@@ -148,8 +147,36 @@ public:
 		static constexpr uint16 capacity() { return PLDT_TIER_CAPACITY; }
 	};
 
-	using TierWeightMatrix = TierMatrix<uint16>;
-	using TierAmountMatrix = TierMatrix<uint64>;
+	/** Per-category amounts or counts; split storage preserves the persistent state layout. */
+	struct TierAmountMatrix
+	{
+		/** First fixed segment of the tier matrix. */
+		Array<uint64, PLDT_TIER_PREFIX_CAPACITY> prefix;
+		/** Remaining fixed segment of the tier matrix. */
+		Array<uint64, PLDT_TIER_SUFFIX_CAPACITY> suffix;
+
+		/** Returns the tier value at a stable compact payout-matrix index. */
+		const uint64& get(const uint16 index) const
+		{
+			return index < PLDT_TIER_PREFIX_CAPACITY ? prefix.get(index) : suffix.get(index - PLDT_TIER_PREFIX_CAPACITY);
+		}
+
+		/** Replaces the tier value while hiding the two-array storage split. */
+		void set(const uint16 index, const uint64 value)
+		{
+			if (index < PLDT_TIER_PREFIX_CAPACITY)
+			{
+				prefix.set(index, value);
+			}
+			else
+			{
+				suffix.set(index - PLDT_TIER_PREFIX_CAPACITY, value);
+			}
+		}
+
+		/** Returns the total number of addressable exact/misplaced tiers. */
+		static constexpr uint16 capacity() { return PLDT_TIER_CAPACITY; }
+	};
 
 	/** Stable outcomes returned by PulseEditor public functions and procedures. */
 	enum class EReturnCode : uint8
@@ -1033,11 +1060,18 @@ public:
 		EReturnCode returnCode;
 	};
 
+	/** One submitted code; the single field preserves the 16-byte ticket wire layout. */
+	struct TicketDigits
+	{
+		/** Code digits in order; only the configured codeLength entries are validated and stored. */
+		Array<uint8, PLDT_DIGITS_ALIGNED> digits;
+	};
+
 	/** Validated data consumed by the buy tickets operation. */
 	struct BuyTickets_input
 	{
 		/** Submitted digit arrays; only the first ticketCount entries are used. */
-		Array<Array<uint8, PLDT_DIGITS_ALIGNED>, PLDT_MAX_BATCH_TICKETS> tickets;
+		Array<TicketDigits, PLDT_MAX_BATCH_TICKETS> tickets;
 		/** Generation-aware identifier of a game slot. */
 		uint64 gameId;
 		/** Number of tickets accepted for the current request or round. */
@@ -1570,10 +1604,14 @@ public:
 	/** Input values consumed by the validate tier configuration helper. */
 	struct ValidateTierConfiguration_input
 	{
-		/** Tier weights bps stored by this structure. */
+		/** Prize-category weights in basis points; reachable categories must total 10,000. */
 		TierWeightMatrix tierWeightsBps;
-		/** Code length stored by this structure. */
+		/** Number of digits in each validated code, from 4 through 10. */
 		uint8 codeLength;
+		/** Inclusive upper digit bound defining an alphabet of maxDigit + 1 values. */
+		uint8 maxDigit;
+		/** Whether codes may repeat digits rather than select distinct alphabet values. */
+		bit allowRepeatedDigits;
 	};
 
 	/** Result values produced by the validate tier configuration helper. */
@@ -3353,6 +3391,8 @@ public:
 		}
 		locals.tierInput.tierWeightsBps = input.tierWeightsBps;
 		locals.tierInput.codeLength = input.codeLength;
+		locals.tierInput.maxDigit = input.maxDigit;
+		locals.tierInput.allowRepeatedDigits = input.allowRepeatedDigits;
 		CALL(ValidateTierConfiguration, locals.tierInput, locals.tierOutput);
 		if (locals.tierOutput.returnCode != EReturnCode::SUCCESS)
 		{
@@ -3621,8 +3661,10 @@ public:
 
 	/**
 	 * @brief Reads a retained terminal result.
-	 * @param input Generation-aware game id.
-	 * @param output Result snapshot or `INVALID_GAME` after ring eviction.
+	 * @param input Exact non-zero RoundKey containing game id and round number.
+	 * @param output Result snapshot, INVALID_ROUND for a missing result of a known game or a zero key,
+	 * or INVALID_GAME when neither active slots nor retained history identify the game.
+	 * @note An unfinished round has no result. Retained summaries remain readable after ticket details expire.
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetRoundResult)
 	{
@@ -3652,7 +3694,7 @@ public:
 				return;
 			}
 		}
-		output.returnCode = locals.foundGame ? EReturnCode::INVALID_ROUND : EReturnCode::INVALID_GAME;
+		output.returnCode = locals.foundGame || isGameIdValid(state, locals.gameId) ? EReturnCode::INVALID_ROUND : EReturnCode::INVALID_GAME;
 	}
 
 	/**
@@ -4321,6 +4363,12 @@ private:
 				{
 					return;
 				}
+				// Distinct codes must share at least 2 * codeLength - alphabetSize digits when that bound is positive.
+				if (input.tierWeightsBps.get(static_cast<uint16>(locals.index)) > 0 && !input.allowRepeatedDigits &&
+				    locals.exact + locals.misplaced + input.maxDigit + 1 < 2 * input.codeLength)
+				{
+					return;
+				}
 			}
 		}
 		if (locals.weightTotal == PLDT_TIER_BPS_SCALE)
@@ -4679,7 +4727,7 @@ private:
 		}
 		for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
 		{
-			locals.validateInput.digits = input.purchase.tickets.get(locals.i);
+			locals.validateInput.digits = input.purchase.tickets.get(locals.i).digits;
 			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
 			if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
 			{
@@ -4811,7 +4859,7 @@ private:
 		for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
 		{
 			locals.applyInput.gameId = input.purchase.gameId;
-			locals.applyInput.digits = input.purchase.tickets.get(locals.i);
+			locals.applyInput.digits = input.purchase.tickets.get(locals.i).digits;
 			locals.applyInput.bonusQualified = input.prepared.bonusQualified;
 			CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
 			if (locals.applyOutput.returnCode != EReturnCode::SUCCESS)
