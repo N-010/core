@@ -83,6 +83,8 @@ constexpr uint8 PLDT_MAX_WALLET_ASSETS = 16;
 constexpr uint16 PLDT_MAX_DIVIDEND_RECIPIENTS = 1024;
 /** Tick interval between automated lifecycle scans. */
 constexpr uint32 PLDT_TICK_UPDATE_PERIOD = 100;
+/** Half the uint16 epoch range; modular elapsed intervals must stay below this bound to exclude future epochs. */
+constexpr uint16 PLDT_EPOCH_HALF_RANGE = div<uint16>(UINT16_MAX, 2);
 /** Maximum nonempty games processed during one automation pass. */
 constexpr uint16 PLDT_AUTOMATION_GAMES_PER_TICK = 32;
 /** Number of wallet-map slots inspected during one periodic automation pass. */
@@ -6101,7 +6103,7 @@ private:
 	/** Returns whether a modular uint16 epoch interval is old enough without accepting future epochs. */
 	static constexpr bool epochElapsedAtLeast(const uint16 current, const uint16 previous, const uint16 required)
 	{
-		return static_cast<uint16>(current - previous) >= required && static_cast<uint16>(current - previous) < 0x8000U;
+		return static_cast<uint16>(current - previous) >= required && static_cast<uint16>(current - previous) < PLDT_EPOCH_HALF_RANGE;
 	}
 
 	/** Extracts the fixed game slot encoded in a generation-aware game id. */
