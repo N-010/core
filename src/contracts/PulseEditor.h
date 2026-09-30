@@ -5242,7 +5242,9 @@ private:
 				break;
 
 			// Start settlement for games explicitly closed by ticket exhaustion.
-			case EGameStatus::CLOSED: output.action = EGameLifecycleAction::BEGIN_SETTLEMENT; break;
+			case EGameStatus::CLOSED:
+				output.action = EGameLifecycleAction::BEGIN_SETTLEMENT;
+				break;
 
 			default:;
 		}
@@ -6064,11 +6066,16 @@ private:
 		}
 		output.game.finalizingRoundReason = input.reason;
 		output.game.finalizingStopReason = EGameStopReason::NONE;
-		// Return the remaining prize pool when no winner payout is due.
-		if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
-		    input.reason == EGameTerminalReason::OWNER_CANCELLED)
+		// Return the remaining prize pool for terminal reasons without winner payouts.
+		switch (input.reason)
 		{
-			output.game.pendingPrizePoolPayout = output.game.prizePool;
+			case EGameTerminalReason::NO_TICKETS:
+			case EGameTerminalReason::NO_WINNERS:
+			case EGameTerminalReason::OWNER_CANCELLED:
+				output.game.pendingPrizePoolPayout = output.game.prizePool;
+				break;
+			default:
+				break;
 		}
 		output.game.pendingCreatorCurrencyPayout = output.game.creatorRevenue;
 		output.game.creatorRevenue = 0;
@@ -6116,12 +6123,14 @@ private:
 	PRIVATE_PROCEDURE_WITH_LOCALS(DrainFinalizationPayouts)
 	{
 		output.game = input.game;
+
 		// Require an open creator wallet to receive finalization credits.
 		if (!state.get().wallets.get(output.game.owner, locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+
 		// Keep fees separate from pool returns: their combined liability need not fit in one wallet credit.
 		for (locals.payoutIndex = 0; locals.payoutIndex < 2; ++locals.payoutIndex)
 		{
@@ -6131,23 +6140,28 @@ private:
 			{
 				continue;
 			}
+
 			// Measure available QU credit against the refundable wallet limit.
-			if (output.game.currencyMode == ECurrencyMode::QUBIC)
+			switch (output.game.currencyMode)
 			{
-				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.refundableQubic;
+				case ECurrencyMode::QUBIC:
+					locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.refundableQubic;
+
+					break;
+				case ECurrencyMode::ASSET:
+					// Active asset games pin their wallet position until every creator liability is credited.
+					locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
+					// Keep finalization pending when the pinned asset position is unavailable.
+					if (!locals.walletAssetFound)
+					{
+						output.returnCode = EReturnCode::STORAGE_FULL;
+						return;
+					}
+					locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.walletAsset.balance;
+
+					break;
 			}
-			else
-			{
-				// Active asset games pin their wallet position until every creator liability is credited.
-				locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
-				// Keep finalization pending when the pinned asset position is unavailable.
-				if (!locals.walletAssetFound)
-				{
-					output.returnCode = EReturnCode::STORAGE_FULL;
-					return;
-				}
-				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.walletAsset.balance;
-			}
+
 			// Partial credits let the owner free wallet capacity before a later call drains the remaining liability.
 			locals.amountToCredit = locals.pendingAmount < locals.availableCredit ? locals.pendingAmount : locals.availableCredit;
 			// Leave the liability pending until the wallet has capacity for a credit.
@@ -6155,25 +6169,29 @@ private:
 			{
 				continue;
 			}
+
 			// Credit QU internally; asset credits also require a custody transfer.
-			if (output.game.currencyMode == ECurrencyMode::QUBIC)
+			switch (output.game.currencyMode)
 			{
-				locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.amountToCredit);
+
+				case ECurrencyMode::QUBIC:
+					locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.amountToCredit);
+					break;
+				case ECurrencyMode::ASSET:
+					locals.transferResult =
+					    qpi.transferShareOwnershipAndPossession(output.game.currencyAsset.assetName, output.game.currencyAsset.issuer, SELF, SELF,
+					                                            static_cast<sint64>(locals.amountToCredit), output.game.owner);
+					// Leave the current asset liability pending on a failed custody transfer.
+					if (locals.transferResult < 0)
+					{
+						output.returnCode = EReturnCode::TRANSFER_FAILED;
+						return;
+					}
+					locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.amountToCredit);
+					locals.wallet.assets.set(static_cast<uint8>(locals.i), locals.walletAsset);
+					break;
 			}
-			else
-			{
-				locals.transferResult =
-				    qpi.transferShareOwnershipAndPossession(output.game.currencyAsset.assetName, output.game.currencyAsset.issuer, SELF, SELF,
-				                                            static_cast<sint64>(locals.amountToCredit), output.game.owner);
-				// Leave the current asset liability pending on a failed custody transfer.
-				if (locals.transferResult < 0)
-				{
-					output.returnCode = EReturnCode::TRANSFER_FAILED;
-					return;
-				}
-				locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.amountToCredit);
-				locals.wallet.assets.set(static_cast<uint8>(locals.i), locals.walletAsset);
-			}
+
 			// Consume creator-fee liability separately from returned prize-pool liability.
 			if (locals.payoutIndex == 0)
 			{
@@ -6183,6 +6201,7 @@ private:
 			{
 				output.game.pendingPrizePoolPayout -= locals.amountToCredit;
 			}
+
 			// Commit each completed credit before another transfer can fail; retries consume only the remainder.
 			state.mut().wallets.replace(output.game.owner, locals.wallet);
 			state.mut().games.set(input.slot, output.game);
@@ -6317,16 +6336,17 @@ private:
 			locals.fundingInput.ownershipManagingContractIndex = locals.game.ownershipManagingContractIndex;
 			locals.fundingInput.possessionManagingContractIndex = locals.game.possessionManagingContractIndex;
 			CALL(FundRoundFromWallet, locals.fundingInput, locals.fundingOutput);
-			// Stop continuation when the owner cannot afford the next round.
-			if (locals.fundingOutput.returnCode == EReturnCode::INSUFFICIENT_FUNDS)
+			// Funding shortages stop continuation; other errors preserve retryable finalization.
+			switch (locals.fundingOutput.returnCode)
 			{
-				locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
-			}
-			// Among funding errors, only insufficient funds stops the game; other errors keep finalization retryable.
-			else if (locals.fundingOutput.returnCode != EReturnCode::SUCCESS)
-			{
-				output.returnCode = locals.fundingOutput.returnCode;
-				return;
+				case EReturnCode::SUCCESS:
+					break;
+				case EReturnCode::INSUFFICIENT_FUNDS:
+					locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
+					break;
+				default:
+					output.returnCode = locals.fundingOutput.returnCode;
+					return;
 			}
 		}
 		locals.resultInput.game = locals.game;
@@ -6437,32 +6457,35 @@ private:
 			output.returnCode = locals.finalizeOutput.returnCode;
 			return;
 		}
+
 		locals.now = qpi.now();
 		locals.lifecycleInput.game = locals.game;
 		locals.lifecycleInput.now = locals.now;
 		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
-		// Persist the transition when a scheduled game becomes ready for sales.
-		if (locals.lifecycleOutput.action == EGameLifecycleAction::OPEN_SALES)
+		// Dispatch the single lifecycle action selected for this game snapshot.
+		switch (locals.lifecycleOutput.action)
 		{
-			locals.game.status = locals.lifecycleOutput.effectiveStatus;
-			state.mut().games.set(input.slot, locals.game);
-		}
-		// Finalize an elapsed round with no tickets without generating a draw.
-		if (locals.lifecycleOutput.action == EGameLifecycleAction::FINALIZE_NO_TICKETS)
-		{
-			locals.finalizeInput.slot = input.slot;
-			locals.finalizeInput.reason = EGameTerminalReason::NO_TICKETS;
-			CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
-			output.returnCode = locals.finalizeOutput.returnCode;
-			return;
-		}
-		// Freeze the draw inputs when the lifecycle requires settlement.
-		if (locals.lifecycleOutput.action == EGameLifecycleAction::BEGIN_SETTLEMENT)
-		{
-			locals.game.status = EGameStatus::CLOSED;
-			state.mut().games.set(input.slot, locals.game);
-			locals.beginInput.slot = input.slot;
-			CALL(BeginSettlement, locals.beginInput, locals.beginOutput);
+			case EGameLifecycleAction::OPEN_SALES:
+				// Persist the transition when a scheduled game becomes ready for sales.
+				locals.game.status = locals.lifecycleOutput.effectiveStatus;
+				state.mut().games.set(input.slot, locals.game);
+				break;
+			case EGameLifecycleAction::FINALIZE_NO_TICKETS:
+				// Finalize an elapsed round with no tickets without generating a draw.
+				locals.finalizeInput.slot = input.slot;
+				locals.finalizeInput.reason = EGameTerminalReason::NO_TICKETS;
+				CALL(FinalizeGame, locals.finalizeInput, locals.finalizeOutput);
+				output.returnCode = locals.finalizeOutput.returnCode;
+				return;
+			case EGameLifecycleAction::BEGIN_SETTLEMENT:
+				// Freeze the draw inputs when the lifecycle requires settlement.
+				locals.game.status = EGameStatus::CLOSED;
+				state.mut().games.set(input.slot, locals.game);
+				locals.beginInput.slot = input.slot;
+				CALL(BeginSettlement, locals.beginInput, locals.beginOutput);
+				break;
+			default:
+				break;
 		}
 		// Spend ticket work only on active counting or payment phases.
 		if (input.actionBudget > 0 &&
