@@ -135,6 +135,7 @@ public:
 		/** Replaces the tier value while hiding the two-array storage split. */
 		void set(const uint16 index, const uint16 value)
 		{
+			// Select the prefix segment while preserving the compact tier index.
 			if (index < PLDT_TIER_PREFIX_CAPACITY)
 			{
 				prefix.set(index, value);
@@ -166,6 +167,7 @@ public:
 		/** Replaces the tier value while hiding the two-array storage split. */
 		void set(const uint16 index, const uint64 value)
 		{
+			// Select the prefix segment while preserving the compact tier index.
 			if (index < PLDT_TIER_PREFIX_CAPACITY)
 			{
 				prefix.set(index, value);
@@ -3047,28 +3049,35 @@ public:
 	{
 		output.requestedFee = 0;
 		output.allowTransfer = false;
+
+		// Accept only positive shares owned and possessed by the transaction originator.
 		if (qpi.originator() != input.owner || qpi.originator() != input.possessor || input.numberOfShares <= 0)
 		{
 			return;
 		}
+
+		// Allow acquisition without wallet tracking when the owner has no wallet.
 		if (!state.get().wallets.get(input.owner, locals.wallet))
 		{
 			output.allowTransfer = true;
 			return;
 		}
+
+		// Reject acquisitions for wallets that are no longer accepting deposits.
 		if (locals.wallet.status != EWalletStatus::OPEN)
 		{
 			return;
 		}
+
 		locals.found = findWalletAsset(locals.wallet, input.asset, locals.i, locals.assetBalance);
+		// Check the existing asset balance before allowing additional managed shares.
 		if (locals.found)
 		{
-			if (locals.assetBalance.balance <= PLDT_MAX_TRANSFER_AMOUNT - static_cast<uint64>(input.numberOfShares))
-			{
-				output.allowTransfer = true;
-			}
+			// Credit only amounts that fit the wallet balance limit.
+			output.allowTransfer = locals.assetBalance.balance <= (PLDT_MAX_TRANSFER_AMOUNT - static_cast<uint64>(input.numberOfShares));
 			return;
 		}
+
 		output.allowTransfer = locals.wallet.assetCount < PLDT_MAX_WALLET_ASSETS;
 	}
 
@@ -3078,6 +3087,7 @@ public:
 		{
 			return;
 		}
+
 		locals.creditInput.owner = input.owner;
 		locals.creditInput.asset = input.asset;
 		locals.creditInput.amount = static_cast<uint64>(input.numberOfShares);
@@ -3086,6 +3096,7 @@ public:
 
 	BEGIN_TICK_WITH_LOCALS()
 	{
+		// Run automation only at the configured tick interval.
 		if (mod(qpi.tick(), PLDT_TICK_UPDATE_PERIOD) != 0)
 		{
 			return;
@@ -3095,24 +3106,25 @@ public:
 		locals.gamesProcessed = 0;
 		locals.settlementsRemaining = 0;
 		locals.lifecycleInput.now = qpi.now();
+
 		// Bound sparse scans to one full circle so no slot can be processed twice in this pass.
 		for (locals.inspected = 0; locals.inspected < PLDT_MAX_GAMES && locals.gamesProcessed < PLDT_AUTOMATION_GAMES_PER_TICK; ++locals.inspected)
 		{
 			locals.slot = automationGameSlot(locals.inspected, state.get().automationCursor);
+			// Schedule work only for occupied game slots.
 			if (state.get().games.get(locals.slot).status != EGameStatus::EMPTY_SLOT)
 			{
 				locals.gameSlots.set(locals.gamesProcessed, locals.slot);
 				locals.lifecycleInput.game = state.get().games.get(locals.slot);
 				evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
 				locals.settlementNeeded.set(locals.gamesProcessed, locals.lifecycleInput.game.status == EGameStatus::COUNTING ||
-				                                                           locals.lifecycleInput.game.status == EGameStatus::PAYING ||
-				                                                           locals.lifecycleOutput.action == EGameLifecycleAction::BEGIN_SETTLEMENT
-				                                                       ? 1
-				                                                       : 0);
+				                                                       locals.lifecycleInput.game.status == EGameStatus::PAYING ||
+				                                                       locals.lifecycleOutput.action == EGameLifecycleAction::BEGIN_SETTLEMENT);
 				locals.settlementsRemaining += locals.settlementNeeded.get(locals.gamesProcessed);
 				++locals.gamesProcessed;
 			}
 		}
+		// Process each selected game once using its allocated settlement budget.
 		for (locals.gameIndex = 0; locals.gameIndex < locals.gamesProcessed; ++locals.gameIndex)
 		{
 			locals.processInput.slot = locals.gameSlots.get(locals.gameIndex);
@@ -3130,37 +3142,44 @@ public:
 
 		locals.walletsInspected = 0;
 		locals.walletActions = 0;
+		// Bound wallet maintenance by the number of map slots inspected.
 		while (locals.walletsInspected < PLDT_AUTOMATION_WALLETS_PER_TICK)
 		{
 			locals.walletIndex =
 			    mod(static_cast<uint64>(state.get().walletAutomationCursor + locals.walletsInspected), static_cast<uint64>(PLDT_WALLET_MAP_CAPACITY));
 			++locals.walletsInspected;
+			// Skip empty map slots without reading a wallet record.
 			if (state.get().wallets.isEmptySlot(static_cast<sint64>(locals.walletIndex)))
 			{
 				continue;
 			}
 			locals.walletOwner = state.get().wallets.key(static_cast<sint64>(locals.walletIndex));
 			locals.wallet = state.get().wallets.value(static_cast<sint64>(locals.walletIndex));
+			// Begin expiry only after an idle wallet has passed its grace period.
 			if (locals.wallet.status == EWalletStatus::OPEN && locals.wallet.activeGameCount == 0 &&
 			    epochElapsedAtLeast(qpi.epoch(), locals.wallet.lastGameCreationEpoch, 2))
 			{
 				locals.wallet.status = EWalletStatus::EXPIRING;
 				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
 			}
+			// Release expiring asset positions within the per-pass action budget.
 			while (locals.wallet.status == EWalletStatus::EXPIRING && locals.wallet.expiryAssetCursor < PLDT_MAX_WALLET_ASSETS &&
 			       locals.walletActions < PLDT_WALLET_EXPIRY_ASSET_ACTION_BUDGET)
 			{
 				locals.walletAsset = locals.wallet.assets.get(locals.wallet.expiryAssetCursor);
 				++locals.wallet.expiryAssetCursor;
+				// Skip unused positions while advancing the expiry cursor.
 				if (!locals.walletAsset.isActive)
 				{
 					continue;
 				}
+				// Release management rights only for positions with remaining shares.
 				if (locals.walletAsset.balance > 0)
 				{
 					locals.transferResult = qpi.releaseShares(locals.walletAsset.asset, locals.walletOwner, locals.walletOwner,
 					                                          static_cast<sint64>(locals.walletAsset.balance), QX_CONTRACT_INDEX, QX_CONTRACT_INDEX,
 					                                          static_cast<sint64>(locals.wallet.serviceCredit));
+					// Charge a successful release only when its fee fits the service credit.
 					if (locals.transferResult >= 0 && static_cast<uint64>(locals.transferResult) <= locals.wallet.serviceCredit)
 					{
 						locals.wallet.serviceCredit -= static_cast<uint64>(locals.transferResult);
@@ -3168,6 +3187,7 @@ public:
 				}
 				setMemory(locals.walletAsset, 0);
 				locals.wallet.assets.set(locals.wallet.expiryAssetCursor - 1, locals.walletAsset);
+				// Maintain the active-position count without unsigned underflow.
 				if (locals.wallet.assetCount > 0)
 				{
 					--locals.wallet.assetCount;
@@ -3175,13 +3195,18 @@ public:
 				++locals.walletActions;
 				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
 			}
+
+			// Keep the wallet until expiry has released all asset positions.
 			if (locals.wallet.status != EWalletStatus::EXPIRING || locals.wallet.assetCount != 0)
 			{
 				continue;
 			}
+
+			// Return unlocked service credit before removing the wallet.
 			if (locals.wallet.serviceCreditUnlocked && locals.wallet.serviceCredit > 0)
 			{
 				locals.transferResult = qpi.transfer(locals.walletOwner, static_cast<sint64>(locals.wallet.serviceCredit));
+				// Keep the wallet for retry if the service-credit refund fails.
 				if (locals.transferResult < 0)
 				{
 					continue;
@@ -3189,26 +3214,33 @@ public:
 				locals.wallet.serviceCredit = 0;
 				state.mut().wallets.replace(locals.walletOwner, locals.wallet);
 			}
+
 			calculatePlatformShares(locals.wallet.serviceCredit, locals.developer1Fee, locals.developer2Fee, locals.dividendFee);
+			// Defer fee accrual if the platform ledgers lack capacity.
 			if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
 			                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
 			{
 				continue;
 			}
+
+			// Return refundable QU before removing the wallet.
 			if (locals.wallet.refundableQubic > 0)
 			{
 				locals.transferResult = qpi.transfer(locals.walletOwner, static_cast<sint64>(locals.wallet.refundableQubic));
+				// Keep the wallet for retry if its QU refund fails.
 				if (locals.transferResult < 0)
 				{
 					continue;
 				}
 				locals.wallet.refundableQubic = 0;
 			}
+
 			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.developer1Fee);
 			state.mut().developer2Accrued = sadd(state.get().developer2Accrued, locals.developer2Fee);
 			state.mut().dividendAccrued = sadd(state.get().dividendAccrued, locals.dividendFee);
 			state.mut().wallets.removeByKey(locals.walletOwner);
 		}
+
 		state.mut().wallets.cleanupIfNeeded();
 		state.mut().walletAutomationCursor = static_cast<uint16>(
 		    mod(static_cast<uint64>(state.get().walletAutomationCursor + locals.walletsInspected), static_cast<uint64>(PLDT_WALLET_MAP_CAPACITY)));
@@ -3222,8 +3254,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(CreateWallet)
 	{
+		// Reject a second wallet for the same creator.
 		if (state.get().wallets.get(qpi.invocator(), locals.wallet))
 		{
+			// Return attached QU when wallet creation is rejected.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3231,8 +3265,10 @@ public:
 			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Require enough QU to fund the wallet creation credit.
 		if (qpi.invocationReward() < static_cast<sint64>(state.get().walletCreationFee))
 		{
+			// Return an insufficient creation payment to its sender.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3240,6 +3276,7 @@ public:
 			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Enforce the logical wallet capacity before map insertion.
 		if (state.get().wallets.population() >= PLDT_MAX_WALLETS)
 		{
 			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3252,6 +3289,7 @@ public:
 		locals.wallet.lastGameCreationEpoch = qpi.epoch();
 		locals.wallet.status = EWalletStatus::OPEN;
 		locals.mapIndex = state.mut().wallets.set(qpi.invocator(), locals.wallet);
+		// Report map insertion failure without publishing a wallet.
 		if (locals.mapIndex < 0)
 		{
 			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3271,6 +3309,7 @@ public:
 	PUBLIC_FUNCTION_WITH_LOCALS(GetWallet)
 	{
 		output.found = state.get().wallets.get(input.owner, locals.wallet);
+		// Leave the query result empty when no wallet exists.
 		if (!output.found)
 		{
 			return;
@@ -3292,8 +3331,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(DepositWalletQubic)
 	{
+		// Require an open wallet before accepting a QU deposit.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
+			// Refund deposits sent to a missing or closed wallet.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3301,8 +3342,10 @@ public:
 			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Reject nonpositive deposits and balance overflow.
 		if (qpi.invocationReward() <= 0 || locals.wallet.refundableQubic > PLDT_MAX_TRANSFER_AMOUNT - static_cast<uint64>(qpi.invocationReward()))
 		{
+			// Return a rejected deposit instead of retaining it.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -3323,27 +3366,32 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawWalletQubic)
 	{
+		// Reject attached QU on a wallet withdrawal request.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.transferResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
 			output.returnCode = locals.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Require an open wallet before withdrawing funds.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Reject zero-value withdrawals.
 		if (input.amount == 0)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Keep locked service credit unavailable while games remain active.
 		if ((!locals.wallet.serviceCreditUnlocked || locals.wallet.activeGameCount != 0) && input.amount > locals.wallet.refundableQubic)
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Check combined available balances without overflowing their sum.
 		if (locals.wallet.serviceCreditUnlocked && locals.wallet.activeGameCount == 0 && input.amount > locals.wallet.serviceCredit &&
 		    input.amount - locals.wallet.serviceCredit > locals.wallet.refundableQubic)
 		{
@@ -3351,13 +3399,16 @@ public:
 			return;
 		}
 		locals.transferResult = qpi.transfer(qpi.invocator(), static_cast<sint64>(input.amount));
+		// Leave wallet balances unchanged if the withdrawal transfer fails.
 		if (locals.transferResult < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
+		// Allow service-credit spending only after unlocking and game closure.
 		if (locals.wallet.serviceCreditUnlocked && locals.wallet.activeGameCount == 0)
 		{
+			// Consume service credit first when it covers the withdrawal.
 			if (input.amount <= locals.wallet.serviceCredit)
 			{
 				locals.wallet.serviceCredit -= input.amount;
@@ -3386,6 +3437,7 @@ public:
 	{
 		locals.configurationInput.configuration = input;
 		CALL(ValidateGameConfiguration, locals.configurationInput, locals.configurationOutput);
+		// Stop preview generation when the game configuration is invalid.
 		if (locals.configurationOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.configurationOutput.returnCode;
@@ -3396,6 +3448,7 @@ public:
 		locals.tierInput.maxDigit = input.maxDigit;
 		locals.tierInput.allowRepeatedDigits = input.allowRepeatedDigits;
 		CALL(ValidateTierConfiguration, locals.tierInput, locals.tierOutput);
+		// Stop preview generation when payout tiers are invalid.
 		if (locals.tierOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.tierOutput.returnCode;
@@ -3417,6 +3470,7 @@ public:
 	{
 		output.gameId = 0;
 		output.slot = 0;
+		// Reject attached QU because creation uses wallet funding.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::TICKET_INVALID_PRICE;
@@ -3424,16 +3478,19 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// Require an open creator wallet before charging the operation fee.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Reject management work that cannot pay its operation fee.
 		if (!debitWalletOperationFee(locals.wallet))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Report a failed operation-fee burn before continuing creation.
 		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
@@ -3442,6 +3499,7 @@ public:
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		locals.previewInput = input;
 		CALL(PreviewGame, locals.previewInput, locals.previewOutput);
+		// Require valid economics before resolving storage and funding.
 		if (locals.previewOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.previewOutput.returnCode;
@@ -3452,6 +3510,7 @@ public:
 		locals.prepareInput.configuration = input;
 		locals.prepareInput.preview = locals.previewOutput;
 		CALL(PrepareGameCreation, locals.prepareInput, locals.prepareOutput);
+		// Propagate preparation errors before debiting round funds.
 		if (locals.prepareOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.prepareOutput.returnCode;
@@ -3467,6 +3526,7 @@ public:
 		locals.fundingInput.ownershipManagingContractIndex = input.ownershipManagingContractIndex;
 		locals.fundingInput.possessionManagingContractIndex = input.possessionManagingContractIndex;
 		CALL(FundRoundFromWallet, locals.fundingInput, locals.fundingOutput);
+		// Publish the game only after round funding succeeds.
 		if (locals.fundingOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.fundingOutput.returnCode;
@@ -3490,6 +3550,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(UpdateGameEconomics)
 	{
+		// Reject attached QU on an economics update.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
@@ -3498,54 +3559,64 @@ public:
 			return;
 		}
 		locals.slot = gameSlot(input.gameId);
+		// Reject stale or nonexistent game identifiers.
 		if (!isGameIdValid(state, input.gameId))
 		{
 			output.returnCode = EReturnCode::INVALID_GAME;
 			return;
 		}
 		locals.game = state.get().games.get(locals.slot);
+		// Restrict economics changes to the game owner.
 		if (locals.game.owner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
+		// Require an open wallet for the management fee.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Require enough wallet funds for the operation fee.
 		if (!debitWalletOperationFee(locals.wallet))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Stop the update if the operation-fee burn fails.
 		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		// Allow queued economics only for games that can start another round.
 		if (locals.game.mode != EGameMode::PERMANENT)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Keep frozen finalization economics unchanged during retry.
 		if (locals.game.status == EGameStatus::FINALIZING)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Reject prices and seeds outside the supported transfer range.
 		if (input.ticketPrice == 0 || input.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT || input.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Keep round and player ticket limits within storage bounds.
 		if (input.ticketLimit == 0 || input.ticketLimit > PLDT_MAX_TICKETS_PER_GAME || input.playerTicketLimit == 0 ||
 		    input.playerTicketLimit > input.ticketLimit)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Enforce the current governance limit on creator fees.
 		if (input.creatorFeePercent > state.get().maxCreatorFeePercent)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -3555,12 +3626,14 @@ public:
 		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
+		// Reject asset economics whose required burn cannot use the null issuer.
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
 		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
+		// Ensure maximum round revenue and creator refunds fit transfer limits.
 		if (input.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.ticketLimit)) ||
 		    locals.refundablePerTicket > div(PLDT_MAX_TRANSFER_AMOUNT - input.creatorPrizeSeed, static_cast<uint64>(input.ticketLimit)))
 		{
@@ -3587,6 +3660,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(StopGame)
 	{
+		// Reject attached QU on a stop request.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
@@ -3595,26 +3669,31 @@ public:
 			return;
 		}
 		output.returnCode = resolveOwnedGame(state, input.gameId, qpi.invocator(), locals.slot, locals.game);
+		// Propagate game lookup or authorization errors before charging a fee.
 		if (output.returnCode != EReturnCode::SUCCESS)
 		{
 			return;
 		}
+		// Require an open owner wallet to pay the management fee.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Reject a stop request that cannot pay the operation fee.
 		if (!debitWalletOperationFee(locals.wallet))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Stop processing if the operation-fee burn fails.
 		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
 		state.mut().wallets.replace(qpi.invocator(), locals.wallet);
+		// Cancel an unsold first round immediately before its start time.
 		if (locals.game.roundNumber == 1 && locals.game.status == EGameStatus::SCHEDULED && qpi.now() < locals.game.startAt)
 		{
 			locals.finalizeInput.slot = locals.slot;
@@ -3623,11 +3702,13 @@ public:
 			output.returnCode = locals.finalizeOutput.returnCode;
 			return;
 		}
+		// A one-shot game already stops at the end of its only round.
 		if (locals.game.mode == EGameMode::ONE_SHOT)
 		{
 			output.returnCode = EReturnCode::SUCCESS;
 			return;
 		}
+		// Convert a pending continuation into an owner-requested stop.
 		if (locals.game.status == EGameStatus::FINALIZING && locals.game.finalizingStopReason == EGameStopReason::NONE)
 		{
 			locals.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
@@ -3648,6 +3729,7 @@ public:
 	 */
 	PUBLIC_FUNCTION_WITH_LOCALS(GetGame)
 	{
+		// Reject a game ID whose generation no longer matches its slot.
 		if (!isGameIdValid(state, input.gameId))
 		{
 			output.returnCode = EReturnCode::INVALID_GAME;
@@ -3672,6 +3754,7 @@ public:
 	{
 		locals.gameId = input.roundKey.gameId;
 		locals.roundNumber = input.roundKey.roundNumber;
+		// Reject missing game or round identifiers before searching history.
 		if (locals.gameId == 0 || locals.roundNumber == 0)
 		{
 			output.returnCode = EReturnCode::INVALID_ROUND;
@@ -3679,13 +3762,16 @@ public:
 		}
 		locals.foundGame = false;
 		locals.available = state.get().resultCounter < PLDT_RESULT_HISTORY_SIZE ? state.get().resultCounter : PLDT_RESULT_HISTORY_SIZE;
+		// Search retained results from newest to oldest.
 		for (locals.i = 0; locals.i < locals.available; ++locals.i)
 		{
 			locals.counter = state.get().resultCounter - 1 - locals.i;
 			locals.result = state.get().results.get(static_cast<uint16>(mod(locals.counter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE))));
+			// Inspect round identity only in results belonging to this game.
 			if (locals.result.gameId == locals.gameId)
 			{
 				locals.foundGame = true;
+				// Continue searching when another round of the same game is found.
 				if (locals.result.roundNumber != locals.roundNumber)
 				{
 					continue;
@@ -3706,6 +3792,7 @@ public:
 	 */
 	PUBLIC_FUNCTION(GetTicket)
 	{
+		// Reject ticket IDs outside storage or from a previous slot generation.
 		if (input.ticketId == 0 || (input.ticketId & PLDT_TICKET_SLOT_MASK) >= state.get().tickets.capacity() ||
 		    state.get().tickets.get(input.ticketId & PLDT_TICKET_SLOT_MASK).ticketId != input.ticketId)
 		{
@@ -3724,15 +3811,18 @@ public:
 	PUBLIC_FUNCTION_WITH_LOCALS(ValidateDigits)
 	{
 		setMemory(locals.seen, 0);
+		// Validate digit-array bounds and feasibility before indexing scratch storage.
 		if (input.codeLength == 0 || input.codeLength > PLDT_MAX_CODE_LENGTH || input.maxDigit > PLDT_MAX_DIGIT ||
 		    (!input.allowRepeatedDigits && input.maxDigit + 1 < input.codeLength))
 		{
 			output.returnCode = EReturnCode::INVALID_DIGITS;
 			return;
 		}
+		// Check each submitted position and record digits already used.
 		for (locals.i = 0; locals.i < input.codeLength; ++locals.i)
 		{
 			locals.digit = input.digits.get(locals.i);
+			// Reject digits outside the alphabet or forbidden repeated occurrences.
 			if (locals.digit > input.maxDigit || (!input.allowRepeatedDigits && locals.seen.get(locals.digit) != 0))
 			{
 				output.returnCode = EReturnCode::INVALID_DIGITS;
@@ -3753,6 +3843,7 @@ public:
 		locals.findInput.gameId = input.roundKey.gameId;
 		locals.findInput.roundNumber = input.roundKey.roundNumber;
 		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		// Propagate round lookup errors before traversing ticket storage.
 		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.findOutput.returnCode;
@@ -3760,12 +3851,15 @@ public:
 		}
 		locals.skipped = 0;
 		locals.link = locals.findOutput.firstTicketLink;
+		// Traverse the selected round chain to count and page the player's tickets.
 		while (locals.link != 0)
 		{
 			locals.ticket = state.get().tickets.get(locals.link - 1);
+			// Include only tickets belonging to the requested player.
 			if (locals.ticket.player == input.player)
 			{
 				++output.totalCount;
+				// Return matching tickets only inside the requested page and output capacity.
 				if (locals.skipped++ >= input.offset && output.returnedCount < input.limit && output.returnedCount < output.ticketIndexes.capacity())
 				{
 					output.ticketIds.set(output.returnedCount, locals.ticket.ticketId);
@@ -3794,6 +3888,7 @@ public:
 		locals.findInput.gameId = input.roundKey.gameId;
 		locals.findInput.roundNumber = input.roundKey.roundNumber;
 		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		// Propagate round lookup errors before building player summaries.
 		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.findOutput.returnCode;
@@ -3802,6 +3897,7 @@ public:
 
 		locals.effectiveLimit = input.limit < PLDT_PLAYERS_PAGE_CAPACITY ? input.limit : PLDT_PLAYERS_PAGE_CAPACITY;
 		locals.link = locals.findOutput.firstTicketLink;
+		// Traverse the round chain to identify distinct players.
 		while (locals.link != 0)
 		{
 			locals.ticket = state.get().tickets.get(locals.link - 1);
@@ -3810,9 +3906,11 @@ public:
 			    (PLDT_PLAYER_LOOKUP_CAPACITY - 1);
 			locals.foundPlayer = false;
 			locals.firstLink = locals.firstTicketLinks.get(locals.hashSlot);
+			// Search earlier tickets to avoid counting the same player twice.
 			while (locals.firstLink != 0)
 			{
 				locals.firstTicket = state.get().tickets.get(locals.firstLink - 1);
+				// Recognize an earlier occurrence of the current ticket's player.
 				if (locals.firstTicket.player == locals.ticket.player)
 				{
 					locals.foundPlayer = true;
@@ -3821,10 +3919,12 @@ public:
 				locals.hashSlot = (locals.hashSlot + 1) & (PLDT_PLAYER_LOOKUP_CAPACITY - 1);
 				locals.firstLink = locals.firstTicketLinks.get(locals.hashSlot);
 			}
+			// Assign a player index only to the first occurrence in chain order.
 			if (!locals.foundPlayer)
 			{
 				locals.firstTicketLinks.set(locals.hashSlot, static_cast<uint32>(locals.link));
 				locals.playerIndex = output.totalCount++;
+				// Add distinct players only within the requested summary page.
 				if (locals.playerIndex >= input.offset && output.returnedCount < locals.effectiveLimit)
 				{
 					setMemory(locals.summary, 0);
@@ -3836,26 +3936,32 @@ public:
 		}
 
 		locals.link = locals.findOutput.firstTicketLink;
+		// Aggregate tickets only when the page contains player summaries.
 		while (locals.link != 0 && output.returnedCount != 0)
 		{
 			locals.ticket = state.get().tickets.get(locals.link - 1);
+			// Find the matching summary among the returned players.
 			for (locals.i = 0; locals.i < output.returnedCount; ++locals.i)
 			{
 				locals.summary = output.players.get(locals.i);
+				// Skip summaries belonging to another player.
 				if (locals.summary.player != locals.ticket.player)
 				{
 					continue;
 				}
 				locals.summary.totalPayout = sadd(locals.summary.totalPayout, locals.ticket.payout);
 				++locals.summary.ticketCount;
+				// Count classified winners using their stored winner weight.
 				if (locals.ticket.winnerWeight > 0)
 				{
 					++locals.summary.winningTicketCount;
 				}
+				// Add payout totals only after a ticket has been paid.
 				if (locals.ticket.status == ETicketStatus::PAID)
 				{
 					++locals.summary.paidTicketCount;
 				}
+				// Count bonus qualification from its purchase-time snapshot.
 				if (locals.ticket.bonusQualified)
 				{
 					++locals.summary.bonusQualifiedTicketCount;
@@ -3878,6 +3984,7 @@ public:
 		locals.findInput.gameId = input.roundKey.gameId;
 		locals.findInput.roundNumber = input.roundKey.roundNumber;
 		CALL(FindGameTicketList, locals.findInput, locals.findOutput);
+		// Propagate round lookup errors before collecting winner details.
 		if (locals.findOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.findOutput.returnCode;
@@ -3885,12 +3992,15 @@ public:
 		}
 		locals.skipped = 0;
 		locals.link = locals.findOutput.firstTicketLink;
+		// Traverse the round chain for paid winner tickets.
 		while (locals.link != 0)
 		{
 			locals.ticket = state.get().tickets.get(locals.link - 1);
+			// Expose only paid tickets with a positive payout.
 			if (locals.ticket.status == ETicketStatus::PAID && locals.ticket.payout > 0)
 			{
 				++output.totalCount;
+				// Apply winner pagination without exceeding output storage.
 				if (locals.skipped++ >= input.offset && output.returnedCount < input.limit && output.returnedCount < output.ticketIndexes.capacity())
 				{
 					output.ticketIds.set(output.returnedCount, locals.ticket.ticketId);
@@ -3934,13 +4044,16 @@ public:
 	{
 		locals.skipped = 0;
 		output.totalActive = state.get().activeGameCount;
+		// Scan game slots in storage order for the requested page.
 		for (locals.i = 0; locals.i < PLDT_MAX_GAMES; ++locals.i)
 		{
 			locals.game = state.get().games.get(locals.i);
+			// Exclude unused slots from active game pagination.
 			if (locals.game.status == EGameStatus::EMPTY_SLOT)
 			{
 				continue;
 			}
+			// Skip entries outside the requested page or output capacity.
 			if (locals.skipped++ < input.offset || output.returnedCount >= input.limit || output.returnedCount >= output.gameIds.capacity())
 			{
 				continue;
@@ -3957,6 +4070,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(SetPlatformConfig)
 	{
+		// Reject attached QU on platform configuration changes.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
@@ -3964,22 +4078,26 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// Restrict platform configuration to the current platform owner.
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
+		// Require usable governance and developer recipient addresses.
 		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Keep wallet and round fees positive and within transfer bounds.
 		if (input.roundFee == 0 || input.roundFee > PLDT_MAX_TRANSFER_AMOUNT || input.walletCreationFee == 0 ||
 		    input.walletCreationFee > PLDT_MAX_TRANSFER_AMOUNT)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
+		// Preserve the burn share when setting the maximum creator fee.
 		if (input.maxCreatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -4001,6 +4119,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawPlatformRevenue)
 	{
+		// Reject attached QU on platform revenue withdrawal.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
@@ -4008,14 +4127,17 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// Restrict platform withdrawals to the platform owner.
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
 		locals.failed = false;
+		// Attempt developer-one payment only when revenue is accrued.
 		if (state.get().developer1Accrued > 0)
 		{
+			// Keep developer-one revenue pending if no recipient is configured.
 			if (state.get().developer1 == NULL_ID)
 			{
 				locals.failed = true;
@@ -4023,6 +4145,7 @@ public:
 			else
 			{
 				locals.transferResult = qpi.transfer(state.get().developer1, static_cast<sint64>(state.get().developer1Accrued));
+				// Clear the developer-one liability only after successful transfer.
 				if (locals.transferResult >= 0)
 				{
 					output.developer1Paid = state.get().developer1Accrued;
@@ -4034,8 +4157,10 @@ public:
 				}
 			}
 		}
+		// Attempt developer-two payment only when revenue is accrued.
 		if (state.get().developer2Accrued > 0)
 		{
+			// Keep developer-two revenue pending if no recipient is configured.
 			if (state.get().developer2 == NULL_ID)
 			{
 				locals.failed = true;
@@ -4043,6 +4168,7 @@ public:
 			else
 			{
 				locals.transferResult = qpi.transfer(state.get().developer2, static_cast<sint64>(state.get().developer2Accrued));
+				// Clear the developer-two liability only after successful transfer.
 				if (locals.transferResult >= 0)
 				{
 					output.developer2Paid = state.get().developer2Accrued;
@@ -4054,6 +4180,7 @@ public:
 				}
 			}
 		}
+		// Distribute whole per-share QU amounts and retain the division remainder.
 		if (state.get().dividendAccrued >= NUMBER_OF_COMPUTORS &&
 		    qpi.distributeDividends(static_cast<sint64>(div(state.get().dividendAccrued, static_cast<uint64>(NUMBER_OF_COMPUTORS)))))
 		{
@@ -4061,6 +4188,7 @@ public:
 			    smul(div(state.get().dividendAccrued, static_cast<uint64>(NUMBER_OF_COMPUTORS)), static_cast<uint64>(NUMBER_OF_COMPUTORS));
 			state.mut().dividendAccrued -= output.dividendPaid;
 		}
+		// Report dividend failure when a payable whole-share amount remains.
 		else if (state.get().dividendAccrued >= NUMBER_OF_COMPUTORS)
 		{
 			locals.failed = true;
@@ -4092,8 +4220,10 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(TransferShareManagementRights)
 	{
+		// Reject invalid release amounts and transfers back to the same manager.
 		if (input.numberOfShares <= 0 || input.newManagingContractIndex == SELF_INDEX)
 		{
+			// Refund attached QU when the release parameters are invalid.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -4103,8 +4233,10 @@ public:
 		}
 		locals.possessedShares =
 		    qpi.numberOfPossessedShares(input.asset.assetName, input.asset.issuer, qpi.invocator(), qpi.invocator(), SELF_INDEX, SELF_INDEX);
+		// Require enough caller-owned and caller-possessed shares for release.
 		if (locals.possessedShares < input.numberOfShares)
 		{
+			// Refund attached QU when the caller lacks the requested shares.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -4113,10 +4245,13 @@ public:
 			return;
 		}
 		locals.walletFound = state.get().wallets.get(qpi.invocator(), locals.wallet);
+		// Apply tracked-wallet restrictions only when a wallet exists.
 		if (locals.walletFound)
 		{
+			// Allow share release only from open or expiring wallets.
 			if (locals.wallet.status != EWalletStatus::OPEN && locals.wallet.status != EWalletStatus::EXPIRING)
 			{
+				// Refund attached QU on an incompatible wallet state.
 				if (qpi.invocationReward() > 0)
 				{
 					locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -4125,6 +4260,7 @@ public:
 				return;
 			}
 			locals.walletAssetFound = findWalletAsset(locals.wallet, input.asset, locals.i, locals.walletAsset);
+			// Resolve the tracked asset slot before changing management rights.
 			if (locals.walletAssetFound)
 			{
 				locals.walletAssetSlot = static_cast<uint8>(locals.i);
@@ -4132,8 +4268,10 @@ public:
 		}
 		output.transferResult = qpi.releaseShares(input.asset, qpi.invocator(), qpi.invocator(), input.numberOfShares, input.newManagingContractIndex,
 		                                          input.newManagingContractIndex, qpi.invocationReward());
+		// Leave tracked custody unchanged if management-right release fails.
 		if (output.transferResult < 0)
 		{
+			// Return the attached fee payment after a failed release.
 			if (qpi.invocationReward() > 0)
 			{
 				locals.refundResult = qpi.transfer(qpi.invocator(), qpi.invocationReward());
@@ -4141,11 +4279,13 @@ public:
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
+		// Reconcile tracked balances only when the released asset is present.
 		if (locals.walletFound && locals.walletAssetFound)
 		{
 			locals.walletDebit = locals.walletAsset.balance < static_cast<uint64>(input.numberOfShares) ? locals.walletAsset.balance
 			                                                                                            : static_cast<uint64>(input.numberOfShares);
 			locals.walletAsset.balance -= locals.walletDebit;
+			// Remove an empty asset position only when no active game pins it.
 			if (locals.walletAsset.balance == 0 && locals.walletAsset.activeGameReferences == 0)
 			{
 				setMemory(locals.walletAsset, 0);
@@ -4155,9 +4295,11 @@ public:
 			state.mut().wallets.replace(qpi.invocator(), locals.wallet);
 		}
 		locals.refundAmount = qpi.invocationReward() - output.transferResult;
+		// Return the unused portion of the attached release fee.
 		if (locals.refundAmount > 0)
 		{
 			locals.refundResult = qpi.transfer(qpi.invocator(), locals.refundAmount);
+			// Report a refund failure even after the management-right transfer succeeds.
 			if (locals.refundResult < 0)
 			{
 				output.returnCode = EReturnCode::TRANSFER_FAILED;
@@ -4174,6 +4316,7 @@ public:
 	 */
 	PUBLIC_PROCEDURE_WITH_LOCALS(WithdrawAssetPlatformRevenue)
 	{
+		// Reject attached QU on asset revenue withdrawal.
 		if (qpi.invocationReward() != 0)
 		{
 			locals.refundInput.returnCode = EReturnCode::INVALID_VALUE;
@@ -4181,6 +4324,7 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// Restrict asset platform withdrawals to the platform owner.
 		if (state.get().platformOwner != qpi.invocator())
 		{
 			output.returnCode = EReturnCode::ACCESS_DENIED;
@@ -4188,9 +4332,11 @@ public:
 		}
 		locals.found = false;
 		locals.failed = false;
+		// Find the accounting bucket matching both asset identity and managers.
 		for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
 		{
 			locals.accounting = state.get().assetAccounting.get(locals.i);
+			// Use only the active bucket for the requested issuance and custody managers.
 			if (locals.accounting.isActive && isSameAsset(locals.accounting.asset, input.asset) &&
 			    locals.accounting.ownershipManagingContractIndex == input.ownershipManagingContractIndex &&
 			    locals.accounting.possessionManagingContractIndex == input.possessionManagingContractIndex)
@@ -4199,6 +4345,7 @@ public:
 				break;
 			}
 		}
+		// Reject withdrawals without a matching asset-accounting bucket.
 		if (!locals.found)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -4214,6 +4361,7 @@ public:
 		// A resumed dividend has priority over newer accruals so later traffic cannot starve its unpaid recipients.
 		if (!state.get().assetDividendDistribution.active && locals.accounting.developer1Accrued > 0)
 		{
+			// Retain developer-one asset revenue when no recipient exists.
 			if (state.get().developer1 == NULL_ID)
 			{
 				locals.failed = true;
@@ -4223,6 +4371,7 @@ public:
 				locals.transferResult =
 				    qpi.transferShareOwnershipAndPossession(locals.accounting.asset.assetName, locals.accounting.asset.issuer, SELF, SELF,
 				                                            static_cast<sint64>(locals.accounting.developer1Accrued), state.get().developer1);
+				// Clear developer-one asset accrual only after custody transfers successfully.
 				if (locals.transferResult >= 0)
 				{
 					locals.creditInput.owner = state.get().developer1;
@@ -4238,8 +4387,10 @@ public:
 				}
 			}
 		}
+		// Pay developer-two accruals only before a dividend snapshot is active.
 		if (!state.get().assetDividendDistribution.active && locals.accounting.developer2Accrued > 0)
 		{
+			// Retain developer-two asset revenue when no recipient exists.
 			if (state.get().developer2 == NULL_ID)
 			{
 				locals.failed = true;
@@ -4249,6 +4400,7 @@ public:
 				locals.transferResult =
 				    qpi.transferShareOwnershipAndPossession(locals.accounting.asset.assetName, locals.accounting.asset.issuer, SELF, SELF,
 				                                            static_cast<sint64>(locals.accounting.developer2Accrued), state.get().developer2);
+				// Clear developer-two asset accrual only after custody transfers successfully.
 				if (locals.transferResult >= 0)
 				{
 					locals.creditInput.owner = state.get().developer2;
@@ -4270,10 +4422,12 @@ public:
 		CALL(TransferAssetDividend, locals.dividendInput, locals.dividendOutput);
 		output.dividendPaid = locals.dividendOutput.distributedAmount;
 		locals.accounting.dividendAccrued -= output.dividendPaid;
+		// Preserve the overall failure status when dividend payment cannot finish.
 		if (locals.dividendOutput.failed)
 		{
 			locals.failed = true;
 		}
+		// Release the accounting bucket only after all references and liabilities are gone.
 		if (locals.accounting.activeGameCount == 0 && locals.accounting.developer1Accrued == 0 && locals.accounting.developer2Accrued == 0 &&
 		    locals.accounting.dividendAccrued == 0)
 		{
@@ -4284,25 +4438,33 @@ public:
 	}
 
 private:
+	/**
+	 * @brief Checks scheduling, ticket bounds, currency custody and bonus assets without changing state.
+	 * @note Reports INVALID_VALUE on any rejected configuration; otherwise reports SUCCESS.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(ValidateGameConfiguration)
 	{
 		output.returnCode = EReturnCode::INVALID_VALUE;
 		locals.managedCurrencyShares = 0;
 		locals.maxDrawAt = qpi.now();
+		// Reject a scheduling horizon that cannot be represented as a date.
 		if (!locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS))
 		{
 			return;
 		}
+		// Asset games require shares managed by this contract for both ownership and possession.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
 		{
 			locals.managedCurrencyShares = qpi.numberOfShares(input.configuration.currencyAsset, AssetOwnershipSelect::byManagingContract(SELF_INDEX),
 			                                                  AssetPossessionSelect::byManagingContract(SELF_INDEX));
 		}
+		// Require valid future dates in start-before-draw order and within the horizon.
 		if (!input.configuration.startAt.isValid() || !input.configuration.drawAt.isValid() || input.configuration.startAt <= qpi.now() ||
 		    input.configuration.drawAt > locals.maxDrawAt || input.configuration.drawAt <= input.configuration.startAt)
 		{
 			return;
 		}
+		// Bound ticket price, seed and combined initial QU funding.
 		if (input.configuration.ticketPrice == 0 || input.configuration.ticketPrice > PLDT_MAX_TRANSFER_AMOUNT ||
 		    input.configuration.creatorPrizeSeed > PLDT_MAX_TRANSFER_AMOUNT ||
 		    (input.configuration.currencyMode == ECurrencyMode::QUBIC &&
@@ -4310,6 +4472,7 @@ private:
 		{
 			return;
 		}
+		// Require feasible ticket limits and code rules within fixed storage bounds.
 		if (input.configuration.ticketLimit == 0 || input.configuration.ticketLimit > PLDT_MAX_TICKETS_PER_GAME ||
 		    input.configuration.playerTicketLimit == 0 || input.configuration.playerTicketLimit > input.configuration.ticketLimit ||
 		    input.configuration.codeLength < PLDT_MIN_CODE_LENGTH || input.configuration.codeLength > PLDT_MAX_CODE_LENGTH ||
@@ -4318,16 +4481,19 @@ private:
 		{
 			return;
 		}
+		// Bound creator fees and the number of qualifying bonus assets.
 		if (input.configuration.creatorFeePercent > state.get().maxCreatorFeePercent ||
 		    input.configuration.creatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT || input.configuration.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
 		{
 			return;
 		}
+		// Accept only supported lifecycle and currency modes.
 		if ((input.configuration.mode != EGameMode::ONE_SHOT && input.configuration.mode != EGameMode::PERMANENT) ||
 		    (input.configuration.currencyMode != ECurrencyMode::QUBIC && input.configuration.currencyMode != ECurrencyMode::ASSET))
 		{
 			return;
 		}
+		// Validate bonus scaling and ensure asset currency is issued and contract-managed.
 		if ((input.configuration.bonusAssetCount > 0 && (input.configuration.bonusMultiplierBps < PLDT_BONUS_MULTIPLIER_SCALE ||
 		                                                 input.configuration.bonusMultiplierBps > PLDT_MAX_BONUS_MULTIPLIER_BPS)) ||
 		    (input.configuration.currencyMode == ECurrencyMode::ASSET &&
@@ -4338,8 +4504,10 @@ private:
 		{
 			return;
 		}
+		// Validate every configured bonus issuance before accepting the game.
 		for (locals.i = 0; locals.i < input.configuration.bonusAssetCount; ++locals.i)
 		{
+			// Reject missing or unissued bonus assets.
 			if (input.configuration.bonusAssets.get(locals.i).assetName == 0 ||
 			    !qpi.isAssetIssued(input.configuration.bonusAssets.get(locals.i).issuer, input.configuration.bonusAssets.get(locals.i).assetName))
 			{
@@ -4349,16 +4517,23 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Checks that payout weights total the basis-point scale and fund only reachable match tiers.
+	 * @note Uses the configured code length, alphabet and repetition policy; does not change state.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(ValidateTierConfiguration)
 	{
 		output.returnCode = EReturnCode::INVALID_VALUE;
 		locals.weightTotal = 0;
+		// Visit each exact-match count in the fixed payout matrix.
 		for (locals.exact = 0; locals.exact <= PLDT_MAX_CODE_LENGTH; ++locals.exact)
 		{
+			// Visit misplaced counts whose combined matches fit the matrix.
 			for (locals.misplaced = 0; locals.misplaced <= PLDT_MAX_CODE_LENGTH - locals.exact; ++locals.misplaced)
 			{
 				locals.index = payoutMatrixIndex(locals.exact, locals.misplaced);
 				locals.weightTotal = sadd(locals.weightTotal, static_cast<uint64>(input.tierWeightsBps.get(static_cast<uint16>(locals.index))));
+				// One misplaced digit with all other positions exact is impossible: that last position would also be exact.
 				if (input.tierWeightsBps.get(static_cast<uint16>(locals.index)) > 0 &&
 				    (locals.exact > input.codeLength || locals.misplaced > input.codeLength - locals.exact ||
 				     (locals.exact + 1 == input.codeLength && locals.misplaced == 1)))
@@ -4373,12 +4548,17 @@ private:
 				}
 			}
 		}
+		// Accept the matrix only when all weights sum to the full basis-point scale.
 		if (locals.weightTotal == PLDT_TIER_BPS_SCALE)
 		{
 			output.returnCode = EReturnCode::SUCCESS;
 		}
 	}
 
+	/**
+	 * @brief Calculates per-ticket economics and initial funding requirements for a validated configuration.
+	 * @note Rejects unsupported burns and round totals exceeding transfer limits; does not debit funds.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(CalculateGamePreview)
 	{
 		output.preview.returnCode = EReturnCode::INVALID_VALUE;
@@ -4386,12 +4566,15 @@ private:
 		locals.economicsInput.creatorFeePercent = input.configuration.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
+		// Reject null-issuer asset currency when the economics require a burn.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET && input.configuration.currencyAsset.issuer == NULL_ID &&
 		    locals.economicsOutput.burn > 0)
 		{
 			return;
 		}
+		// Bound the whole round, including the seed, so creator returns remain representable as transfer amounts.
 		locals.refundablePerTicket = sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution);
+		// Bound worst-case revenue and refund liabilities for a full round.
 		if (input.configuration.ticketPrice > div(PLDT_MAX_TRANSFER_AMOUNT, static_cast<uint64>(input.configuration.ticketLimit)) ||
 		    locals.refundablePerTicket >
 		        div(PLDT_MAX_TRANSFER_AMOUNT - input.configuration.creatorPrizeSeed, static_cast<uint64>(input.configuration.ticketLimit)))
@@ -4401,6 +4584,7 @@ private:
 		output.preview.platformFee = locals.economicsOutput.platformFee;
 		output.preview.roundFee = state.get().roundFee;
 		output.preview.operationFee = PLDT_OPERATION_FEE;
+		// Include the seed in initial QU funding only for QU games.
 		if (input.configuration.currencyMode == ECurrencyMode::QUBIC)
 		{
 			output.preview.initialQubicRequired = sadd(state.get().roundFee, input.configuration.creatorPrizeSeed);
@@ -4416,20 +4600,27 @@ private:
 		output.preview.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Resolves a free game slot, creator wallet position and asset-accounting bucket.
+	 * @note Requires a validated configuration; returns prepared data without reserving slots or debiting funds.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(PrepareGameCreation)
 	{
 		output.returnCode = EReturnCode::INVALID_VALUE;
 		locals.maxDrawAt = qpi.now();
+		// Recheck time-sensitive scheduling bounds at creation time.
 		if (input.configuration.startAt <= qpi.now() || !locals.maxDrawAt.addDays(PLDT_MAX_SCHEDULE_DAYS) ||
 		    input.configuration.drawAt > locals.maxDrawAt)
 		{
 			return;
 		}
+		// Creation uses existing wallet funds; attached QU is not a funding source for this path.
 		if (qpi.invocationReward() != 0)
 		{
 			output.returnCode = EReturnCode::TICKET_INVALID_PRICE;
 			return;
 		}
+		// Require an open creator wallet before preparing storage.
 		if (!state.get().wallets.get(qpi.invocator(), locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
@@ -4437,15 +4628,18 @@ private:
 		}
 		// Invariant: cleared slots are linked once; never-used slots form a contiguous suffix.
 		locals.creatorActiveGames = locals.wallet.activeGameCount;
+		// Enforce the per-creator active-game cap.
 		if (locals.creatorActiveGames >= PLDT_MAX_ACTIVE_GAMES_PER_CREATOR)
 		{
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
+		// Prefer a cleared game slot from the free list.
 		if (state.get().freeGameHead != 0)
 		{
 			output.slot = state.get().freeGameHead - 1;
 		}
+		// Allocate an unused slot only while the contiguous suffix has capacity.
 		else if (state.get().nextUnusedGameSlot < PLDT_MAX_GAMES)
 		{
 			output.slot = state.get().nextUnusedGameSlot;
@@ -4455,45 +4649,54 @@ private:
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
+		// Do not overwrite an occupied slot selected for creation.
 		if (state.get().games.get(output.slot).status != EGameStatus::EMPTY_SLOT)
 		{
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
+		// Resolve asset wallet and accounting positions before committing an asset game.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
 		{
 			// Resolve wallet custody and the shared asset-accounting bucket before the commit phase.
 			locals.walletAssetFound = false;
 			locals.walletFreeAssetSlotFound = false;
+			// Search wallet positions for the asset and remember the first reusable slot.
 			for (locals.i = 0; locals.i < locals.wallet.assets.capacity(); ++locals.i)
 			{
 				locals.walletAsset = locals.wallet.assets.get(locals.i);
+				// Reuse the existing position for the same game-currency issuance.
 				if (locals.walletAsset.isActive && isSameAsset(locals.walletAsset.asset, input.configuration.currencyAsset))
 				{
 					output.walletAssetSlot = static_cast<uint8>(locals.i);
 					locals.walletAssetFound = true;
 					break;
 				}
+				// Remember a free position without replacing an earlier candidate.
 				if (!locals.walletAsset.isActive && !locals.walletFreeAssetSlotFound)
 				{
 					locals.walletFreeAssetSlot = static_cast<uint8>(locals.i);
 					locals.walletFreeAssetSlotFound = true;
 				}
 			}
+			// Allow a fresh asset position when a zero seed needs no existing balance.
 			if (!locals.walletAssetFound && input.configuration.creatorPrizeSeed == 0 && locals.walletFreeAssetSlotFound &&
 			    locals.wallet.assetCount < PLDT_MAX_WALLET_ASSETS)
 			{
 				output.walletAssetSlot = locals.walletFreeAssetSlot;
 			}
+			// Reject missing asset funding or a seed exceeding the tracked balance.
 			else if (!locals.walletAssetFound || locals.walletAsset.balance < input.configuration.creatorPrizeSeed)
 			{
 				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 				return;
 			}
 			locals.accountingFound = false;
+			// Search active accounting buckets before allocating another bucket.
 			for (locals.i = 0; locals.i < state.get().assetAccounting.capacity(); ++locals.i)
 			{
 				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+				// Reuse a bucket only for the same issuance and custody managers.
 				if (locals.assetAccounting.isActive && isSameAsset(locals.assetAccounting.asset, input.configuration.currencyAsset) &&
 				    locals.assetAccounting.ownershipManagingContractIndex == input.configuration.ownershipManagingContractIndex &&
 				    locals.assetAccounting.possessionManagingContractIndex == input.configuration.possessionManagingContractIndex)
@@ -4504,9 +4707,11 @@ private:
 					break;
 				}
 			}
+			// Find an inactive accounting slot if no matching bucket exists.
 			for (locals.i = 0; !locals.accountingFound && locals.i < state.get().assetAccounting.capacity(); ++locals.i)
 			{
 				locals.assetAccounting = state.get().assetAccounting.get(locals.i);
+				// Prepare a fresh bucket without publishing it to contract state.
 				if (!locals.assetAccounting.isActive)
 				{
 					output.accountingSlot = static_cast<uint16>(locals.i);
@@ -4517,6 +4722,7 @@ private:
 					locals.accountingFound = true;
 				}
 			}
+			// Reject asset creation when no accounting bucket can be allocated.
 			if (!locals.accountingFound)
 			{
 				output.returnCode = EReturnCode::STORAGE_FULL;
@@ -4526,25 +4732,34 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Pays the round fee from service credit then refundable QU, and funds the seed in game currency.
+	 * @note Reports wallet, capacity or custody errors before committing wallet debits and platform accruals.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(FundRoundFromWallet)
 	{
+		// Require an open owner wallet before round funding.
 		if (!state.get().wallets.get(input.owner, locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
+		// Service credit pays only the round fee; prize seeds must come from refundable QU or asset custody.
 		locals.serviceCreditDebit = locals.wallet.serviceCredit < input.roundFee ? locals.wallet.serviceCredit : input.roundFee;
 		locals.refundableQubicDebit = input.roundFee - locals.serviceCreditDebit;
+		// Ensure refundable QU covers the fee remainder and any QU seed.
 		if (locals.refundableQubicDebit > locals.wallet.refundableQubic ||
 		    (input.currencyMode == ECurrencyMode::QUBIC && input.creatorPrizeSeed > locals.wallet.refundableQubic - locals.refundableQubicDebit))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
+		// Debit a QU seed from refundable funds rather than service credit.
 		if (input.currencyMode == ECurrencyMode::QUBIC)
 		{
 			locals.refundableQubicDebit = sadd(locals.refundableQubicDebit, input.creatorPrizeSeed);
 		}
+		// Require a funded asset position for a nonzero asset seed.
 		else if (input.creatorPrizeSeed > 0 && (!findWalletAsset(locals.wallet, input.currencyAsset, locals.walletAssetSlot, locals.walletAsset) ||
 		                                        locals.walletAsset.balance < input.creatorPrizeSeed))
 		{
@@ -4552,12 +4767,14 @@ private:
 			return;
 		}
 		calculatePlatformShares(input.roundFee, locals.developer1Fee, locals.developer2Fee, locals.dividendFee);
+		// Check platform ledger capacity before funding takes custody.
 		if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
 		                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
 		{
 			output.returnCode = EReturnCode::STORAGE_FULL;
 			return;
 		}
+		// Move a nonzero asset seed from owner custody into the contract.
 		if (input.currencyMode == ECurrencyMode::ASSET && input.creatorPrizeSeed > 0)
 		{
 			locals.possessedShares = qpi.numberOfPossessedShares(input.currencyAsset.assetName, input.currencyAsset.issuer, input.owner, input.owner,
@@ -4570,6 +4787,7 @@ private:
 			}
 			locals.transferResult = qpi.transferShareOwnershipAndPossession(input.currencyAsset.assetName, input.currencyAsset.issuer, input.owner,
 			                                                                input.owner, static_cast<sint64>(input.creatorPrizeSeed), SELF);
+			// Leave funding ledgers unchanged if the asset seed transfer fails.
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = EReturnCode::TRANSFER_FAILED;
@@ -4588,8 +4806,13 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Publishes a prepared, funded game and updates creator and asset reference counts.
+	 * @note Requires successful preparation and funding in the same invocation; returns the new game ID and slot.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(CommitCreatedGame)
 	{
+		// Unlink a reused game slot from the free list before publishing it.
 		if (state.get().freeGameHead != 0)
 		{
 			state.mut().freeGameHead = state.get().freeGameNext.get(input.prepared.slot);
@@ -4599,7 +4822,9 @@ private:
 		{
 			state.mut().nextUnusedGameSlot = input.prepared.slot + 1;
 		}
+		// The generation distinguishes a reused slot from game IDs retained in history.
 		locals.generation = sadd(state.get().generations.get(input.prepared.slot), 1ULL);
+		// Keep zero reserved as an invalid generation value.
 		if (locals.generation == 0)
 		{
 			locals.generation = 1;
@@ -4636,6 +4861,7 @@ private:
 		locals.game.roundNumber = 1;
 		locals.game.allowRepeatedDigits = input.configuration.allowRepeatedDigits;
 		locals.game.status = EGameStatus::SCHEDULED;
+		// Attach the created asset game to its shared accounting bucket.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
 		{
 			locals.assetAccounting = input.prepared.assetAccounting;
@@ -4645,9 +4871,11 @@ private:
 		state.get().wallets.get(qpi.invocator(), locals.wallet);
 		++locals.wallet.activeGameCount;
 		locals.wallet.lastGameCreationEpoch = qpi.epoch();
+		// Pin the creator's currency position for the lifetime of an asset game.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET)
 		{
 			locals.walletAsset = locals.wallet.assets.get(input.prepared.walletAssetSlot);
+			// Initialize a previously unused position before adding the game reference.
 			if (!locals.walletAsset.isActive)
 			{
 				setMemory(locals.walletAsset, 0);
@@ -4677,13 +4905,19 @@ private:
 		calculatePlatformShares(output.platformFee, output.developer1Fee, output.developer2Fee, output.dividendFee);
 	}
 
+	/**
+	 * @brief Validates a ticket batch and snapshots lifecycle, bonus qualification and ticket economics.
+	 * @note Returns prepared purchase data or the validation error without collecting payment or changing state.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(PrepareTicketPurchase)
 	{
 		output.returnCode = EReturnCode::INVALID_GAME;
+		// Reject an invalid game generation before preparing a purchase.
 		if (!isGameIdValid(state, input.purchase.gameId))
 		{
 			return;
 		}
+		// Keep purchase batches nonempty and within the public batch limit.
 		if (input.purchase.ticketCount == 0 || input.purchase.ticketCount > PLDT_MAX_BATCH_TICKETS)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -4695,12 +4929,14 @@ private:
 		locals.lifecycleInput.game = output.game;
 		locals.lifecycleInput.now = locals.now;
 		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
+		// Reject purchases outside the effective sales window.
 		if (locals.lifecycleOutput.purchaseReturnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.lifecycleOutput.purchaseReturnCode;
 			return;
 		}
 		output.game.status = locals.lifecycleOutput.effectiveStatus;
+		// Ensure both round capacity and global ticket storage cover the complete batch.
 		if (output.game.ticketCount + input.purchase.ticketCount > output.game.ticketLimit ||
 		    input.purchase.ticketCount > state.get().freeTicketCount + state.get().tickets.capacity() -
 		                                     (state.get().nextUnusedTicketSlot != 0 ? state.get().nextUnusedTicketSlot : state.get().ticketCount))
@@ -4711,26 +4947,32 @@ private:
 		locals.validateInput.codeLength = output.game.codeLength;
 		locals.validateInput.maxDigit = output.game.maxDigit;
 		locals.validateInput.allowRepeatedDigits = output.game.allowRepeatedDigits;
+		// Count this player in the current round chain so tickets from previous rounds do not consume the limit.
 		locals.link = output.game.firstTicketLink;
 		locals.playerTickets = 0;
+		// Count the invocator's tickets in the current round chain.
 		while (locals.link != 0)
 		{
 			locals.ticket = state.get().tickets.get(locals.link - 1);
+			// Count only the purchasing player's tickets toward the player limit.
 			if (locals.ticket.player == qpi.invocator())
 			{
 				++locals.playerTickets;
 			}
 			locals.link = locals.ticket.nextLink;
 		}
+		// Enforce the per-player limit for the complete purchase batch.
 		if (locals.playerTickets + input.purchase.ticketCount > output.game.playerTicketLimit)
 		{
 			output.returnCode = EReturnCode::PLAYER_TICKET_LIMIT;
 			return;
 		}
+		// Validate every ticket before any batch payment is collected.
 		for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
 		{
 			locals.validateInput.digits = input.purchase.tickets.get(locals.i).digits;
 			CALL(ValidateDigits, locals.validateInput, locals.validateOutput);
+			// Reject the whole batch when any digit sequence is invalid.
 			if (locals.validateOutput.returnCode != EReturnCode::SUCCESS)
 			{
 				output.returnCode = locals.validateOutput.returnCode;
@@ -4742,6 +4984,7 @@ private:
 		CALL(EvaluateBonusQualification, locals.bonusInput, locals.bonusOutput);
 		output.bonusQualified = locals.bonusOutput.qualified;
 		output.totalPrice = smul(output.game.ticketPrice, static_cast<uint64>(input.purchase.ticketCount));
+		// Keep the combined batch payment within the transfer limit.
 		if (output.totalPrice > PLDT_MAX_TRANSFER_AMOUNT)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
@@ -4751,6 +4994,7 @@ private:
 		locals.economicsInput.creatorFeePercent = output.game.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
 		calculateTicketEconomics(locals.economicsInput, output.economics);
+		// Reject batches that would exceed round revenue or prize-pool bounds.
 		if (output.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - output.totalPrice ||
 		    smul(output.economics.prizeContribution, static_cast<uint64>(input.purchase.ticketCount)) >
 		        PLDT_MAX_TRANSFER_AMOUNT - output.game.prizePool)
@@ -4761,14 +5005,21 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Checks that platform accruals can accommodate the entire prepared ticket batch.
+	 * @note Reports STORAGE_FULL on insufficient QU or asset ledger capacity; does not change state.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(ValidatePurchaseAccountingCapacity)
 	{
 		output.returnCode = EReturnCode::SUCCESS;
+		// Check batch accruals before payment so ledger exhaustion cannot reject already collected funds.
 		locals.developer1Fee = smul(input.prepared.economics.developer1Fee, static_cast<uint64>(input.ticketCount));
 		locals.developer2Fee = smul(input.prepared.economics.developer2Fee, static_cast<uint64>(input.ticketCount));
 		locals.dividendFee = smul(input.prepared.economics.dividendFee, static_cast<uint64>(input.ticketCount));
+		// Use QU platform ledgers for QU-denominated ticket fees.
 		if (input.prepared.game.currencyMode == ECurrencyMode::QUBIC)
 		{
+			// Reject batch accruals that exceed QU platform ledger capacity.
 			if (!hasPlatformAccrualCapacity(state.get().developer1Accrued, state.get().developer2Accrued, state.get().dividendAccrued,
 			                                locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
 			{
@@ -4777,6 +5028,7 @@ private:
 			return;
 		}
 		locals.assetAccounting = state.get().assetAccounting.get(input.prepared.game.assetAccountingLink - 1);
+		// Reject batch accruals that exceed the game's asset ledger capacity.
 		if (!hasPlatformAccrualCapacity(locals.assetAccounting.developer1Accrued, locals.assetAccounting.developer2Accrued,
 		                                locals.assetAccounting.dividendAccrued, locals.developer1Fee, locals.developer2Fee, locals.dividendFee))
 		{
@@ -4784,8 +5036,13 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Collects the exact batch payment, burns its burn share and reconciles tracked asset custody.
+	 * @note Requires validated purchase capacity; reports payment or transfer errors before ticket creation.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(CollectTicketPayment)
 	{
+		// QU games accept exactly the price; asset games collect shares separately and accept no attached QU.
 		if ((input.game.currencyMode == ECurrencyMode::QUBIC && qpi.invocationReward() != input.totalPrice) ||
 		    (input.game.currencyMode == ECurrencyMode::ASSET && qpi.invocationReward() != 0))
 		{
@@ -4794,12 +5051,14 @@ private:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// Collect asset custody before burning or committing the ticket batch.
 		if (input.game.currencyMode == ECurrencyMode::ASSET)
 		{
 			// Take asset custody before burning so a failed transfer leaves every ledger unchanged.
 			locals.possessedShares =
 			    qpi.numberOfPossessedShares(input.game.currencyAsset.assetName, input.game.currencyAsset.issuer, qpi.invocator(), qpi.invocator(),
 			                                input.game.ownershipManagingContractIndex, input.game.possessionManagingContractIndex);
+			// Require sufficient caller-owned and caller-possessed game-currency shares.
 			if (locals.possessedShares < static_cast<sint64>(input.totalPrice))
 			{
 				output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
@@ -4808,6 +5067,7 @@ private:
 			locals.transferResult =
 			    qpi.transferShareOwnershipAndPossession(input.game.currencyAsset.assetName, input.game.currencyAsset.issuer, qpi.invocator(),
 			                                            qpi.invocator(), static_cast<sint64>(input.totalPrice), SELF);
+			// Abort payment collection if the custody transfer fails.
 			if (locals.transferResult < 0)
 			{
 				output.returnCode = EReturnCode::TRANSFER_FAILED;
@@ -4817,6 +5077,7 @@ private:
 		locals.burnInput.game = input.game;
 		locals.burnInput.ticketCount = input.ticketCount;
 		CALL(BurnCollectedTicketPayment, locals.burnInput, locals.burnOutput);
+		// Return collected payment when the burn stage rejects the batch.
 		if (locals.burnOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			// Compensate the custody transfer because the ticket batch has not been committed yet.
@@ -4827,21 +5088,26 @@ private:
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
 		}
+		// Reconcile wallet tracking after successful asset custody and burn.
 		if (input.game.currencyMode == ECurrencyMode::ASSET)
 		{
 			// Wallet accounting follows successful custody and debits only the tracked portion.
 			locals.walletFound = state.get().wallets.get(qpi.invocator(), locals.wallet);
+			// Debit tracked asset funds only from an existing open wallet.
 			if (locals.walletFound && locals.wallet.status == EWalletStatus::OPEN)
 			{
 				locals.walletAssetFound = findWalletAsset(locals.wallet, input.game.currencyAsset, locals.i, locals.walletAsset);
+				// Remember the matched wallet position for the subsequent write-back.
 				if (locals.walletAssetFound)
 				{
 					locals.walletAssetSlot = static_cast<uint8>(locals.i);
 				}
+				// Reduce only the tracked portion of the collected asset payment.
 				if (locals.walletAssetFound)
 				{
 					locals.walletDebit = locals.walletAsset.balance < input.totalPrice ? locals.walletAsset.balance : input.totalPrice;
 					locals.walletAsset.balance -= locals.walletDebit;
+					// Release an emptied position only when active games no longer reference it.
 					if (locals.walletAsset.balance == 0 && locals.walletAsset.activeGameReferences == 0)
 					{
 						setMemory(locals.walletAsset, 0);
@@ -4855,15 +5121,22 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Appends a paid, validated batch to the game and returns accepted ticket IDs and indexes.
+	 * @note Requires completed payment and capacity checks; updates ticket storage and game accounting.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(CommitTicketPurchase)
 	{
+		// Persist the prepared lifecycle status before individual tickets reload and update the game.
 		state.mut().games.set(input.prepared.slot, input.prepared.game);
+		// Commit each ticket from the already validated and paid batch.
 		for (locals.i = 0; locals.i < input.purchase.ticketCount; ++locals.i)
 		{
 			locals.applyInput.gameId = input.purchase.gameId;
 			locals.applyInput.digits = input.purchase.tickets.get(locals.i).digits;
 			locals.applyInput.bonusQualified = input.prepared.bonusQualified;
 			CALL(ApplyAcceptedTicket, locals.applyInput, locals.applyOutput);
+			// Propagate an unexpected ticket-commit failure with the accepted prefix.
 			if (locals.applyOutput.returnCode != EReturnCode::SUCCESS)
 			{
 				output.returnCode = locals.applyOutput.returnCode;
@@ -4875,10 +5148,15 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Runs purchase validation, accounting checks, payment collection and ticket commit in order.
+	 * @note Returns accepted ticket data or the failing stage error; refunds invocation reward on validation failure.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ExecuteTicketPurchase)
 	{
 		locals.prepareInput.purchase = input.purchase;
 		CALL(PrepareTicketPurchase, locals.prepareInput, locals.prepareOutput);
+		// Refund attached QU when purchase preparation rejects the batch.
 		if (locals.prepareOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.prepareOutput.returnCode;
@@ -4889,6 +5167,7 @@ private:
 		locals.capacityInput.prepared = locals.prepareOutput;
 		locals.capacityInput.ticketCount = input.purchase.ticketCount;
 		CALL(ValidatePurchaseAccountingCapacity, locals.capacityInput, locals.capacityOutput);
+		// Refund attached QU when the fee ledgers cannot accommodate the batch.
 		if (locals.capacityOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			locals.refundInput.returnCode = locals.capacityOutput.returnCode;
@@ -4896,10 +5175,12 @@ private:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
+		// All read-only rejection checks finish before the payment stage takes custody or burns funds.
 		locals.paymentInput.game = locals.prepareOutput.game;
 		locals.paymentInput.totalPrice = locals.prepareOutput.totalPrice;
 		locals.paymentInput.ticketCount = input.purchase.ticketCount;
 		CALL(CollectTicketPayment, locals.paymentInput, locals.paymentOutput);
+		// Commit no tickets when payment collection fails.
 		if (locals.paymentOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.paymentOutput.returnCode;
@@ -4921,50 +5202,66 @@ private:
 		output.action = EGameLifecycleAction::NONE;
 		output.purchaseReturnCode = EReturnCode::GAME_CLOSED;
 		output.canCancel = false;
-		if (input.game.status == EGameStatus::SCHEDULED)
+
+		switch (input.game.status)
 		{
-			if (input.now < input.game.startAt)
-			{
-				output.purchaseReturnCode = EReturnCode::GAME_NOT_STARTED;
-				output.canCancel = true;
-				return;
-			}
-			if (input.now < input.game.drawAt)
-			{
-				output.effectiveStatus = EGameStatus::SELLING;
-				output.action = EGameLifecycleAction::OPEN_SALES;
-				output.purchaseReturnCode = EReturnCode::SUCCESS;
-				return;
-			}
-			output.effectiveStatus = EGameStatus::CLOSED;
-			output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
-			return;
-		}
-		if (input.game.status == EGameStatus::SELLING)
-		{
-			if (input.now < input.game.drawAt)
-			{
-				output.purchaseReturnCode = EReturnCode::SUCCESS;
-				return;
-			}
-			output.effectiveStatus = EGameStatus::CLOSED;
-			output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
-			return;
-		}
-		if (input.game.status == EGameStatus::CLOSED)
-		{
-			output.action = EGameLifecycleAction::BEGIN_SETTLEMENT;
+			// Resolve scheduled games against their configured start and draw times.
+			case EGameStatus::SCHEDULED:
+				// Keep sales closed and cancellation available before the start time.
+				if (input.now < input.game.startAt)
+				{
+					output.purchaseReturnCode = EReturnCode::GAME_NOT_STARTED;
+					output.canCancel = true;
+					return;
+				}
+
+				// Open scheduled sales only while the draw time remains in the future.
+				if (input.now < input.game.drawAt)
+				{
+					output.effectiveStatus = EGameStatus::SELLING;
+					output.action = EGameLifecycleAction::OPEN_SALES;
+					output.purchaseReturnCode = EReturnCode::SUCCESS;
+					return;
+				}
+
+				output.effectiveStatus = EGameStatus::CLOSED;
+				output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
+				break;
+
+			// Reevaluate the draw boundary for games already selling tickets.
+			case EGameStatus::SELLING:
+				// Continue selling until the configured draw time.
+				if (input.now < input.game.drawAt)
+				{
+					output.purchaseReturnCode = EReturnCode::SUCCESS;
+					return;
+				}
+
+				output.effectiveStatus = EGameStatus::CLOSED;
+				output.action = input.game.ticketCount == 0 ? EGameLifecycleAction::FINALIZE_NO_TICKETS : EGameLifecycleAction::BEGIN_SETTLEMENT;
+				break;
+
+			// Start settlement for games explicitly closed by ticket exhaustion.
+			case EGameStatus::CLOSED: output.action = EGameLifecycleAction::BEGIN_SETTLEMENT; break;
+
+			default:;
 		}
 	}
 
+	/**
+	 * @brief Checks whether the player possesses any configured bonus asset under the specified managers.
+	 * @note Returns a qualification snapshot without transferring assets or changing state.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(EvaluateBonusQualification)
 	{
 		output.qualified = false;
+		// Possession of any one configured asset qualifies; no balance is locked for the duration of the round.
 		for (locals.i = 0; locals.i < input.game.bonusAssetCount; ++locals.i)
 		{
 			locals.possessedShares = qpi.numberOfPossessedShares(
 			    input.game.bonusAssets.get(locals.i).assetName, input.game.bonusAssets.get(locals.i).issuer, input.player, input.player,
 			    input.game.bonusOwnershipManagingContractIndex, input.game.bonusPossessionManagingContractIndex);
+			// A positive possession balance in any qualifying asset grants the bonus.
 			if (locals.possessedShares > 0)
 			{
 				output.qualified = true;
@@ -4973,32 +5270,43 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Finds the ticket-chain head for a current round or a retained historical round.
+	 * @note Reports expired details separately from invalid game or round identifiers; does not change state.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(FindGameTicketList)
 	{
 		locals.foundGame = false;
+		// Reject missing round identity before resolving a ticket chain.
 		if (input.gameId == 0 || input.roundNumber == 0)
 		{
 			output.returnCode = EReturnCode::INVALID_ROUND;
 			return;
 		}
+		// Use live ticket links when the requested identity matches the current round.
 		if (isGameIdValid(state, input.gameId) && state.get().games.get(gameSlot(input.gameId)).roundNumber == input.roundNumber)
 		{
 			output.firstTicketLink = state.get().games.get(gameSlot(input.gameId)).firstTicketLink;
 			output.returnCode = EReturnCode::SUCCESS;
 			return;
 		}
+		// History is searched newest first within the exposed retention window, independently of storage slot reuse.
 		locals.available = state.get().resultCounter < PLDT_RESULT_HISTORY_SIZE ? state.get().resultCounter : PLDT_RESULT_HISTORY_SIZE;
+		// Search retained result entries from newest to oldest.
 		for (locals.i = 0; locals.i < locals.available; ++locals.i)
 		{
 			locals.counter = state.get().resultCounter - 1 - locals.i;
 			locals.result = state.get().results.get(static_cast<uint16>(mod(locals.counter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE))));
+			// Consider historical rounds only for the requested game identity.
 			if (locals.result.gameId == input.gameId)
 			{
 				locals.foundGame = true;
+				// Continue until the requested round of this game is found.
 				if (locals.result.roundNumber != input.roundNumber)
 				{
 					continue;
 				}
+				// Report expired ticket details instead of following a recycled chain.
 				if (!locals.result.detailsAvailable)
 				{
 					output.returnCode = EReturnCode::HISTORY_EXPIRED;
@@ -5012,31 +5320,46 @@ private:
 		output.returnCode = locals.foundGame || isGameIdValid(state, input.gameId) ? EReturnCode::INVALID_ROUND : EReturnCode::INVALID_GAME;
 	}
 
+	/**
+	 * @brief Returns attached QU to the invocator while preserving the supplied error code.
+	 * @note Overrides the error with TRANSFER_FAILED if the refund fails.
+	 */
 	PRIVATE_PROCEDURE(RefundInvocationReward)
 	{
+		// A refund failure takes precedence because the original rejection alone would hide retained payment.
 		output.returnCode = input.returnCode;
+		// Override the original error when returning attached QU fails.
 		if (qpi.invocationReward() > 0 && qpi.transfer(qpi.invocator(), qpi.invocationReward()) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 		}
 	}
 
+	/**
+	 * @brief Mirrors an asset receipt in an open wallet when a matching or free position has capacity.
+	 * @note Returns credited=false if tracking is unavailable; performs no asset transfer.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(CreditWalletAsset)
 	{
 		output.credited = false;
+		// Skip optional tracking when the amount or owner wallet is unsuitable.
 		if (input.amount == 0 || input.amount > PLDT_MAX_TRANSFER_AMOUNT || !state.get().wallets.get(input.owner, locals.wallet) ||
 		    locals.wallet.status != EWalletStatus::OPEN)
 		{
 			return;
 		}
 
+		// This is optional receipt tracking: lack of wallet capacity does not undo the asset transfer performed by the caller.
 		locals.found = false;
 		locals.freeSlotFound = false;
+		// Search existing asset positions while remembering a free slot.
 		for (locals.i = 0; locals.i < locals.wallet.assets.capacity(); ++locals.i)
 		{
 			locals.walletAsset = locals.wallet.assets.get(locals.i);
+			// Credit the existing position for the same asset issuance.
 			if (locals.walletAsset.isActive && isSameAsset(locals.walletAsset.asset, input.asset))
 			{
+				// Leave the wallet unchanged if the credit exceeds its balance limit.
 				if (locals.walletAsset.balance > PLDT_MAX_TRANSFER_AMOUNT - input.amount)
 				{
 					return;
@@ -5048,14 +5371,17 @@ private:
 				break;
 			}
 
+			// Remember only the first available position for a new issuance.
 			if (!locals.walletAsset.isActive && !locals.freeSlotFound)
 			{
 				locals.freeSlot = static_cast<uint8>(locals.i);
 				locals.freeSlotFound = true;
 			}
 		}
+		// Create an asset position only when no matching position was found.
 		if (!locals.found)
 		{
+			// Skip optional crediting when the wallet has no asset capacity.
 			if (!locals.freeSlotFound || locals.wallet.assetCount >= PLDT_MAX_WALLET_ASSETS)
 			{
 				return;
@@ -5071,13 +5397,19 @@ private:
 		output.credited = true;
 	}
 
+	/**
+	 * @brief Transfers an amount from contract custody to the destination in the game currency.
+	 * @note Returns the QPI transfer result, or zero for a zero amount; does not update game ledgers.
+	 */
 	PRIVATE_PROCEDURE(TransferGameCurrency)
 	{
 		output.transferResult = 0;
+		// Treat zero payouts as successful no-ops so rounding can produce zero-value winners safely.
 		if (input.amount == 0)
 		{
 			return;
 		}
+		// Use native QU transfer for QU-denominated game payments.
 		if (input.game.currencyMode == ECurrencyMode::QUBIC)
 		{
 			output.transferResult = qpi.transfer(input.destination, static_cast<sint64>(input.amount));
@@ -5087,6 +5419,10 @@ private:
 		                                                                SELF, static_cast<sint64>(input.amount), input.destination);
 	}
 
+	/**
+	 * @brief Burns the batch burn share after payment custody has been collected.
+	 * @note Uses QU burn or an asset transfer to NULL_ID; reports SUCCESS or TRANSFER_FAILED.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(BurnCollectedTicketPayment)
 	{
 		locals.economicsInput.ticketPrice = input.game.ticketPrice;
@@ -5094,23 +5430,30 @@ private:
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		locals.totalBurn = smul(locals.economicsOutput.burn, static_cast<uint64>(input.ticketCount));
+		// Avoid invoking a burn operation for a zero burn share.
 		if (locals.totalBurn == 0)
 		{
 			output.returnCode = EReturnCode::SUCCESS;
 			return;
 		}
+		// Use the native burn API only for QU currency.
 		if (input.game.currencyMode == ECurrencyMode::QUBIC)
 		{
 			output.returnCode = qpi.burn(static_cast<sint64>(locals.totalBurn)) < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
 			return;
 		}
 		locals.transferInput.game = input.game;
+		// Asset burns use the null recipient rather than the QU-only burn API.
 		locals.transferInput.destination = NULL_ID;
 		locals.transferInput.amount = locals.totalBurn;
 		CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
 		output.returnCode = locals.transferOutput.transferResult < 0 ? EReturnCode::TRANSFER_FAILED : EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Commits one paid ticket, its fee accruals and its game-chain link.
+	 * @note Requires batch validation and payment; returns a generation-qualified ticket ID and storage index.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ApplyAcceptedTicket)
 	{
 		// Preconditions are validated for the complete purchase before burn, so this commit path has no fallible transfers.
@@ -5121,6 +5464,7 @@ private:
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		output.prizeContribution = locals.economicsOutput.prizeContribution;
+		// Accrue QU ticket fees in the platform's native-currency ledgers.
 		if (locals.game.currencyMode == ECurrencyMode::QUBIC)
 		{
 			state.mut().developer1Accrued = sadd(state.get().developer1Accrued, locals.economicsOutput.developer1Fee);
@@ -5144,6 +5488,7 @@ private:
 		locals.ticket.gameId = input.gameId;
 		locals.ticket.bonusQualified = input.bonusQualified;
 		locals.ticket.status = ETicketStatus::ACTIVE;
+		// Reused slots retain the previous ticket ID so the next generation distinguishes old ticket references.
 		if (state.get().freeTicketHead != 0)
 		{
 			locals.ticketSlot = state.get().freeTicketHead - 1;
@@ -5162,6 +5507,7 @@ private:
 		output.ticketId = (locals.ticketGeneration << PLDT_TICKET_SLOT_BITS) | locals.ticketSlot;
 		locals.ticket.ticketId = output.ticketId;
 		state.mut().tickets.set(locals.ticketSlot, locals.ticket);
+		// Append to the existing round chain without losing its previous tail.
 		if (locals.game.lastTicketLink != 0)
 		{
 			locals.previousTicket = state.get().tickets.get(locals.game.lastTicketLink - 1);
@@ -5175,6 +5521,7 @@ private:
 		locals.game.lastTicketLink = output.ticketIndex + 1;
 		++locals.game.ticketCount;
 		state.mut().ticketCount = state.get().ticketCount + 1;
+		// Close sales as soon as the round reaches its ticket limit.
 		if (locals.game.ticketCount >= locals.game.ticketLimit)
 		{
 			locals.game.status = EGameStatus::CLOSED;
@@ -5183,6 +5530,10 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Freezes shareholder recipients and integer dividend amounts for a resumable distribution.
+	 * @note Requires no active distribution; clears the snapshot and reports failure if recipient capacity is exceeded.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(SnapshotAssetDividend)
 	{
 		output.failed = false;
@@ -5195,18 +5546,23 @@ private:
 		locals.dividendPerShare = static_cast<sint64>(div(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS)));
 		locals.remainder = mod(input.dividendAmount, static_cast<uint64>(NUMBER_OF_COMPUTORS));
 		locals.shareholdersIter.begin(locals.shareholdersAsset);
+		// Snapshot all shareholders in their iterator order.
 		while (!locals.shareholdersIter.reachedEnd())
 		{
 			locals.holderShares = locals.shareholdersIter.numberOfPossessedShares();
+			// Allocate dividend amounts only to positive share positions.
 			if (locals.holderShares > 0)
 			{
 				locals.holderDividend = smul(locals.holderShares, locals.dividendPerShare);
+				// Assign division remainder in iterator order, with at most one extra unit per shareholder share.
 				locals.holderRemainder =
 				    static_cast<uint64>(locals.holderShares) < locals.remainder ? static_cast<uint64>(locals.holderShares) : locals.remainder;
 				locals.holderDividend = static_cast<sint64>(sadd(static_cast<uint64>(locals.holderDividend), locals.holderRemainder));
 				locals.remainder -= locals.holderRemainder;
+				// Store only recipients with a nonzero payable amount.
 				if (locals.holderDividend > 0)
 				{
+					// Discard an oversized snapshot before any dividend transfers begin.
 					if (state.get().assetDividendDistribution.recipientCount >= PLDT_MAX_DIVIDEND_RECIPIENTS)
 					{
 						setMemory(state.mut().assetDividendDistribution, 0);
@@ -5225,12 +5581,18 @@ private:
 		state.mut().assetDividendDistribution.active = true;
 	}
 
+	/**
+	 * @brief Creates or resumes the matching dividend snapshot and pays its remaining recipients.
+	 * @note Returns the amount paid in this call; preserves the cursor on transfer failure for retry.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(TransferAssetDividend)
 	{
 		output.distributedAmount = 0;
 		output.failed = false;
+		// Resume an existing dividend distribution instead of recomputing entitlements.
 		if (state.get().assetDividendDistribution.active)
 		{
+			// Reject attempts to resume a snapshot for another accounting bucket.
 			if (!isSameAsset(state.get().assetDividendDistribution.asset, input.dividendAsset) ||
 			    state.get().assetDividendDistribution.accountingSlot != input.accountingSlot)
 			{
@@ -5240,24 +5602,28 @@ private:
 		}
 		else
 		{
+			// Skip snapshot creation when no dividend liability exists.
 			if (input.dividendAmount == 0)
 			{
 				return;
 			}
 			locals.snapshotInput = input;
 			CALL(SnapshotAssetDividend, locals.snapshotInput, locals.snapshotOutput);
+			// Abort distribution if shareholder snapshot construction fails.
 			if (locals.snapshotOutput.failed)
 			{
 				output.failed = true;
 				return;
 			}
 		}
+		// Advance the persistent cursor only after a successful transfer to avoid paying completed recipients again.
 		while (state.get().assetDividendDistribution.cursor < state.get().assetDividendDistribution.recipientCount)
 		{
 			locals.transferResult = qpi.transferShareOwnershipAndPossession(
 			    state.get().assetDividendDistribution.asset.assetName, state.get().assetDividendDistribution.asset.issuer, SELF, SELF,
 			    static_cast<sint64>(state.get().assetDividendDistribution.amounts.get(state.get().assetDividendDistribution.cursor)),
 			    state.get().assetDividendDistribution.recipients.get(state.get().assetDividendDistribution.cursor));
+			// Leave the current dividend recipient pending if its transfer fails.
 			if (locals.transferResult < 0)
 			{
 				output.failed = true;
@@ -5273,6 +5639,7 @@ private:
 			++state.mut().assetDividendDistribution.cursor;
 			CALL(CreditWalletAsset, locals.creditInput, locals.creditOutput);
 		}
+		// Keep the snapshot active until its full amount has been distributed.
 		if (state.get().assetDividendDistribution.remainingAmount != 0)
 		{
 			output.failed = true;
@@ -5281,6 +5648,10 @@ private:
 		setMemory(state.mut().assetDividendDistribution, 0);
 	}
 
+	/**
+	 * @brief Counts exact and misplaced digit matches and maps them to the payout matrix.
+	 * @note Requires validated digits and code length; repeated digits are matched at most once per occurrence.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(CountMatches)
 	{
 		setMemory(locals.playerCounts, 0);
@@ -5288,10 +5659,12 @@ private:
 		output.tierIndex = 0;
 		output.exact = 0;
 		output.misplaced = 0;
+		// Compare each position and count unmatched digit occurrences separately.
 		for (locals.i = 0; locals.i < input.codeLength; ++locals.i)
 		{
 			locals.playerDigit = input.playerDigits.get(locals.i);
 			locals.winningDigit = input.winningDigits.get(locals.i);
+			// Count equal digits at the same position as exact matches.
 			if (locals.playerDigit == locals.winningDigit)
 			{
 				++output.exact;
@@ -5302,6 +5675,7 @@ private:
 				locals.winningCounts.set(locals.winningDigit, locals.winningCounts.get(locals.winningDigit) + 1);
 			}
 		}
+		// Exclude exact positions from both histograms; the minimum multiplicity counts only unmatched occurrences.
 		for (locals.i = 0; locals.i <= PLDT_MAX_DIGIT; ++locals.i)
 		{
 			locals.playerCount = locals.playerCounts.get(locals.i);
@@ -5311,12 +5685,18 @@ private:
 		output.tierIndex = payoutMatrixIndex(output.exact, output.misplaced);
 	}
 
+	/**
+	 * @brief Derives deterministic winning digits from the supplied seed and repetition policy.
+	 * @note Requires a valid alphabet and code length; bounded retries fall back to an unused digit.
+	 */
 	PRIVATE_FUNCTION_WITH_LOCALS(GenerateWinningDigits)
 	{
 		setMemory(locals.used, 0);
 		setMemory(output.digits, 0);
+		// Derive one winning digit for each configured code position.
 		for (locals.index = 0; locals.index < input.codeLength; ++locals.index)
 		{
+			// Unsigned multiplication intentionally wraps in the seed mixer; saturation would change the draw sequence.
 			locals.value = input.seed ^ (0x9e3779b97f4a7c15ULL * (locals.index + 1));
 			locals.value ^= locals.value >> 30;
 			locals.value *= 0xbf58476d1ce4e5b9ULL;
@@ -5325,6 +5705,7 @@ private:
 			locals.value ^= locals.value >> 31;
 			locals.candidate = static_cast<uint8>(mod(locals.value, static_cast<uint64>(input.maxDigit + 1)));
 			locals.attempts = 0;
+			// Retry collisions within a fixed bound when repeated digits are forbidden.
 			while (!input.allowRepeatedDigits && locals.used.get(locals.candidate) != 0 && locals.attempts < PLDT_RANDOM_RETRY_LIMIT)
 			{
 				++locals.attempts;
@@ -5333,10 +5714,13 @@ private:
 				locals.value ^= locals.value << 17;
 				locals.candidate = static_cast<uint8>(mod(locals.value, static_cast<uint64>(input.maxDigit + 1)));
 			}
+			// The validated alphabet has enough distinct digits, so a bounded scan can finish after repeated collisions.
 			if (!input.allowRepeatedDigits && locals.used.get(locals.candidate) != 0)
 			{
+				// Scan the valid alphabet for the first unused fallback digit.
 				for (locals.fallback = 0; locals.fallback <= input.maxDigit; ++locals.fallback)
 				{
+					// Choose an unused candidate to preserve the distinct-digit invariant.
 					if (locals.used.get(locals.fallback) == 0)
 					{
 						locals.candidate = locals.fallback;
@@ -5349,16 +5733,22 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Freezes the draw and prize pool for a closed game and enters the counting phase.
+	 * @note Reports INVALID_STATE unless the game is CLOSED; stores the initial settlement cursor.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(BeginSettlement)
 	{
 		// Snapshot immutable round inputs before any budgeted ticket classification begins.
 		locals.game = state.get().games.get(input.slot);
+		// Start counting only from a closed game state.
 		if (locals.game.status != EGameStatus::CLOSED)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
 			return;
 		}
 		setMemory(locals.progress, 0);
+		// Bind the digest to game and round identity plus the final ticket count before deriving the draw seed.
 		locals.randomData.prevSpectrumDigest = qpi.getPrevSpectrumDigest();
 		locals.randomData.gameId = locals.game.gameId;
 		locals.randomData.roundNumber = locals.game.roundNumber;
@@ -5378,11 +5768,16 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Classifies linked tickets within the supplied action budget and accumulates tier winner counts.
+	 * @note Writes ticket classifications; returns updated game, progress and budget for the caller to persist.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ClassifySettlementTickets)
 	{
 		output.game = input.game;
 		output.progress = input.progress;
 		output.budget = input.budget;
+		// Classify tickets while counting is active and ticket budget remains.
 		while (output.budget > 0 && output.game.status == EGameStatus::COUNTING && output.progress.cursorLink != 0)
 		{
 			locals.link = output.progress.cursorLink;
@@ -5394,10 +5789,13 @@ private:
 			locals.ticket.exact = locals.matchOutput.exact;
 			locals.ticket.misplaced = locals.matchOutput.misplaced;
 			locals.ticket.tierIndex = locals.matchOutput.tierIndex;
+			// Treat only positively weighted payout tiers as winning tiers.
 			if (output.game.tierWeightsBps.get(locals.ticket.tierIndex) > 0)
 			{
+				// Use the purchase-time bonus snapshot so later asset transfers cannot change a ticket's weight.
 				locals.ticket.winnerWeight = locals.ticket.bonusQualified ? output.game.bonusMultiplierBps : PLDT_BONUS_MULTIPLIER_SCALE;
 				output.progress.tierWinnerCount.set(locals.ticket.tierIndex, output.progress.tierWinnerCount.get(locals.ticket.tierIndex) + 1);
+				// Track bonus winners separately for weighted payout calculation.
 				if (locals.ticket.bonusQualified)
 				{
 					output.progress.tierBonusCount.set(locals.ticket.tierIndex, output.progress.tierBonusCount.get(locals.ticket.tierIndex) + 1);
@@ -5414,26 +5812,36 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Allocates the frozen prize pool across occupied tiers and computes normal and bonus payouts.
+	 * @note Requires completed classification; returns noWinners or transitions the returned game to PAYING.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(AllocateSettlementPayouts)
 	{
 		output.game = input.game;
 		output.progress = input.progress;
 		output.noWinners = output.progress.winnerCount == 0;
+		// Leave an empty winner set for the caller's no-winners finalization path.
 		if (output.noWinners)
 		{
 			return;
 		}
+		// Renormalize over occupied tiers so tiers without winners leave no undistributed pool.
 		output.progress.activeTierBps = 0;
+		// Sum configured weights across tiers that actually contain winners.
 		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
 		{
+			// Include only occupied tiers in the normalization denominator.
 			if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0)
 			{
 				output.progress.activeTierBps += output.game.tierWeightsBps.get(static_cast<uint16>(locals.i));
 			}
 		}
 		output.progress.allocatedPool = 0;
+		// Compute floor allocations and fractions for each occupied tier.
 		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
 		{
+			// Leave empty tiers out of the pool allocation.
 			if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) == 0)
 			{
 				continue;
@@ -5446,15 +5854,19 @@ private:
 			output.progress.tierFractions.set(static_cast<uint16>(locals.i), locals.fraction);
 			output.progress.allocatedPool = sadd(output.progress.allocatedPool, locals.tierPool);
 		}
+		// Largest fractional remainders receive one extra unit; equal fractions favor the lower tier index.
 		locals.remainder = output.progress.prizePoolSnapshot - output.progress.allocatedPool;
+		// Assign remaining pool units by descending fractional entitlement.
 		while (locals.remainder > 0)
 		{
 			locals.foundTier = false;
 			locals.bestFraction = 0;
 			locals.bestTier = 0;
+			// Find the next occupied tier eligible for a rounding unit.
 			for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
 			{
 				locals.fraction = output.progress.tierFractions.get(static_cast<uint16>(locals.i));
+				// Prefer the largest unused fraction, retaining index order for equal fractions.
 				if (output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i)) > 0 && locals.fraction != PLDT_UINT64_SENTINEL &&
 				    (!locals.foundTier || locals.fraction > locals.bestFraction))
 				{
@@ -5467,13 +5879,16 @@ private:
 			output.progress.tierFractions.set(locals.bestTier, PLDT_UINT64_SENTINEL);
 			--locals.remainder;
 		}
+		// Compute normal and bonus payout floors for each occupied tier.
 		for (locals.i = 0; locals.i < PLDT_TIER_CAPACITY; ++locals.i)
 		{
 			locals.count = output.progress.tierWinnerCount.get(static_cast<uint16>(locals.i));
+			// Skip tiers with no winners before dividing by their weight.
 			if (locals.count == 0)
 			{
 				continue;
 			}
+			// Store weighted floor payouts and leave the integer remainder for winners in ticket-chain order.
 			locals.bonusCount = output.progress.tierBonusCount.get(static_cast<uint16>(locals.i));
 			locals.totalWeight = smul(locals.count - locals.bonusCount, static_cast<uint64>(PLDT_BONUS_MULTIPLIER_SCALE));
 			locals.totalWeight = sadd(locals.totalWeight, smul(locals.bonusCount, static_cast<uint64>(output.game.bonusMultiplierBps)));
@@ -5490,16 +5905,22 @@ private:
 		output.game.status = EGameStatus::PAYING;
 	}
 
+	/**
+	 * @brief Pays classified tickets within the action budget and records successful payouts.
+	 * @note Returns updated game, progress and budget; leaves a failed transfer at the cursor for retry.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(PaySettlementTickets)
 	{
 		output.game = input.game;
 		output.progress = input.progress;
 		output.budget = input.budget;
 		output.returnCode = EReturnCode::SUCCESS;
+		// Pay tickets while payment is active and the action budget remains.
 		while (output.budget > 0 && output.game.status == EGameStatus::PAYING && output.progress.cursorLink != 0)
 		{
 			locals.link = output.progress.cursorLink;
 			locals.ticket = state.get().tickets.get(locals.link - 1);
+			// Mark tickets with no winning weight as losses without transferring funds.
 			if (locals.ticket.winnerWeight == 0)
 			{
 				locals.ticket.status = ETicketStatus::LOST;
@@ -5508,6 +5929,7 @@ private:
 			{
 				locals.payout = locals.ticket.bonusQualified ? output.progress.bonusPayout.get(locals.ticket.tierIndex)
 				                                             : output.progress.normalPayout.get(locals.ticket.tierIndex);
+				// Give the next winners one extra unit until the tier remainder is exhausted.
 				if (output.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
 				{
 					++locals.payout;
@@ -5516,11 +5938,13 @@ private:
 				locals.transferInput.destination = locals.ticket.player;
 				locals.transferInput.amount = locals.payout;
 				CALL(TransferGameCurrency, locals.transferInput, locals.transferOutput);
+				// Keep this ticket and its remainder unconsumed on failure so the same payout can be retried.
 				if (locals.transferOutput.transferResult < 0)
 				{
 					output.returnCode = EReturnCode::TRANSFER_FAILED;
 					return;
 				}
+				// Mirror successful asset payouts in optional open-wallet tracking.
 				if (output.game.currencyMode == ECurrencyMode::ASSET)
 				{
 					// The QPI transfer does not invoke management-right callbacks, so mirror successful payouts in open wallets.
@@ -5532,9 +5956,11 @@ private:
 				locals.ticket.payout = locals.payout;
 				locals.ticket.status = ETicketStatus::PAID;
 				output.game.totalPaid = sadd(output.game.totalPaid, locals.payout);
+				// This QU branch currently has no additional currency-specific accounting.
 				if (output.game.currencyMode == ECurrencyMode::QUBIC)
 				{
 				}
+				// Consume a tier rounding unit only after the ticket payout succeeds.
 				if (output.progress.tierRemainder.get(locals.ticket.tierIndex) > 0)
 				{
 					output.progress.tierRemainder.set(locals.ticket.tierIndex, output.progress.tierRemainder.get(locals.ticket.tierIndex) - 1);
@@ -5546,6 +5972,10 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Advances counting and payment under one ticket action budget, then finalizes a completed round.
+	 * @note Persists progress on partial completion or transfer failure and returns consumed actions and status.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(AdvanceSettlement)
 	{
 		locals.slot = input.slot;
@@ -5559,6 +5989,7 @@ private:
 		locals.game = locals.classifyOutput.game;
 		locals.progress = locals.classifyOutput.progress;
 		locals.budget = locals.classifyOutput.budget;
+		// Allocate prizes only after the classification cursor reaches the chain end.
 		if (locals.game.status == EGameStatus::COUNTING && locals.progress.cursorLink == 0)
 		{
 			locals.allocateInput.game = locals.game;
@@ -5566,6 +5997,7 @@ private:
 			CALL(AllocateSettlementPayouts, locals.allocateInput, locals.allocateOutput);
 			locals.game = locals.allocateOutput.game;
 			locals.progress = locals.allocateOutput.progress;
+			// Finalize a round without winners instead of entering the payment phase.
 			if (locals.allocateOutput.noWinners)
 			{
 				state.mut().settlements.set(locals.slot, locals.progress);
@@ -5577,6 +6009,7 @@ private:
 				return;
 			}
 		}
+		// Counting and paying share the remaining budget; allocation itself does not consume a ticket action.
 		locals.payInput.game = locals.game;
 		locals.payInput.progress = locals.progress;
 		locals.payInput.budget = locals.budget;
@@ -5584,6 +6017,7 @@ private:
 		locals.game = locals.payOutput.game;
 		locals.progress = locals.payOutput.progress;
 		locals.budget = locals.payOutput.budget;
+		// Persist completed work and the failed payout cursor before returning.
 		if (locals.payOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			state.mut().settlements.set(locals.slot, locals.progress);
@@ -5595,8 +6029,10 @@ private:
 		// A settled round must distribute the snapshot exactly before terminal accounting can begin.
 		state.mut().settlements.set(locals.slot, locals.progress);
 		state.mut().games.set(locals.slot, locals.game);
+		// Finalize only after the payment cursor reaches the chain end.
 		if (locals.game.status == EGameStatus::PAYING && locals.progress.cursorLink == 0)
 		{
+			// Require exact conservation of the frozen pool before terminal accounting.
 			if (locals.game.totalPaid != locals.progress.prizePoolSnapshot)
 			{
 				output.actionsUsed = input.actionBudget - locals.budget;
@@ -5614,15 +6050,21 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Freezes terminal reasons and creator liabilities before retryable finalization payouts.
+	 * @note Persists FINALIZING once; repeated calls preserve the existing liabilities and reason.
+	 */
 	PRIVATE_PROCEDURE(FreezeFinalizationState)
 	{
 		output.game = input.game;
+		// Do not recreate liabilities on retry: earlier calls may already have credited part of them.
 		if (output.game.status == EGameStatus::FINALIZING)
 		{
 			return;
 		}
 		output.game.finalizingRoundReason = input.reason;
 		output.game.finalizingStopReason = EGameStopReason::NONE;
+		// Return the remaining prize pool when no winner payout is due.
 		if (input.reason == EGameTerminalReason::NO_TICKETS || input.reason == EGameTerminalReason::NO_WINNERS ||
 		    input.reason == EGameTerminalReason::OWNER_CANCELLED)
 		{
@@ -5630,10 +6072,12 @@ private:
 		}
 		output.game.pendingCreatorCurrencyPayout = output.game.creatorRevenue;
 		output.game.creatorRevenue = 0;
+		// Give an owner-requested stop precedence over automatic lifecycle completion.
 		if (output.game.stopRequested || input.reason == EGameTerminalReason::OWNER_CANCELLED)
 		{
 			output.game.finalizingStopReason = EGameStopReason::OWNER_REQUESTED;
 		}
+		// Stop a one-shot game after completing its single round.
 		else if (output.game.mode == EGameMode::ONE_SHOT)
 		{
 			output.game.finalizingStopReason = EGameStopReason::ONE_SHOT_COMPLETE;
@@ -5642,15 +6086,22 @@ private:
 		state.mut().games.set(input.slot, output.game);
 	}
 
+	/**
+	 * @brief Computes the next round from the current time and the stored round duration.
+	 * @note Persists SCHEDULE_EXHAUSTED when the date cannot advance; skips scheduling if already stopping.
+	 */
 	PRIVATE_PROCEDURE(ResolveNextRoundSchedule)
 	{
 		output.game = input.game;
+		// Do not schedule another round once a stop reason is fixed.
 		if (output.game.finalizingStopReason != EGameStopReason::NONE)
 		{
 			return;
 		}
+		// Restart from actual processing time so delayed settlement does not schedule a round in the past.
 		output.nextStartAt = qpi.now();
 		output.nextDrawAt = output.nextStartAt;
+		// Stop continuation if the next draw time cannot be represented.
 		if (!output.nextDrawAt.addMicrosec(static_cast<sint64>(output.game.roundDurationMicroseconds)))
 		{
 			output.game.finalizingStopReason = EGameStopReason::SCHEDULE_EXHAUSTED;
@@ -5658,9 +6109,14 @@ private:
 		}
 	}
 
+	/**
+	 * @brief Credits creator fees and returned prize funds up to the available wallet capacity.
+	 * @note Commits each successful credit; reports STORAGE_FULL for unpaid remainder or a transfer error for retry.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(DrainFinalizationPayouts)
 	{
 		output.game = input.game;
+		// Require an open creator wallet to receive finalization credits.
 		if (!state.get().wallets.get(output.game.owner, locals.wallet) || locals.wallet.status != EWalletStatus::OPEN)
 		{
 			output.returnCode = EReturnCode::INVALID_STATE;
@@ -5670,10 +6126,12 @@ private:
 		for (locals.payoutIndex = 0; locals.payoutIndex < 2; ++locals.payoutIndex)
 		{
 			locals.pendingAmount = locals.payoutIndex == 0 ? output.game.pendingCreatorCurrencyPayout : output.game.pendingPrizePoolPayout;
+			// Skip liabilities already fully credited by an earlier attempt.
 			if (locals.pendingAmount == 0)
 			{
 				continue;
 			}
+			// Measure available QU credit against the refundable wallet limit.
 			if (output.game.currencyMode == ECurrencyMode::QUBIC)
 			{
 				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.wallet.refundableQubic;
@@ -5682,6 +6140,7 @@ private:
 			{
 				// Active asset games pin their wallet position until every creator liability is credited.
 				locals.walletAssetFound = findWalletAsset(locals.wallet, output.game.currencyAsset, locals.i, locals.walletAsset);
+				// Keep finalization pending when the pinned asset position is unavailable.
 				if (!locals.walletAssetFound)
 				{
 					output.returnCode = EReturnCode::STORAGE_FULL;
@@ -5689,11 +6148,14 @@ private:
 				}
 				locals.availableCredit = PLDT_MAX_TRANSFER_AMOUNT - locals.walletAsset.balance;
 			}
+			// Partial credits let the owner free wallet capacity before a later call drains the remaining liability.
 			locals.amountToCredit = locals.pendingAmount < locals.availableCredit ? locals.pendingAmount : locals.availableCredit;
+			// Leave the liability pending until the wallet has capacity for a credit.
 			if (locals.amountToCredit == 0)
 			{
 				continue;
 			}
+			// Credit QU internally; asset credits also require a custody transfer.
 			if (output.game.currencyMode == ECurrencyMode::QUBIC)
 			{
 				locals.wallet.refundableQubic = sadd(locals.wallet.refundableQubic, locals.amountToCredit);
@@ -5703,6 +6165,7 @@ private:
 				locals.transferResult =
 				    qpi.transferShareOwnershipAndPossession(output.game.currencyAsset.assetName, output.game.currencyAsset.issuer, SELF, SELF,
 				                                            static_cast<sint64>(locals.amountToCredit), output.game.owner);
+				// Leave the current asset liability pending on a failed custody transfer.
 				if (locals.transferResult < 0)
 				{
 					output.returnCode = EReturnCode::TRANSFER_FAILED;
@@ -5711,6 +6174,7 @@ private:
 				locals.walletAsset.balance = sadd(locals.walletAsset.balance, locals.amountToCredit);
 				locals.wallet.assets.set(static_cast<uint8>(locals.i), locals.walletAsset);
 			}
+			// Consume creator-fee liability separately from returned prize-pool liability.
 			if (locals.payoutIndex == 0)
 			{
 				output.game.pendingCreatorCurrencyPayout -= locals.amountToCredit;
@@ -5727,6 +6191,10 @@ private:
 		                                                                                                             : EReturnCode::STORAGE_FULL;
 	}
 
+	/**
+	 * @brief Builds a historical result from finalizing game and settlement snapshots.
+	 * @note Includes the ticket-chain head and next result sequence; does not append history or change state.
+	 */
 	PRIVATE_FUNCTION(BuildRoundResult)
 	{
 		setMemory(output.result, 0);
@@ -5741,6 +6209,7 @@ private:
 		output.result.resultSequence = state.get().resultCounter + 1;
 		output.result.prizePool = input.game.prizePool;
 		output.result.totalPaid = input.game.totalPaid;
+		// Retain the chain head in history before the live game resets or its slot becomes reusable.
 		output.result.firstTicketLink = input.game.firstTicketLink;
 		output.result.settledTick = qpi.tick();
 		output.result.ticketCount = input.game.ticketCount;
@@ -5753,11 +6222,16 @@ private:
 		output.result.gameStopReason = input.game.finalizingStopReason;
 	}
 
+	/**
+	 * @brief Appends the prepared result and either releases the game slot or starts its funded next round.
+	 * @note Requires drained liabilities, an available result slot and funding for a continuing game.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(CommitFinalizedRound)
 	{
 		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
 		state.mut().results.set(locals.resultIndex, input.result);
 		state.mut().resultCounter = state.get().resultCounter + 1;
+		// Release the game slot when the committed result records a stop reason.
 		if (input.result.gameStopReason != EGameStopReason::NONE)
 		{
 			locals.clearInput.slot = input.slot;
@@ -5765,6 +6239,7 @@ private:
 			output.returnCode = EReturnCode::SUCCESS;
 			return;
 		}
+		// History now owns the previous ticket chain; the next round starts with fresh counters and settlement progress.
 		locals.game = input.game;
 		++locals.game.roundNumber;
 		locals.game.startAt = input.nextStartAt;
@@ -5784,6 +6259,10 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Completes retryable creator payouts, decides continuation and commits the terminal round result.
+	 * @note Preserves unreclaimed history and pending liabilities on failure; funds continuing rounds before commit.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(FinalizeGame)
 	{
 		// Reserve a result slot before transfers so unreclaimed ticket chains can never become unreachable.
@@ -5791,6 +6270,7 @@ private:
 		locals.progress = state.get().settlements.get(input.slot);
 		locals.resultIndex = mod(state.get().resultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
 		locals.previousResult = state.get().results.get(static_cast<uint16>(locals.resultIndex));
+		// Preserve the only historical link to tickets that have not been reclaimed.
 		if (locals.previousResult.resultSequence != 0 && locals.previousResult.detailsAvailable && locals.previousResult.firstTicketLink != 0)
 		{
 			// Preserve the only link to unreclaimed tickets; background reclamation will unblock finalization.
@@ -5810,11 +6290,13 @@ private:
 		locals.payoutsInput.slot = input.slot;
 		CALL(DrainFinalizationPayouts, locals.payoutsInput, locals.payoutsOutput);
 		locals.game = locals.payoutsOutput.game;
+		// Keep finalization retryable until all creator credits have drained.
 		if (locals.payoutsOutput.returnCode != EReturnCode::SUCCESS)
 		{
 			output.returnCode = locals.payoutsOutput.returnCode;
 			return;
 		}
+		// Evaluate next-round funding only when no stop reason is fixed.
 		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
 		{
 			// Returned pools and creator revenue are available before deciding whether the next round is affordable.
@@ -5835,10 +6317,12 @@ private:
 			locals.fundingInput.ownershipManagingContractIndex = locals.game.ownershipManagingContractIndex;
 			locals.fundingInput.possessionManagingContractIndex = locals.game.possessionManagingContractIndex;
 			CALL(FundRoundFromWallet, locals.fundingInput, locals.fundingOutput);
+			// Stop continuation when the owner cannot afford the next round.
 			if (locals.fundingOutput.returnCode == EReturnCode::INSUFFICIENT_FUNDS)
 			{
 				locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
 			}
+			// Among funding errors, only insufficient funds stops the game; other errors keep finalization retryable.
 			else if (locals.fundingOutput.returnCode != EReturnCode::SUCCESS)
 			{
 				output.returnCode = locals.fundingOutput.returnCode;
@@ -5858,32 +6342,44 @@ private:
 		output.returnCode = locals.commitOutput.returnCode;
 	}
 
+	/**
+	 * @brief Releases creator and asset references and links a stopped game slot into the free list.
+	 * @note Requires completed finalization; historical ticket chains remain owned by round results.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ClearGameSlot)
 	{
 		locals.game = state.get().games.get(input.slot);
+		// Release wallet references only if the owner record is still present.
 		if (state.get().wallets.get(locals.game.owner, locals.wallet))
 		{
+			// Decrease the active-game count without unsigned underflow.
 			if (locals.wallet.activeGameCount > 0)
 			{
 				--locals.wallet.activeGameCount;
 			}
+			// Unlock service credit after the owner's final active game is released.
 			if (locals.wallet.activeGameCount == 0)
 			{
 				locals.wallet.serviceCreditUnlocked = true;
 			}
+			// Release the currency-position reference held by a stopped asset game.
 			if (locals.game.currencyMode == ECurrencyMode::ASSET)
 			{
 				locals.walletAssetFound = findWalletAsset(locals.wallet, locals.game.currencyAsset, locals.i, locals.walletAsset);
+				// Remember the matched asset position for updating its reference count.
 				if (locals.walletAssetFound)
 				{
 					locals.walletAssetSlot = static_cast<uint8>(locals.i);
 				}
+				// Update only the currency position actually found in the owner wallet.
 				if (locals.walletAssetFound)
 				{
+					// Decrease asset game references without unsigned underflow.
 					if (locals.walletAsset.activeGameReferences > 0)
 					{
 						--locals.walletAsset.activeGameReferences;
 					}
+					// Remove an asset position only when both its balance and references are empty.
 					if (locals.walletAsset.activeGameReferences == 0 && locals.walletAsset.balance == 0)
 					{
 						setMemory(locals.walletAsset, 0);
@@ -5894,13 +6390,16 @@ private:
 			}
 			state.mut().wallets.replace(locals.game.owner, locals.wallet);
 		}
+		// Release the stopped game's shared asset-accounting reference.
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.assetAccountingLink > 0)
 		{
 			locals.assetAccounting = state.get().assetAccounting.get(locals.game.assetAccountingLink - 1);
+			// Decrease the shared active-game count without unsigned underflow.
 			if (locals.assetAccounting.activeGameCount > 0)
 			{
 				--locals.assetAccounting.activeGameCount;
 			}
+			// Keep shared asset accounting alive until both game references and all unpaid platform accruals are gone.
 			if (locals.assetAccounting.activeGameCount == 0 && locals.assetAccounting.developer1Accrued == 0 &&
 			    locals.assetAccounting.developer2Accrued == 0 && locals.assetAccounting.dividendAccrued == 0)
 			{
@@ -5912,6 +6411,7 @@ private:
 		setMemory(locals.emptyProgress, 0);
 		state.mut().games.set(input.slot, locals.emptyGame);
 		state.mut().settlements.set(input.slot, locals.emptyProgress);
+		// Decrease the global active-game count without unsigned underflow.
 		if (state.get().activeGameCount > 0)
 		{
 			state.mut().activeGameCount = state.get().activeGameCount - 1;
@@ -5920,10 +6420,15 @@ private:
 		state.mut().freeGameHead = input.slot + 1;
 	}
 
+	/**
+	 * @brief Applies time-based lifecycle changes and advances settlement within the ticket action budget.
+	 * @note Retries frozen finalization first; returns consumed ticket actions and the processing status.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ProcessGame)
 	{
 		output.actionsUsed = 0;
 		locals.game = state.get().games.get(input.slot);
+		// Resume frozen liabilities before evaluating sales timing or starting any new settlement work.
 		if (locals.game.status == EGameStatus::FINALIZING)
 		{
 			locals.finalizeInput.slot = input.slot;
@@ -5936,11 +6441,13 @@ private:
 		locals.lifecycleInput.game = locals.game;
 		locals.lifecycleInput.now = locals.now;
 		evaluateGameLifecycle(locals.lifecycleInput, locals.lifecycleOutput);
+		// Persist the transition when a scheduled game becomes ready for sales.
 		if (locals.lifecycleOutput.action == EGameLifecycleAction::OPEN_SALES)
 		{
 			locals.game.status = locals.lifecycleOutput.effectiveStatus;
 			state.mut().games.set(input.slot, locals.game);
 		}
+		// Finalize an elapsed round with no tickets without generating a draw.
 		if (locals.lifecycleOutput.action == EGameLifecycleAction::FINALIZE_NO_TICKETS)
 		{
 			locals.finalizeInput.slot = input.slot;
@@ -5949,6 +6456,7 @@ private:
 			output.returnCode = locals.finalizeOutput.returnCode;
 			return;
 		}
+		// Freeze the draw inputs when the lifecycle requires settlement.
 		if (locals.lifecycleOutput.action == EGameLifecycleAction::BEGIN_SETTLEMENT)
 		{
 			locals.game.status = EGameStatus::CLOSED;
@@ -5956,6 +6464,7 @@ private:
 			locals.beginInput.slot = input.slot;
 			CALL(BeginSettlement, locals.beginInput, locals.beginOutput);
 		}
+		// Spend ticket work only on active counting or payment phases.
 		if (input.actionBudget > 0 &&
 		    (state.get().games.get(input.slot).status == EGameStatus::COUNTING || state.get().games.get(input.slot).status == EGameStatus::PAYING))
 		{
@@ -5969,10 +6478,16 @@ private:
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
+	/**
+	 * @brief Recycles completed result ticket chains within bounded ticket and history-scan work.
+	 * @note Expires details before reuse and preserves the reclaim cursor across calls; returns consumed ticket actions.
+	 */
 	PRIVATE_PROCEDURE_WITH_LOCALS(ReclaimCompletedTickets)
 	{
 		// Preserve the guaranteed history window unless ticket pressure requires reclaiming older details.
 		output.actionsUsed = 0;
+
+		// Preserve recent details while spare ticket capacity permits deferred reclamation.
 		if (!state.get().reclaimingTickets &&
 		    (state.get().freeTicketCount > 0 || state.get().nextUnusedTicketSlot < state.get().tickets.capacity()) &&
 		    state.get().resultCounter - state.get().reclaimResultCounter < PLDT_RESULT_HISTORY_SIZE)
@@ -5982,15 +6497,18 @@ private:
 
 		locals.budget = input.actionBudget;
 		locals.resultScans = 0;
+
 		// Mark a result's details unavailable before recycling its ticket chain, preserving lookup consistency.
 		while (locals.budget > 0 && locals.resultScans < PLDT_SETTLEMENT_ACTION_BUDGET)
 		{
+			// Find the next reclaimable result without exceeding the history-scan budget.
 			while (!state.get().reclaimingTickets && state.get().reclaimResultCounter < state.get().resultCounter &&
 			       locals.resultScans < PLDT_SETTLEMENT_ACTION_BUDGET)
 			{
 				locals.resultIndex = mod(state.get().reclaimResultCounter, static_cast<uint64>(PLDT_RESULT_STORAGE_SIZE));
 				locals.result = state.get().results.get(static_cast<uint16>(locals.resultIndex));
 				++locals.resultScans;
+				// Expire only the matching historical sequence before reclaiming its ticket chain.
 				if (locals.result.resultSequence == state.get().reclaimResultCounter + 1 && locals.result.detailsAvailable &&
 				    locals.result.firstTicketLink != 0)
 				{
@@ -6003,15 +6521,18 @@ private:
 				state.mut().reclaimResultCounter = state.get().reclaimResultCounter + 1;
 			}
 
+			// Stop the pass if no reclaimable ticket chain was found.
 			if (!state.get().reclaimingTickets)
 			{
 				break;
 			}
 
+			// Recycle linked ticket slots until the chain ends or the action budget runs out.
 			while (state.get().reclaimTicketLink != 0 && locals.budget > 0)
 			{
 				locals.ticketSlot = state.get().reclaimTicketLink - 1;
 				locals.ticket = state.get().tickets.get(locals.ticketSlot);
+				// Save the history-chain successor before repurposing nextLink as the free-list link.
 				locals.nextLink = locals.ticket.nextLink;
 				locals.ticket.nextLink = state.get().freeTicketHead;
 				state.mut().tickets.set(locals.ticketSlot, locals.ticket);
@@ -6021,6 +6542,7 @@ private:
 				--locals.budget;
 			}
 
+			// Advance to the next result only after the entire ticket chain is reclaimed.
 			if (state.get().reclaimTicketLink == 0)
 			{
 				state.mut().reclaimingTickets = false;
@@ -6037,14 +6559,18 @@ private:
 	/** Finds an active wallet asset and returns its slot and value through caller-owned storage. */
 	static bool findWalletAsset(const CreatorWallet& wallet, const Asset& asset, uint64& index, WalletAssetBalance& walletAsset)
 	{
+		// Search all wallet asset positions for the requested issuance.
 		for (index = 0; index < wallet.assets.capacity(); ++index)
 		{
 			walletAsset = wallet.assets.get(index);
+
+			// Return only an active position with matching asset identity.
 			if (walletAsset.isActive && isSameAsset(walletAsset.asset, asset))
 			{
 				return true;
 			}
 		}
+
 		return false;
 	}
 
@@ -6067,15 +6593,19 @@ private:
 	/** Debits the fixed creator-operation fee, consuming service credit before refundable Qubic. */
 	static bool debitWalletOperationFee(CreatorWallet& wallet)
 	{
+		// Pay the operation fee entirely from service credit when possible.
 		if (wallet.serviceCredit >= PLDT_OPERATION_FEE)
 		{
 			wallet.serviceCredit -= PLDT_OPERATION_FEE;
 			return true;
 		}
+
+		// Reject the fee before debiting if refundable QU cannot cover the shortfall.
 		if (wallet.refundableQubic < PLDT_OPERATION_FEE - wallet.serviceCredit)
 		{
 			return false;
 		}
+
 		wallet.refundableQubic -= PLDT_OPERATION_FEE - wallet.serviceCredit;
 		wallet.serviceCredit = 0;
 		return true;
@@ -6086,10 +6616,13 @@ private:
 	                                    uint16& slot, Game& game)
 	{
 		slot = gameSlot(gameId);
+
+		// Reject invalid game identity before checking owner authorization.
 		if (!isGameIdValid(state, gameId))
 		{
 			return EReturnCode::INVALID_GAME;
 		}
+
 		game = state.get().games.get(slot);
 		return game.owner == owner ? EReturnCode::SUCCESS : EReturnCode::ACCESS_DENIED;
 	}
