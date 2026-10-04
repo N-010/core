@@ -55,24 +55,24 @@ constexpr uint32 PLDT_TIER_BPS_SCALE = 10000;
 constexpr uint32 PLDT_BONUS_MULTIPLIER_SCALE = 10000;
 /** Largest supported bonus winner weight, in basis points. */
 constexpr uint32 PLDT_MAX_BONUS_MULTIPLIER_BPS = 100000;
-/** Ticket-price percentage accrued to platform recipients. */
-constexpr uint8 PLDT_PLATFORM_FEE_PERCENT = 3;
-/** Ticket-price percentage removed from circulation. */
-constexpr uint8 PLDT_BURN_PERCENT = 5;
-/** Absolute creator-fee ceiling after reserving the burn share. */
-constexpr uint8 PLDT_MAX_CREATOR_FEE_PERCENT = 100 - PLDT_BURN_PERCENT;
+/** Initial ticket-price percentage accrued to platform recipients. */
+constexpr uint8 PLDT_DEFAULT_PLATFORM_FEE_PERCENT = 3;
+/** Initial percentage of net ticket revenue removed from circulation. */
+constexpr uint8 PLDT_DEFAULT_BURN_PERCENT = 1;
 /** Developer-one share of the platform fee, in percent. */
 constexpr uint8 PLDT_PLATFORM_DEV1_SHARE_PERCENT = 25;
 /** Developer-two share of the platform fee, in percent. */
 constexpr uint8 PLDT_PLATFORM_DEV2_SHARE_PERCENT = 25;
-/** Initial owner-configurable ceiling for creator fees. */
+/** Initial shareholder-configurable ceiling for creator fees. */
 constexpr uint8 PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT = 20;
 /** Default Qubic automation fee reserved per game round. */
 constexpr uint64 PLDT_DEFAULT_ROUND_FEE = 10000;
 /** Default restricted service credit required to open a creator wallet. */
 constexpr uint64 PLDT_DEFAULT_WALLET_CREATION_FEE = 1000000;
-/** Fee burned by creator game-management mutations after authorization. */
-constexpr uint64 PLDT_OPERATION_FEE = 100;
+/** Initial QU fee burned by creator game-management mutations after authorization. */
+constexpr uint64 PLDT_DEFAULT_OPERATION_FEE = 1000;
+/** Minimum shareholder-configurable fee in native Qubic units. */
+constexpr uint64 PLDT_MIN_QU_FEE = 1000;
 /** Maximum number of creator wallets retained in contract state. */
 constexpr uint16 PLDT_MAX_WALLETS = 1024;
 /** Internal power-of-two wallet map capacity kept below its high-load range. */
@@ -118,6 +118,19 @@ struct PLDT2
 struct PLDT : public ContractBase
 {
 public:
+	DEFINE_SHAREHOLDER_PROPOSAL_TYPES(16, PLDT_CONTRACT_ASSET_NAME);
+
+	/** Stable variable identifiers in Qubic VariableYesNo proposals. */
+	enum class EEconomicParameter : uint8
+	{
+		PLATFORM_FEE_PERCENT = 0,
+		BURN_PERCENT = 1,
+		MAX_CREATOR_FEE_PERCENT = 2,
+		ROUND_FEE = 3,
+		WALLET_CREATION_FEE = 4,
+		OPERATION_FEE = 5,
+	};
+
 	/** Prize-category weights in basis points; split storage preserves the public ABI. */
 	struct TierWeightMatrix
 	{
@@ -256,6 +269,8 @@ public:
 		OUT_OF_FUNDS,
 		/** The next round would exceed DateAndTime limits. */
 		SCHEDULE_EXHAUSTED,
+		/** Shareholder-approved economics do not permit another round. */
+		ECONOMICS_INCOMPATIBLE,
 	};
 
 	/** Currency custody mechanism used for tickets and payouts. */
@@ -431,6 +446,10 @@ public:
 		uint8 maxDigit;
 		/** Ticket-price percentage reserved for the game creator. */
 		uint8 creatorFeePercent;
+		/** Platform percentage fixed when this round opens. */
+		uint8 platformFeePercentSnapshot;
+		/** Net-revenue burn percentage fixed when this round opens. */
+		uint8 burnPercentSnapshot;
 		/** Selects native Qubic custody or managed asset-share custody. */
 		ECurrencyMode currencyMode;
 		/** Game lifetime model: one-shot or permanent. */
@@ -499,6 +518,8 @@ public:
 		uint64 roundNumber;
 		/** Monotonic publication sequence assigned to this result. */
 		uint64 resultSequence;
+		/** QU fee charged when the historical round opened. */
+		uint64 roundFeeSnapshot;
 		/** Tick at which the round result was finalized. */
 		uint32 settledTick;
 		/** Prize-pool weights for every exact/misplaced tier, in basis points. */
@@ -511,6 +532,10 @@ public:
 		Array<uint8, PLDT_DIGITS_ALIGNED> winningDigits;
 		/** Number of meaningful digits in every code for this game. */
 		uint8 codeLength;
+		/** Platform percentage used by the historical round. */
+		uint8 platformFeePercentSnapshot;
+		/** Net-revenue burn percentage used by the historical round. */
+		uint8 burnPercentSnapshot;
 		/** Selects native Qubic custody or managed asset-share custody. */
 		ECurrencyMode currencyMode;
 		/** Game lifetime model: one-shot or permanent. */
@@ -635,6 +660,8 @@ public:
 	/** All consensus-persistent PulseEditor state; field order is ABI-sensitive. */
 	struct StateData
 	{
+		/** Native Qubic proposal storage, including per-proposal shareholder snapshots. */
+		ProposalVotingT proposals;
 		/** Creator funding ledgers indexed by creator identity. */
 		HashMap<id, CreatorWallet, PLDT_WALLET_MAP_CAPACITY> wallets;
 		/** Generation-aware game records indexed by game slot. */
@@ -669,6 +696,8 @@ public:
 		uint64 roundFee;
 		/** Service credit retained when a new creator wallet is opened. */
 		uint64 walletCreationFee;
+		/** Current QU fee burned by an authorized creator mutation. */
+		uint64 operationFee;
 		/** Number of tickets accepted for the current request or round. */
 		uint64 ticketCount;
 		/** First ticket slot that has never been allocated, or zero before initialization. */
@@ -695,8 +724,10 @@ public:
 		uint16 walletAutomationCursor;
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
-		/** Owner-configurable upper bound for creatorFeePercent. */
+		/** Shareholder-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
+		/** Share of net ticket revenue burned by newly opened rounds. */
+		uint8 burnPercent;
 		/** Whether background cleanup is traversing this result's ticket chain. */
 		bit reclaimingTickets;
 	};
@@ -1008,6 +1039,8 @@ public:
 		uint64 roundFee;
 		/** Service credit required to open a new creator wallet. */
 		uint64 walletCreationFee;
+		/** Current fee burned by creator mutations, in QU. */
+		uint64 operationFee;
 		/** Number of tickets accepted for the current request or round. */
 		uint64 ticketCount;
 		/** Monotonic sequence used to order and place published results. */
@@ -1018,8 +1051,10 @@ public:
 		uint16 walletCount;
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
-		/** Owner-configurable upper bound for creatorFeePercent. */
+		/** Shareholder-configurable upper bound for creatorFeePercent. */
 		uint8 maxCreatorFeePercent;
+		/** Current burn percentage of net ticket revenue. */
+		uint8 burnPercent;
 	};
 
 	/** Validated data consumed by the set platform config operation. */
@@ -1031,12 +1066,6 @@ public:
 		id developer1;
 		/** Second configured recipient of platform developer fees. */
 		id developer2;
-		/** Qubic charged from the creator wallet for each round. */
-		uint64 roundFee;
-		/** Service credit required to open creator wallets after this update. */
-		uint64 walletCreationFee;
-		/** Owner-configurable upper bound for creatorFeePercent. */
-		uint8 maxCreatorFeePercent;
 	};
 
 	/** Result data produced by the set platform config operation. */
@@ -1510,6 +1539,8 @@ public:
 		uint8 creatorFeePercent;
 		/** Ticket-price percentage reserved for platform recipients. */
 		uint8 platformFeePercent;
+		/** Burn percentage of net ticket revenue. */
+		uint8 burnPercent;
 	};
 
 	/** Result data produced by the calculate ticket economics operation. */
@@ -2657,6 +2688,12 @@ public:
 		GameResult previousResult;
 		/** Game stored by this structure. */
 		Game game;
+		/** Uncommitted next-round economics; the completed round remains intact for history and retries. */
+		Game nextGame;
+		/** Candidate ticket split for next-round compatibility checks. */
+		CalculateTicketEconomics_output economicsOutput;
+		/** Ticket price and percentages for the candidate next round. */
+		CalculateTicketEconomics_input economicsInput;
 		/** Result index stored by this structure. */
 		uint64 resultIndex;
 	};
@@ -3007,8 +3044,77 @@ public:
 		bit failed;
 	};
 
+	using SetShareholderProposal_input = ProposalDataT;
+	using SetShareholderProposal_output = uint16;
+
+	/**
+	 * @brief Sets or clears the caller's economic proposal using native shareholder authorization.
+	 * @param input VariableYesNo proposal; epoch zero clears the caller's proposal.
+	 * @param output Native proposal index, or INVALID_PROPOSAL_INDEX on failure.
+	 * @note No proposal fee; attached QU are refunded before any proposal mutation.
+	 */
+	PUBLIC_PROCEDURE(SetShareholderProposal)
+	{
+		output = INVALID_PROPOSAL_INDEX;
+		if (qpi.invocationReward() > 0 && qpi.transfer(qpi.invocator(), qpi.invocationReward()) < 0)
+		{
+			return;
+		}
+		if (input.epoch != 0 && (input.type != ProposalTypes::VariableYesNo ||
+		                         !isEconomicValueValid(state.get(), input.data.variableOptions.variable, input.data.variableOptions.value)))
+		{
+			return;
+		}
+
+		output = qpi(state.mut().proposals).setProposal(qpi.invocator(), input);
+	}
+
+	IMPLEMENT_GetShareholderProposalFees(0);
+	IMPLEMENT_GetShareholderProposal();
+	IMPLEMENT_GetShareholderProposalIndices();
+	IMPLEMENT_SetShareholderVotes();
+	IMPLEMENT_GetShareholderVotes();
+	IMPLEMENT_GetShareholderVotingResults();
+	IMPLEMENT_SET_SHAREHOLDER_PROPOSAL();
+	IMPLEMENT_SET_SHAREHOLDER_VOTES();
+
+	IMPLEMENT_FinalizeShareholderStateVarProposals()
+	{
+		// Revalidate in proposal-index order: an earlier accepted proposal can change the allowed range.
+		if (input.proposal.type != ProposalTypes::VariableYesNo ||
+		    !isEconomicValueValid(state.get(), input.proposal.data.variableOptions.variable, input.acceptedValue))
+		{
+			return;
+		}
+
+		switch (static_cast<EEconomicParameter>(input.proposal.data.variableOptions.variable))
+		{
+			case EEconomicParameter::PLATFORM_FEE_PERCENT:
+				state.mut().platformFeePercent = static_cast<uint8>(input.acceptedValue);
+				break;
+			case EEconomicParameter::BURN_PERCENT:
+				state.mut().burnPercent = static_cast<uint8>(input.acceptedValue);
+				break;
+			case EEconomicParameter::MAX_CREATOR_FEE_PERCENT:
+				state.mut().maxCreatorFeePercent = static_cast<uint8>(input.acceptedValue);
+				break;
+			case EEconomicParameter::ROUND_FEE:
+				state.mut().roundFee = static_cast<uint64>(input.acceptedValue);
+				break;
+			case EEconomicParameter::WALLET_CREATION_FEE:
+				state.mut().walletCreationFee = static_cast<uint64>(input.acceptedValue);
+				break;
+			case EEconomicParameter::OPERATION_FEE:
+				state.mut().operationFee = static_cast<uint64>(input.acceptedValue);
+				break;
+		}
+	}
+
+	END_EPOCH() { CALL(FinalizeShareholderStateVarProposals, input, output); }
+
 	REGISTER_USER_FUNCTIONS_AND_PROCEDURES()
 	{
+		REGISTER_SHAREHOLDER_PROPOSAL_VOTING();
 		REGISTER_USER_PROCEDURE(CreateGame, 1);
 		REGISTER_USER_PROCEDURE(CreateWallet, 2);
 		REGISTER_USER_PROCEDURE(UpdateGameEconomics, 5);
@@ -3039,7 +3145,9 @@ public:
 		state.mut().platformOwner =
 		    ID(_R, _O, _J, _V, _A, _E, _M, _F, _B, _X, _X, _Y, _N, _G, _A, _U, _A, _U, _I, _I, _X, _L, _B, _U, _P, _D, _H, _C, _D, _P, _E, _S, _Y, _Z,
 		       _O, _V, _W, _U, _Y, _E, _C, _B, _Q, _V, _Z, _R, _F, _T, _K, _A, _G, _S, _H, _T, _N, _A);
-		state.mut().platformFeePercent = PLDT_PLATFORM_FEE_PERCENT;
+		state.mut().platformFeePercent = PLDT_DEFAULT_PLATFORM_FEE_PERCENT;
+		state.mut().burnPercent = PLDT_DEFAULT_BURN_PERCENT;
+		state.mut().operationFee = PLDT_DEFAULT_OPERATION_FEE;
 		state.mut().maxCreatorFeePercent = PLDT_DEFAULT_MAX_CREATOR_FEE_PERCENT;
 		state.mut().roundFee = PLDT_DEFAULT_ROUND_FEE;
 		state.mut().walletCreationFee = PLDT_DEFAULT_WALLET_CREATION_FEE;
@@ -3485,13 +3593,13 @@ public:
 			return;
 		}
 		// Reject management work that cannot pay its operation fee.
-		if (!debitWalletOperationFee(locals.wallet))
+		if (!debitWalletOperationFee(locals.wallet, state.get().operationFee))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
 		// Report a failed operation-fee burn before continuing creation.
-		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		if (qpi.burn(static_cast<sint64>(state.get().operationFee)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
@@ -3579,13 +3687,13 @@ public:
 			return;
 		}
 		// Require enough wallet funds for the operation fee.
-		if (!debitWalletOperationFee(locals.wallet))
+		if (!debitWalletOperationFee(locals.wallet, state.get().operationFee))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
 		// Stop the update if the operation-fee burn fails.
-		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		if (qpi.burn(static_cast<sint64>(state.get().operationFee)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
@@ -3625,6 +3733,7 @@ public:
 		locals.economicsInput.ticketPrice = input.ticketPrice;
 		locals.economicsInput.creatorFeePercent = input.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		locals.economicsInput.burnPercent = state.get().burnPercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		// Reject asset economics whose required burn cannot use the null issuer.
 		if (locals.game.currencyMode == ECurrencyMode::ASSET && locals.game.currencyAsset.issuer == NULL_ID && locals.economicsOutput.burn > 0)
@@ -3681,13 +3790,13 @@ public:
 			return;
 		}
 		// Reject a stop request that cannot pay the operation fee.
-		if (!debitWalletOperationFee(locals.wallet))
+		if (!debitWalletOperationFee(locals.wallet, state.get().operationFee))
 		{
 			output.returnCode = EReturnCode::INSUFFICIENT_FUNDS;
 			return;
 		}
 		// Stop processing if the operation-fee burn fails.
-		if (qpi.burn(static_cast<sint64>(PLDT_OPERATION_FEE)) < 0)
+		if (qpi.burn(static_cast<sint64>(state.get().operationFee)) < 0)
 		{
 			output.returnCode = EReturnCode::TRANSFER_FAILED;
 			return;
@@ -4027,6 +4136,8 @@ public:
 		output.dividendAccrued = state.get().dividendAccrued;
 		output.roundFee = state.get().roundFee;
 		output.walletCreationFee = state.get().walletCreationFee;
+		output.operationFee = state.get().operationFee;
+		output.burnPercent = state.get().burnPercent;
 		output.ticketCount = state.get().ticketCount;
 		output.resultCounter = state.get().resultCounter;
 		output.activeGameCount = state.get().activeGameCount;
@@ -4064,7 +4175,7 @@ public:
 	}
 
 	/**
-	 * @brief Sets platform ownership, recipients, and creator-fee limit.
+	 * @brief Sets platform ownership and developer recipient addresses.
 	 * @param input New governance configuration.
 	 * @param output Result code.
 	 */
@@ -4078,37 +4189,25 @@ public:
 			output.returnCode = locals.refundOutput.returnCode;
 			return;
 		}
-		// Restrict platform configuration to the current platform owner.
-		if (state.get().platformOwner != qpi.invocator())
-		{
-			output.returnCode = EReturnCode::ACCESS_DENIED;
-			return;
-		}
+
 		// Require usable governance and developer recipient addresses.
 		if (input.platformOwner == NULL_ID || input.developer1 == NULL_ID || input.developer2 == NULL_ID)
 		{
 			output.returnCode = EReturnCode::INVALID_VALUE;
 			return;
 		}
-		// Keep wallet and round fees positive and within transfer bounds.
-		if (input.roundFee == 0 || input.roundFee > PLDT_MAX_TRANSFER_AMOUNT || input.walletCreationFee == 0 ||
-		    input.walletCreationFee > PLDT_MAX_TRANSFER_AMOUNT)
+
+		// Restrict platform configuration to the current platform owner.
+		if (state.get().platformOwner != qpi.invocator())
 		{
-			output.returnCode = EReturnCode::INVALID_VALUE;
+			output.returnCode = EReturnCode::ACCESS_DENIED;
 			return;
 		}
-		// Preserve the burn share when setting the maximum creator fee.
-		if (input.maxCreatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT)
-		{
-			output.returnCode = EReturnCode::INVALID_VALUE;
-			return;
-		}
+
 		state.mut().platformOwner = input.platformOwner;
 		state.mut().developer1 = input.developer1;
 		state.mut().developer2 = input.developer2;
-		state.mut().roundFee = input.roundFee;
-		state.mut().walletCreationFee = input.walletCreationFee;
-		state.mut().maxCreatorFeePercent = input.maxCreatorFeePercent;
+
 		output.returnCode = EReturnCode::SUCCESS;
 	}
 
@@ -4483,7 +4582,7 @@ private:
 		}
 		// Bound creator fees and the number of qualifying bonus assets.
 		if (input.configuration.creatorFeePercent > state.get().maxCreatorFeePercent ||
-		    input.configuration.creatorFeePercent > PLDT_MAX_CREATOR_FEE_PERCENT || input.configuration.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
+		    input.configuration.creatorFeePercent > 100 - state.get().burnPercent || input.configuration.bonusAssetCount > PLDT_MAX_BONUS_ASSETS)
 		{
 			return;
 		}
@@ -4565,6 +4664,7 @@ private:
 		locals.economicsInput.ticketPrice = input.configuration.ticketPrice;
 		locals.economicsInput.creatorFeePercent = input.configuration.creatorFeePercent;
 		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		locals.economicsInput.burnPercent = state.get().burnPercent;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		// Reject null-issuer asset currency when the economics require a burn.
 		if (input.configuration.currencyMode == ECurrencyMode::ASSET && input.configuration.currencyAsset.issuer == NULL_ID &&
@@ -4583,7 +4683,7 @@ private:
 		}
 		output.preview.platformFee = locals.economicsOutput.platformFee;
 		output.preview.roundFee = state.get().roundFee;
-		output.preview.operationFee = PLDT_OPERATION_FEE;
+		output.preview.operationFee = state.get().operationFee;
 		// Include the seed in initial QU funding only for QU games.
 		if (input.configuration.currencyMode == ECurrencyMode::QUBIC)
 		{
@@ -4843,6 +4943,8 @@ private:
 		locals.game.creatorPrizeSeed = input.configuration.creatorPrizeSeed;
 		locals.game.prizePool = input.configuration.creatorPrizeSeed;
 		locals.game.roundFeeSnapshot = state.get().roundFee;
+		locals.game.platformFeePercentSnapshot = state.get().platformFeePercent;
+		locals.game.burnPercentSnapshot = state.get().burnPercent;
 		locals.game.roundDurationMicroseconds = input.configuration.startAt.durationMicrosec(input.configuration.drawAt);
 		locals.game.bonusMultiplierBps = input.configuration.bonusMultiplierBps;
 		locals.game.ticketLimit = input.configuration.ticketLimit;
@@ -4900,7 +5002,7 @@ private:
 		output.platformFee = mulDiv(input.ticketPrice, input.platformFeePercent, 100ULL);
 		output.net = input.ticketPrice - output.platformFee;
 		output.creatorFee = mulDiv(output.net, input.creatorFeePercent, 100ULL);
-		output.burn = mulDiv(output.net, PLDT_BURN_PERCENT, 100ULL);
+		output.burn = mulDiv(output.net, input.burnPercent, 100ULL);
 		output.prizeContribution = output.net - output.creatorFee - output.burn;
 		calculatePlatformShares(output.platformFee, output.developer1Fee, output.developer2Fee, output.dividendFee);
 	}
@@ -4992,7 +5094,8 @@ private:
 		}
 		locals.economicsInput.ticketPrice = output.game.ticketPrice;
 		locals.economicsInput.creatorFeePercent = output.game.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		locals.economicsInput.platformFeePercent = output.game.platformFeePercentSnapshot;
+		locals.economicsInput.burnPercent = output.game.burnPercentSnapshot;
 		calculateTicketEconomics(locals.economicsInput, output.economics);
 		// Reject batches that would exceed round revenue or prize-pool bounds.
 		if (output.game.totalRevenue > PLDT_MAX_TRANSFER_AMOUNT - output.totalPrice ||
@@ -5429,7 +5532,8 @@ private:
 	{
 		locals.economicsInput.ticketPrice = input.game.ticketPrice;
 		locals.economicsInput.creatorFeePercent = input.game.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		locals.economicsInput.platformFeePercent = input.game.platformFeePercentSnapshot;
+		locals.economicsInput.burnPercent = input.game.burnPercentSnapshot;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		locals.totalBurn = smul(locals.economicsOutput.burn, static_cast<uint64>(input.ticketCount));
 		// Avoid invoking a burn operation for a zero burn share.
@@ -5463,7 +5567,8 @@ private:
 		locals.game = state.get().games.get(locals.slot);
 		locals.economicsInput.ticketPrice = locals.game.ticketPrice;
 		locals.economicsInput.creatorFeePercent = locals.game.creatorFeePercent;
-		locals.economicsInput.platformFeePercent = state.get().platformFeePercent;
+		locals.economicsInput.platformFeePercent = locals.game.platformFeePercentSnapshot;
+		locals.economicsInput.burnPercent = locals.game.burnPercentSnapshot;
 		calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
 		output.prizeContribution = locals.economicsOutput.prizeContribution;
 		// Accrue QU ticket fees in the platform's native-currency ledgers.
@@ -6228,6 +6333,9 @@ private:
 		output.result.resultSequence = state.get().resultCounter + 1;
 		output.result.prizePool = input.game.prizePool;
 		output.result.totalPaid = input.game.totalPaid;
+		output.result.roundFeeSnapshot = input.game.roundFeeSnapshot;
+		output.result.platformFeePercentSnapshot = input.game.platformFeePercentSnapshot;
+		output.result.burnPercentSnapshot = input.game.burnPercentSnapshot;
 		// Retain the chain head in history before the live game resets or its slot becomes reusable.
 		output.result.firstTicketLink = input.game.firstTicketLink;
 		output.result.settledTick = qpi.tick();
@@ -6315,44 +6423,74 @@ private:
 			output.returnCode = locals.payoutsOutput.returnCode;
 			return;
 		}
+		locals.nextGame = locals.game;
 		// Evaluate next-round funding only when no stop reason is fixed.
 		if (locals.game.finalizingStopReason == EGameStopReason::NONE)
 		{
 			// Returned pools and creator revenue are available before deciding whether the next round is affordable.
-			if (locals.game.pendingEconomics.isSet)
+			if (locals.nextGame.pendingEconomics.isSet)
 			{
-				locals.game.ticketPrice = locals.game.pendingEconomics.ticketPrice;
-				locals.game.creatorPrizeSeed = locals.game.pendingEconomics.creatorPrizeSeed;
-				locals.game.ticketLimit = locals.game.pendingEconomics.ticketLimit;
-				locals.game.playerTicketLimit = locals.game.pendingEconomics.playerTicketLimit;
-				locals.game.creatorFeePercent = locals.game.pendingEconomics.creatorFeePercent;
-				setMemory(locals.game.pendingEconomics, 0);
+				locals.nextGame.ticketPrice = locals.nextGame.pendingEconomics.ticketPrice;
+				locals.nextGame.creatorPrizeSeed = locals.nextGame.pendingEconomics.creatorPrizeSeed;
+				locals.nextGame.ticketLimit = locals.nextGame.pendingEconomics.ticketLimit;
+				locals.nextGame.playerTicketLimit = locals.nextGame.pendingEconomics.playerTicketLimit;
+				locals.nextGame.creatorFeePercent = locals.nextGame.pendingEconomics.creatorFeePercent;
+				setMemory(locals.nextGame.pendingEconomics, 0);
 			}
-			locals.fundingInput.owner = locals.game.owner;
-			locals.fundingInput.currencyAsset = locals.game.currencyAsset;
-			locals.fundingInput.currencyMode = locals.game.currencyMode;
-			locals.fundingInput.roundFee = locals.game.roundFeeSnapshot;
-			locals.fundingInput.creatorPrizeSeed = locals.game.creatorPrizeSeed;
-			locals.fundingInput.ownershipManagingContractIndex = locals.game.ownershipManagingContractIndex;
-			locals.fundingInput.possessionManagingContractIndex = locals.game.possessionManagingContractIndex;
-			CALL(FundRoundFromWallet, locals.fundingInput, locals.fundingOutput);
-			// Funding shortages stop continuation; other errors preserve retryable finalization.
-			switch (locals.fundingOutput.returnCode)
+
+			locals.nextGame.roundFeeSnapshot = state.get().roundFee;
+			locals.nextGame.platformFeePercentSnapshot = state.get().platformFeePercent;
+			locals.nextGame.burnPercentSnapshot = state.get().burnPercent;
+			// Fee reductions may increase refundable ticket revenue; recheck its bound before opening sales.
+			if (locals.nextGame.creatorFeePercent > state.get().maxCreatorFeePercent ||
+			    locals.nextGame.creatorFeePercent > 100 - locals.nextGame.burnPercentSnapshot)
 			{
-				case EReturnCode::SUCCESS:
-					break;
-				case EReturnCode::INSUFFICIENT_FUNDS:
-					locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
-					break;
-				default:
-					output.returnCode = locals.fundingOutput.returnCode;
-					return;
+				locals.game.finalizingStopReason = EGameStopReason::ECONOMICS_INCOMPATIBLE;
+			}
+			else
+			{
+				locals.economicsInput.ticketPrice = locals.nextGame.ticketPrice;
+				locals.economicsInput.creatorFeePercent = locals.nextGame.creatorFeePercent;
+				locals.economicsInput.platformFeePercent = locals.nextGame.platformFeePercentSnapshot;
+				locals.economicsInput.burnPercent = locals.nextGame.burnPercentSnapshot;
+				calculateTicketEconomics(locals.economicsInput, locals.economicsOutput);
+				if ((locals.nextGame.currencyMode == ECurrencyMode::ASSET && locals.nextGame.currencyAsset.issuer == NULL_ID &&
+				     locals.economicsOutput.burn > 0) ||
+				    sadd(locals.economicsOutput.creatorFee, locals.economicsOutput.prizeContribution) >
+				        div(PLDT_MAX_TRANSFER_AMOUNT - locals.nextGame.creatorPrizeSeed, static_cast<uint64>(locals.nextGame.ticketLimit)))
+				{
+					locals.game.finalizingStopReason = EGameStopReason::ECONOMICS_INCOMPATIBLE;
+				}
+			}
+
+			if (locals.game.finalizingStopReason == EGameStopReason::NONE)
+			{
+				locals.fundingInput.owner = locals.game.owner;
+				locals.fundingInput.currencyAsset = locals.game.currencyAsset;
+				locals.fundingInput.currencyMode = locals.game.currencyMode;
+				locals.fundingInput.roundFee = locals.nextGame.roundFeeSnapshot;
+				locals.fundingInput.creatorPrizeSeed = locals.nextGame.creatorPrizeSeed;
+				locals.fundingInput.ownershipManagingContractIndex = locals.game.ownershipManagingContractIndex;
+				locals.fundingInput.possessionManagingContractIndex = locals.game.possessionManagingContractIndex;
+				CALL(FundRoundFromWallet, locals.fundingInput, locals.fundingOutput);
+				// Funding shortages stop continuation; other errors preserve retryable finalization.
+				switch (locals.fundingOutput.returnCode)
+				{
+					case EReturnCode::SUCCESS:
+						break;
+					case EReturnCode::INSUFFICIENT_FUNDS:
+						locals.game.finalizingStopReason = EGameStopReason::OUT_OF_FUNDS;
+						break;
+					default:
+						output.returnCode = locals.fundingOutput.returnCode;
+						return;
+				}
 			}
 		}
 		locals.resultInput.game = locals.game;
 		locals.resultInput.progress = locals.progress;
 		CALL(BuildRoundResult, locals.resultInput, locals.resultOutput);
-		locals.commitInput.game = locals.game;
+		locals.commitInput.game = locals.game.finalizingStopReason == EGameStopReason::NONE ? locals.nextGame : locals.game;
 		locals.commitInput.progress = locals.progress;
 		locals.commitInput.result = locals.resultOutput.result;
 		locals.commitInput.nextStartAt = locals.scheduleOutput.nextStartAt;
@@ -6613,23 +6751,23 @@ private:
 		       developer2Accrued <= PLDT_MAX_TRANSFER_AMOUNT - developer2Increment && dividendAccrued <= PLDT_MAX_TRANSFER_AMOUNT - dividendIncrement;
 	}
 
-	/** Debits the fixed creator-operation fee, consuming service credit before refundable Qubic. */
-	static bool debitWalletOperationFee(CreatorWallet& wallet)
+	/** Debits the current creator-operation fee, consuming service credit before refundable Qubic. */
+	static bool debitWalletOperationFee(CreatorWallet& wallet, const uint64 operationFee)
 	{
 		// Pay the operation fee entirely from service credit when possible.
-		if (wallet.serviceCredit >= PLDT_OPERATION_FEE)
+		if (wallet.serviceCredit >= operationFee)
 		{
-			wallet.serviceCredit -= PLDT_OPERATION_FEE;
+			wallet.serviceCredit -= operationFee;
 			return true;
 		}
 
 		// Reject the fee before debiting if refundable QU cannot cover the shortfall.
-		if (wallet.refundableQubic < PLDT_OPERATION_FEE - wallet.serviceCredit)
+		if (wallet.refundableQubic < operationFee - wallet.serviceCredit)
 		{
 			return false;
 		}
 
-		wallet.refundableQubic -= PLDT_OPERATION_FEE - wallet.serviceCredit;
+		wallet.refundableQubic -= operationFee - wallet.serviceCredit;
 		wallet.serviceCredit = 0;
 		return true;
 	}
@@ -6682,5 +6820,30 @@ private:
 	static uint64 mulMod(const uint64 value, const uint64 multiplier, const uint64 divisor)
 	{
 		return mod(smul(mod(value, divisor), multiplier), divisor);
+	}
+
+	/** Checks one proposed value against transfer bounds and the current percentage invariant. */
+	static bool isEconomicValueValid(const StateData& current, uint64 variable, sint64 value)
+	{
+		if (value < 0 || variable > static_cast<uint64>(EEconomicParameter::OPERATION_FEE))
+		{
+			return false;
+		}
+
+		switch (static_cast<EEconomicParameter>(variable))
+		{
+			case EEconomicParameter::PLATFORM_FEE_PERCENT:
+				// Platform fees use the gross ticket price; creator fees and burn use the remaining net amount.
+				// Their percentages therefore must not be added to the platform percentage.
+				return value <= 100;
+			case EEconomicParameter::BURN_PERCENT:
+				// Reserve enough of the shared net base for any creator fee allowed by the current ceiling.
+				return value <= 100 - current.maxCreatorFeePercent;
+			case EEconomicParameter::MAX_CREATOR_FEE_PERCENT:
+				// Keep burn + maximum creator fee <= 100% of net so the prize contribution cannot underflow.
+				return value <= 100 - current.burnPercent;
+			default:
+				return value >= static_cast<sint64>(PLDT_MIN_QU_FEE) && value <= static_cast<sint64>(PLDT_MAX_TRANSFER_AMOUNT);
+		}
 	}
 };
